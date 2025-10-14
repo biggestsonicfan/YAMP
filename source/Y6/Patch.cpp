@@ -4,7 +4,7 @@
 #include "../pxd_types.h"
 #include "async_request.h"
 
-#include "../wil/common.h"
+#include "../wil/resource.h"
 #include "../Utils/MemoryMgr.h"
 #include "../Utils/Trampoline.h"
 

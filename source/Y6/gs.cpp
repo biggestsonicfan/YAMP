@@ -2,6 +2,8 @@
 
 #include "../RenderWindow.h"
 
+using Microsoft::WRL::ComPtr;
+
 namespace gs {
 
 cgs_vb* (*vb_create)(uint64_t fvf, unsigned int vertices, vb_usage_t usage, unsigned int flags, const void* p_initial_data, const char* sz_name);
@@ -98,11 +100,11 @@ HRESULT cswap_chain_common::initialize(const RenderWindow& window)
 
 	m_pDXGISwapChain = window.GetSwapChain();
 
-	wil::com_ptr<ID3D11Texture2D> swapChainBuffer;
-	HRESULT hr = m_pDXGISwapChain->GetBuffer(0, IID_PPV_ARGS(swapChainBuffer.addressof()));
+	ComPtr<ID3D11Texture2D> swapChainBuffer;
+	HRESULT hr = m_pDXGISwapChain->GetBuffer(0, IID_PPV_ARGS(swapChainBuffer.GetAddressOf()));
 	if (SUCCEEDED(hr))
 	{
-		hr = device->CreateRenderTargetView(swapChainBuffer.get(), nullptr, &m_pD3DRenderTargetView);
+		hr = device->CreateRenderTargetView(swapChainBuffer.Get(), nullptr, &m_pD3DRenderTargetView);
 		if (SUCCEEDED(hr))
 		{
 			D3D11_TEXTURE2D_DESC dsDesc;
