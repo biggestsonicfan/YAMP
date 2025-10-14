@@ -18,8 +18,6 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
-using Microsoft::WRL::ComPtr;
-
 static constexpr DXGI_FORMAT OUTPUT_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -103,12 +101,12 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 		// --- 11-on-12 device + context
 		UINT flags = gGeneral.GetSettings()->m_useD3DDebugLayer ? D3D11_CREATE_DEVICE_DEBUG : 0;
 
-		Microsoft::WRL::ComPtr<ID3D11Device> device11;
-		Microsoft::WRL::ComPtr<ID3D11DeviceContext> context11;
-		IUnknown* queues[] = { m_cmdQueue.Get() };
+		wil::com_ptr<ID3D11Device> device11;
+		wil::com_ptr<ID3D11DeviceContext> context11;
+		IUnknown* queues[] = { m_cmdQueue.get() };
 
 		THROW_IF_FAILED(D3D11On12CreateDevice(
-			m_d3d12Device.Get(),
+			m_d3d12Device.get(),
 			flags,
 			nullptr, 0,
 			queues, _countof(queues),
@@ -116,12 +114,13 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 			&device11, &context11, nullptr));
 
 		// Promote to your existing strong types
-		THROW_IF_FAILED(device11.As(&m_device));
-		THROW_IF_FAILED(context11.As(&m_deviceContext));
-		THROW_IF_FAILED(m_device.As(&m_d3d11on12));
+		m_device = std::move(device11);
+		m_deviceContext = std::move(context11);
+		m_d3d11on12 = m_device.query<ID3D11On12Device>();
+
 
 		// --- Create swap chain for the D3D12 queue
-		Microsoft::WRL::ComPtr<IDXGIFactory6> factory;
+		wil::com_ptr<IDXGIFactory6> factory;
 		THROW_IF_FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
 
 		DXGI_SWAP_CHAIN_DESC1 scd{};
@@ -133,21 +132,21 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 		scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 		scd.SampleDesc.Count = 1;
 
-		Microsoft::WRL::ComPtr<IDXGISwapChain1> sc1;
+		wil::com_ptr<IDXGISwapChain1> sc1;
 		THROW_IF_FAILED(factory->CreateSwapChainForHwnd(
-			m_cmdQueue.Get(), window.get(), &scd, nullptr, nullptr, &sc1));
+			m_cmdQueue.get(), window.get(), &scd, nullptr, nullptr, &sc1));
 
-		THROW_IF_FAILED(sc1.As(&m_swapChain));
+		m_swapChain = std::move(sc1);
 
 		// --- ImGui init remains the same (DX11 backend)
-		ImGui_ImplDX11_Init(m_device.Get(), m_deviceContext.Get());
+		ImGui_ImplDX11_Init(m_device.get(), m_deviceContext.get());
 
 		// --- Wrap backbuffers
 		CreateWrappedBackbuffers();
 		ShowWindow(window.get(), cmdShow);
 		UpdateWindow(window.get());
 
-		m_window = std::unique_ptr<std::remove_pointer_t<HWND>, hwnd_deleter>(window.release());
+		m_window = wil::unique_hwnd(window.release());
 
 		CreateRenderResources();
 		EnumerateDisplayModes();
@@ -190,20 +189,20 @@ void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src)
 	if (m_requiresClear)
 	{
 		const FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-		m_deviceContext->ClearRenderTargetView(m_backBufferRTV.Get(), clearColor);
+		m_deviceContext->ClearRenderTargetView(m_backBufferRTV.get(), clearColor);
 	}
 
-	m_deviceContext->OMSetRenderTargets(1, m_backBufferRTV.GetAddressOf(), nullptr);
+	m_deviceContext->OMSetRenderTargets(1, m_backBufferRTV.addressof(), nullptr);
 	m_deviceContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 
-	m_deviceContext->VSSetShader(m_vs.Get(), nullptr, 0);
+	m_deviceContext->VSSetShader(m_vs.get(), nullptr, 0);
 
 	const UINT Offsets[1] = { 0 };
-	m_deviceContext->IASetInputLayout(m_inputLayout.Get());
+	m_deviceContext->IASetInputLayout(m_inputLayout.get());
 	m_deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	m_deviceContext->IASetVertexBuffers(0, 1, m_vb.GetAddressOf(), &m_vbStride, Offsets);
+	m_deviceContext->IASetVertexBuffers(0, 1, m_vb.addressof(), &m_vbStride, Offsets);
 
-	m_deviceContext->PSSetShader(m_ps.Get(), nullptr, 0);
+	m_deviceContext->PSSetShader(m_ps.get(), nullptr, 0);
 	m_deviceContext->PSSetShaderResources(0, 1, &src);
 
 	m_deviceContext->RSSetViewports(1, &m_viewport);
@@ -227,9 +226,9 @@ void RenderWindow::RenderImGui()
 	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
 
-ComPtr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* device, HWND window)
+wil::com_ptr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* device, HWND window)
 {
-	ComPtr<IDXGISwapChain> swapChain;
+	wil::com_ptr<IDXGISwapChain> swapChain;
 
 	float refreshRate = gGeneral.GetSettings()->m_refreshRate;
 
@@ -244,16 +243,16 @@ ComPtr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* devi
 	swapChainDesc.OutputWindow = window;
 	swapChainDesc.Windowed = TRUE;
 
-	ComPtr<IDXGIDevice> dxgiDevice;
-	HRESULT hr = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.GetAddressOf()));
+	wil::com_ptr<IDXGIDevice> dxgiDevice;
+	HRESULT hr = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.addressof()));
 	THROW_IF_FAILED(hr);
 
-	ComPtr<IDXGIAdapter> adapter;
-	hr = dxgiDevice->GetAdapter(adapter.GetAddressOf());
+	wil::com_ptr<IDXGIAdapter> adapter;
+	hr = dxgiDevice->GetAdapter(adapter.addressof());
 	THROW_IF_FAILED(hr);
 
-	ComPtr<IDXGIFactory> factory;
-	hr = adapter->GetParent(IID_PPV_ARGS(factory.GetAddressOf()));
+	wil::com_ptr<IDXGIFactory> factory;
+	hr = adapter->GetParent(IID_PPV_ARGS(factory.addressof()));
 	THROW_IF_FAILED(hr);
 
 
@@ -261,7 +260,7 @@ ComPtr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* devi
 	for (auto swapEffect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_SWAP_EFFECT_DISCARD})
 	{
 		swapChainDesc.SwapEffect = swapEffect;
-		hr = factory->CreateSwapChain(device, &swapChainDesc, swapChain.ReleaseAndGetAddressOf());
+		hr = factory->CreateSwapChain(device, &swapChainDesc, swapChain.put());
 		if (SUCCEEDED(hr))
 		{
 			break;
@@ -274,7 +273,7 @@ ComPtr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* devi
 
 void RenderWindow::CreateRenderResources()
 {
-	ID3D11Device* device = m_device.Get();
+	ID3D11Device* device = m_device.get();
 
 	// Create shaders
 	static const uint8_t vs_main[] =
@@ -375,14 +374,14 @@ void RenderWindow::CreateRenderResources()
 		  0,   0,   0,   0,   0,   0, 
 		  0,   0,   0,   0
 	};
-	HRESULT hr = device->CreateVertexShader(vs_main, sizeof(vs_main), nullptr, m_vs.GetAddressOf());
+	HRESULT hr = device->CreateVertexShader(vs_main, sizeof(vs_main), nullptr, m_vs.addressof());
 	THROW_IF_FAILED(hr);
 
 	const D3D11_INPUT_ELEMENT_DESC inputElements[] = {
 		{ "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
-	hr = device->CreateInputLayout(inputElements, std::size(inputElements), vs_main, sizeof(vs_main), m_inputLayout.GetAddressOf());
+	hr = device->CreateInputLayout(inputElements, std::size(inputElements), vs_main, sizeof(vs_main), m_inputLayout.addressof());
 	THROW_IF_FAILED(hr);
 
 	static const uint8_t ps_main[] =
@@ -488,7 +487,7 @@ void RenderWindow::CreateRenderResources()
 		  0,   0,   0,   0,   0,   0, 
 		  0,   0,   0,   0,   0,   0
 	};
-	hr = device->CreatePixelShader(ps_main, sizeof(ps_main), nullptr, m_ps.GetAddressOf());
+	hr = device->CreatePixelShader(ps_main, sizeof(ps_main), nullptr, m_ps.addressof());
 	THROW_IF_FAILED(hr);
 
 	// Create a vertex buffer
@@ -512,7 +511,7 @@ void RenderWindow::CreateRenderResources()
 		desc.MiscFlags = 0;
 
 		const D3D11_SUBRESOURCE_DATA initData { vertexBuffer };
-		hr = device->CreateBuffer(&desc, &initData, m_vb.GetAddressOf());
+		hr = device->CreateBuffer(&desc, &initData, m_vb.addressof());
 		THROW_IF_FAILED(hr);
 
 		m_vbStride = sizeof(vertexBuffer[0]);
@@ -521,14 +520,14 @@ void RenderWindow::CreateRenderResources()
 
 void RenderWindow::EnumerateDisplayModes()
 {
-	ComPtr<IDXGIDevice> dxgiDevice;
+	wil::com_ptr<IDXGIDevice> dxgiDevice;
 	HRESULT hr = m_device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
-	ComPtr<IDXGIAdapter> adapter;
-	hr = dxgiDevice->GetAdapter(adapter.GetAddressOf());
+	wil::com_ptr<IDXGIAdapter> adapter;
+	hr = dxgiDevice->GetAdapter(adapter.addressof());
 	THROW_IF_FAILED(hr);
 
-	ComPtr<IDXGIOutput> output;
-	hr = adapter->EnumOutputs(0, output.GetAddressOf());
+	wil::com_ptr<IDXGIOutput> output;
+	hr = adapter->EnumOutputs(0, output.addressof());
 	THROW_IF_FAILED(hr);
 
 	UINT numModes = 0;
@@ -592,8 +591,8 @@ void RenderWindow::CreateWrappedBackbuffers()
 {
 	// clean previous
 	for (UINT i = 0; i < kBufferCount; ++i) {
-		m_wrappedBackbuffers[i].Reset();
-		m_backbuffers[i].Reset();
+		m_wrappedBackbuffers[i].reset();
+		m_backbuffers[i].reset();
 	}
 
 	// fetch 12 backbuffers and wrap for 11
@@ -604,7 +603,7 @@ void RenderWindow::CreateWrappedBackbuffers()
 		flags.BindFlags = D3D11_BIND_RENDER_TARGET;
 
 		THROW_IF_FAILED(m_d3d11on12->CreateWrappedResource(
-			m_backbuffers[i].Get(),
+			m_backbuffers[i].get(),
 			&flags,
 			D3D12_RESOURCE_STATE_RENDER_TARGET,   // before DX11 uses it
 			D3D12_RESOURCE_STATE_PRESENT,         // after DX11 work
@@ -612,16 +611,16 @@ void RenderWindow::CreateWrappedBackbuffers()
 	}
 
 	// Make an RTV for the current buffer (0 for boot; we�ll update each frame)
-	Microsoft::WRL::ComPtr<ID3D11Resource> res = m_wrappedBackbuffers[0];
-	THROW_IF_FAILED(m_device->CreateRenderTargetView(res.Get(), nullptr, &m_backBufferRTV));
+	wil::com_ptr<ID3D11Resource> res = m_wrappedBackbuffers[0];
+	THROW_IF_FAILED(m_device->CreateRenderTargetView(res.get(), nullptr, &m_backBufferRTV));
 }
 
 void RenderWindow::ResizeOn12(UINT w, UINT h)
 {
-	m_backBufferRTV.Reset();
+	m_backBufferRTV.reset();
 	for (UINT i = 0; i < kBufferCount; ++i) {
-		m_wrappedBackbuffers[i].Reset();
-		m_backbuffers[i].Reset();
+		m_wrappedBackbuffers[i].reset();
+		m_backbuffers[i].reset();
 	}
 
 	THROW_IF_FAILED(m_swapChain->ResizeBuffers(kBufferCount, w, h, OUTPUT_FORMAT, 0));
@@ -630,30 +629,28 @@ void RenderWindow::ResizeOn12(UINT w, UINT h)
 
 void RenderWindow::BeginFrame()
 {
-	Microsoft::WRL::ComPtr<IDXGISwapChain3> sc3;
-	if (SUCCEEDED(m_swapChain.As(&sc3)))
-	{
+	wil::com_ptr<IDXGISwapChain3> sc3;
+
+	if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>()) {
 		const UINT idx = sc3->GetCurrentBackBufferIndex();
-		ID3D11Resource* res[] = { m_wrappedBackbuffers[idx].Get() };
-
-		// Make wrapped resource usable by DX11 this frame
+		ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
 		m_d3d11on12->AcquireWrappedResources(res, 1);
-
-		// Ensure RTV matches the current backbuffer
-		m_backBufferRTV.Reset();
-		m_device->CreateRenderTargetView(res[0], nullptr, &m_backBufferRTV);
+		THROW_IF_FAILED(m_device->CreateRenderTargetView(res[0], nullptr, m_backBufferRTV.put()));
 	}
 }
 
 void RenderWindow::EndFrame()
 {
-	Microsoft::WRL::ComPtr<IDXGISwapChain3> sc3;
-	if (SUCCEEDED(m_swapChain.As(&sc3)))
-	{
+	// Prefer non-throwing try_query and early return.
+	if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>()) {
 		const UINT idx = sc3->GetCurrentBackBufferIndex();
-		ID3D11Resource* res[] = { m_wrappedBackbuffers[idx].Get() };
-		// Transition for present
+
+		ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
+
+		// Pair with AcquireWrappedResources from BeginFrame
 		m_d3d11on12->ReleaseWrappedResources(res, 1);
+
+		// Often not strictly required each frame, but OK if you need it.
 		m_deviceContext->Flush();
 	}
 }

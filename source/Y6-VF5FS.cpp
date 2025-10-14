@@ -250,7 +250,7 @@ void Y6::VF5FS::Run(RenderWindow& window)
 	THROW_LAST_ERROR_IF_NULL(module_stop);
 	module_func_t module_main;
 
-	CheckForExecutable();
+	//CheckForExecutable();
 
 	if (!ResolveSymbolsAndInstallPatches(gameDll.get(), window))
 	{
