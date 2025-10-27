@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RenderWindow.h"
+#include "../RenderWindow.h"
 
 using module_func_t = int(*)(size_t args, const void* argp);
 

@@ -8,7 +8,7 @@
 #include <Windows.h>
 
 #include "../pxd_types.h"
-#include "../sl_internal.h"
+#include "sl_internal.h"
 
 class isl_file_access;
 class csl_file_access_archive;

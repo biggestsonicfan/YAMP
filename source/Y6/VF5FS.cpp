@@ -1,24 +1,23 @@
-#include "Y6-VF5FS.h"
+#include "VF5FS.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
-#include "wil/resource.h"
+#include "../wil/resource.h"
 
-#include "criware/CriStub.h"
+#include "../criware/CriStub.h"
 
-#include "Y6/sl.h"
-#include "Y6/gs.h"
-#include "Imports.h"
-#include "Y6/Patch.h"
-#include "Y6/sys_util.h"
-#include "Y6/cs_game.h"
+#include "sl.h"
+#include "gs.h"
+#include "../Imports.h"
+#include "Patch.h"
+#include "sys_util.h"
+#include "cs_game.h"
 
-#include "Y6/ImportSymbols.h"
-#include "Imports.h"
-#include "YAMPGeneral.h"
+#include "ImportSymbols.h"
+#include "../YAMPGeneral.h"
 
-#include "Utils/MemoryMgr.h"
-#include "Utils/ScopedUnprotect.hpp"
+#include "../Utils/MemoryMgr.h"
+#include "../Utils/ScopedUnprotect.hpp"
 
 static const wchar_t* DLL_NAME = L"vf5fs-pxd-w64-Retail Steam.dll";
 
