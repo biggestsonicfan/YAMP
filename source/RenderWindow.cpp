@@ -24,251 +24,304 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 static LRESULT WINAPI WindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
-	LRESULT imguiResult = ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
-	if (imguiResult != 0) return imguiResult;
+    LRESULT imguiResult = ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
+    if (imguiResult != 0) return imguiResult;
 
-	switch (Msg)
-	{
-	case WM_DESTROY:
-		PostQuitMessage(0);
-		return 0;
-	case WM_KEYDOWN:
-	case WM_SYSKEYDOWN:
-		gGeneral.SetKeyPressed(wParam, true);
-		break;
-	case WM_KEYUP:
-	case WM_SYSKEYUP:
-		gGeneral.SetKeyPressed(wParam, false);
-		break;
+    switch (Msg)
+    {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        gGeneral.SetKeyPressed(wParam, true);
+        break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        gGeneral.SetKeyPressed(wParam, false);
+        break;
 
-	default:
-		break;
-	}
-	return DefWindowProc(hWnd, Msg, wParam, lParam);
+    default:
+        break;
+    }
+    return DefWindowProc(hWnd, Msg, wParam, lParam);
 }
 
 RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdShow)
 {
-	wil::unique_event startupEvent(wil::EventOptions::None);
-	m_windowThread = std::thread([this, &startupEvent, instance, dllInstance, cmdShow] {
-		
-		WNDCLASSEX wndClass { sizeof(wndClass) };
-		wndClass.hInstance = instance;
-		wndClass.lpfnWndProc = WindowProc;
-		wndClass.lpszClassName = L"YAKUZA_VF5FS";
-		wndClass.hIcon = LoadIcon(dllInstance, MAKEINTRESOURCE(101));
-		wndClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wil::unique_event startupEvent(wil::EventOptions::None);
+    m_windowThread = std::thread([this, &startupEvent, instance, dllInstance, cmdShow] {
 
-		const ATOM windowClass = RegisterClassEx(&wndClass);
-		THROW_LAST_ERROR_IF(windowClass == 0);
+        WNDCLASSEX wndClass { sizeof(wndClass) };
+        wndClass.hInstance = instance;
+        wndClass.lpfnWndProc = WindowProc;
+        wndClass.lpszClassName = L"YAKUZA_VF5FS";
+        wndClass.hIcon = LoadIcon(dllInstance, MAKEINTRESOURCE(101));
+        wndClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
 
-		const YAMPSettings* settings = gGeneral.GetSettings();
+        const ATOM windowClass = RegisterClassEx(&wndClass);
+        THROW_LAST_ERROR_IF(windowClass == 0);
 
-		DWORD style;
-		if (settings->m_fullscreen) // Borderless for now
-		{
-			style = WS_POPUP;
+        const YAMPSettings* settings = gGeneral.GetSettings();
 
-			RECT desktop;
-			GetWindowRect(GetDesktopWindow(), &desktop);
-			m_width = desktop.right - desktop.left;
-			m_height = desktop.bottom - desktop.top;
-		}
-		else
-		{
-			style = WS_OVERLAPPEDWINDOW;
-			m_width = settings->m_resX;
-			m_height = settings->m_resY;
-		}
+        DWORD style;
+        if (settings->m_fullscreen) // Borderless for now
+        {
+            style = WS_POPUP;
 
-		RECT clientArea { 0, 0, m_width, m_height };
-		AdjustWindowRect(&clientArea, style, FALSE);
+            RECT desktop;
+            GetWindowRect(GetDesktopWindow(), &desktop);
+            m_width = desktop.right - desktop.left;
+            m_height = desktop.bottom - desktop.top;
+        }
+        else
+        {
+            style = WS_OVERLAPPEDWINDOW;
+            m_width = settings->m_resX;
+            m_height = settings->m_resY;
+        }
+
+        RECT clientArea { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
+        AdjustWindowRect(&clientArea, style, FALSE);
 
 		wil::unique_hwnd window(CreateWindowExW(0, L"YAKUZA_VF5FS", L"Virtua Fighter 5: Final Showdown", style, CW_USEDEFAULT, CW_USEDEFAULT,
 			clientArea.right - clientArea.left, clientArea.bottom - clientArea.top, nullptr, nullptr, instance, nullptr));
-		THROW_LAST_ERROR_IF_NULL(window);
+        THROW_LAST_ERROR_IF_NULL(window);
 
-		ImGui_ImplWin32_Init(window.get());
+        ImGui_ImplWin32_Init(window.get());
 
-		// --- D3D12 device
-		THROW_IF_FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device)));
+        // --- D3D12 device
+        THROW_IF_FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device)));
 
-		// --- Command queue
-		D3D12_COMMAND_QUEUE_DESC qdesc{};
-		qdesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-		THROW_IF_FAILED(m_d3d12Device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&m_cmdQueue)));
+        // --- Command queue
+        {
+            D3D12_COMMAND_QUEUE_DESC qdesc{};
+            qdesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            THROW_IF_FAILED(m_d3d12Device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&m_cmdQueue)));
+        }
 
-		// --- 11-on-12 device + context
-		UINT flags = gGeneral.GetSettings()->m_useD3DDebugLayer ? D3D11_CREATE_DEVICE_DEBUG : 0;
+        // --- 11-on-12 device + context
+        {
+            const UINT flags = gGeneral.GetSettings()->m_useD3DDebugLayer ? D3D11_CREATE_DEVICE_DEBUG : 0;
 
-		wil::com_ptr<ID3D11Device> device11;
-		wil::com_ptr<ID3D11DeviceContext> context11;
-		IUnknown* queues[] = { m_cmdQueue.get() };
+            wil::com_ptr<ID3D11Device> device11;
+            wil::com_ptr<ID3D11DeviceContext> context11;
+            IUnknown* queues[] = { m_cmdQueue.get() };
 
-		THROW_IF_FAILED(D3D11On12CreateDevice(
-			m_d3d12Device.get(),
-			flags,
-			nullptr, 0,
-			queues, _countof(queues),
-			0,
-			&device11, &context11, nullptr));
+            THROW_IF_FAILED(D3D11On12CreateDevice(
+                m_d3d12Device.get(),
+                flags,
+                nullptr, 0,
+                queues, _countof(queues),
+                0,
+                &device11, &context11, nullptr));
 
-		// Promote to your existing strong types
-		m_device = std::move(device11);
-		m_deviceContext = std::move(context11);
-		m_d3d11on12 = m_device.query<ID3D11On12Device>();
+            m_device = std::move(device11);
+            m_deviceContext = std::move(context11);
+            m_d3d11on12 = m_device.query<ID3D11On12Device>();
+        }
 
+        // --- Create swap chain for the D3D12 queue
+        {
+            // Create and store DXGI factory (keep as 4 to simplify)
+            THROW_IF_FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&m_dxgiFactory)));
 
-		// --- Create swap chain for the D3D12 queue
-		wil::com_ptr<IDXGIFactory6> factory;
-		THROW_IF_FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
+            DXGI_SWAP_CHAIN_DESC1 scd{};
+            scd.Width = m_width;
+            scd.Height = m_height;
+            scd.Format = OUTPUT_FORMAT;   // BGRA8 matches ImGui DX11 expectations
+            scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            scd.BufferCount = kBufferCount;
+            scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            scd.SampleDesc.Count = 1;
 
-		DXGI_SWAP_CHAIN_DESC1 scd{};
-		scd.Width = m_width;
-		scd.Height = m_height;
-		scd.Format = OUTPUT_FORMAT;   // you already use BGRA8 in this project
-		scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		scd.BufferCount = kBufferCount;
-		scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-		scd.SampleDesc.Count = 1;
+            wil::com_ptr<IDXGIFactory6> factory6 = m_dxgiFactory.try_query<IDXGIFactory6>();
+            wil::com_ptr<IDXGISwapChain1> sc1;
+            THROW_IF_FAILED(factory6->CreateSwapChainForHwnd(
+                m_cmdQueue.get(), window.get(), &scd, nullptr, nullptr, &sc1));
 
-		wil::com_ptr<IDXGISwapChain1> sc1;
-		THROW_IF_FAILED(factory->CreateSwapChainForHwnd(
-			m_cmdQueue.get(), window.get(), &scd, nullptr, nullptr, &sc1));
+            m_swapChain = std::move(sc1);
+        }
 
-		m_swapChain = std::move(sc1);
+        // --- ImGui init (DX11 backend)
+        ImGui_ImplDX11_Init(m_device.get(), m_deviceContext.get());
 
-		// --- ImGui init remains the same (DX11 backend)
-		ImGui_ImplDX11_Init(m_device.get(), m_deviceContext.get());
+        // --- Wrap backbuffers for DX11
+        CreateWrappedBackbuffers();
+        ShowWindow(window.get(), cmdShow);
+        UpdateWindow(window.get());
 
-		// --- Wrap backbuffers
-		CreateWrappedBackbuffers();
-		ShowWindow(window.get(), cmdShow);
-		UpdateWindow(window.get());
+        m_window = wil::unique_hwnd(window.release());
 
-		m_window = wil::unique_hwnd(window.release());
+        CreateRenderResources();
+        EnumerateDisplayModes();
+        CalculateViewport();
 
-		CreateRenderResources();
-		EnumerateDisplayModes();
-		CalculateViewport();
+        m_ui.GetDefaultsFromSettings();
+        startupEvent.SetEvent();
 
-		m_ui.GetDefaultsFromSettings();
-		startupEvent.SetEvent();
+        BOOL ret;
+        MSG msg;
+        while ((ret = GetMessage(&msg, NULL, 0, 0)) != 0)
+        {
+            if (ret == -1)
+            {
+                // handle the error and possibly exit
+            }
+            else
+            {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+        }
 
-		BOOL ret;
-		MSG msg;
-		while( (ret = GetMessage(&msg, NULL, 0, 0)) != 0)
-		{
-			if (ret == -1)
-			{
-				// handle the error and possibly exit
-			}
-			else
-			{
-				TranslateMessage(&msg); 
-				DispatchMessage(&msg); 
-			}
-		}
-
-		m_shuttingDownWindow.store(true, std::memory_order_relaxed);
-
-		// TODO: Pass the exit code back to WinMain via RenderWindow
-		
-	});
-	startupEvent.wait();
+        m_shuttingDownWindow.store(true, std::memory_order_relaxed);
+        });
+    startupEvent.wait();
 }
 
 RenderWindow::~RenderWindow()
 {
-	PostMessage(m_window.get(), WM_CLOSE, 0, 0);
-	m_windowThread.join();
+    PostMessage(m_window.get(), WM_CLOSE, 0, 0);
+    m_windowThread.join();
+}
+
+// ----------------------
+// DX11-on-12 helpers
+// ----------------------
+
+void RenderWindow::CreateWrappedBackbuffers()
+{
+    auto sc3 = m_swapChain.try_query<IDXGISwapChain3>();
+    for (UINT i = 0; i < kBufferCount; ++i)
+    {
+        THROW_IF_FAILED(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_backbuffers[i])));
+
+        D3D11_RESOURCE_FLAGS flags11{};
+        flags11.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+        THROW_IF_FAILED(m_d3d11on12->CreateWrappedResource(m_backbuffers[i].get(), &flags11, D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&m_wrappedBackbuffers[i])
+        ));
+    }
+}
+
+void RenderWindow::BeginFrame()
+{
+    m_curBackbufferIndex = 0;
+    if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>())
+        m_curBackbufferIndex = sc3->GetCurrentBackBufferIndex();
+
+    ID3D11Resource* toAcquire[] = { m_wrappedBackbuffers[m_curBackbufferIndex].get() };
+    m_d3d11on12->AcquireWrappedResources(toAcquire, 1);
+    m_acquiredThisFrame = true;
+
+    m_backBufferRTV.reset();
+    THROW_IF_FAILED(m_device->CreateRenderTargetView(
+        m_wrappedBackbuffers[m_curBackbufferIndex].get(),
+        nullptr,
+        m_backBufferRTV.addressof()
+    ));
+
+    m_deviceContext->OMSetRenderTargets(1, m_backBufferRTV.addressof(), nullptr);
+}
+
+void RenderWindow::EndFrame()
+{
+    if (m_acquiredThisFrame)
+    {
+        ID3D11Resource* toRelease[] = { m_wrappedBackbuffers[m_curBackbufferIndex].get() };
+        m_d3d11on12->ReleaseWrappedResources(toRelease, 1);
+        m_deviceContext->Flush(); // lets 11on12 submit to the 12 queue
+        m_acquiredThisFrame = false;
+    }
 }
 
 void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src)
 {
-	if (m_requiresClear)
-	{
-		const FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-		m_deviceContext->ClearRenderTargetView(m_backBufferRTV.get(), clearColor);
-	}
+    if (m_requiresClear)
+    {
+        const FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        m_deviceContext->ClearRenderTargetView(m_backBufferRTV.get(), clearColor);
+    }
 
-	m_deviceContext->OMSetRenderTargets(1, m_backBufferRTV.addressof(), nullptr);
-	m_deviceContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    m_deviceContext->OMSetRenderTargets(1, m_backBufferRTV.addressof(), nullptr);
+    m_deviceContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 
-	m_deviceContext->VSSetShader(m_vs.get(), nullptr, 0);
+    m_deviceContext->VSSetShader(m_vs.get(), nullptr, 0);
 
-	const UINT Offsets[1] = { 0 };
-	m_deviceContext->IASetInputLayout(m_inputLayout.get());
-	m_deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	m_deviceContext->IASetVertexBuffers(0, 1, m_vb.addressof(), &m_vbStride, Offsets);
+    const UINT Offsets[1] = { 0 };
+    m_deviceContext->IASetInputLayout(m_inputLayout.get());
+    m_deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_deviceContext->IASetVertexBuffers(0, 1, m_vb.addressof(), &m_vbStride, Offsets);
 
-	m_deviceContext->PSSetShader(m_ps.get(), nullptr, 0);
-	m_deviceContext->PSSetShaderResources(0, 1, &src);
+    m_deviceContext->PSSetShader(m_ps.get(), nullptr, 0);
+    m_deviceContext->PSSetShaderResources(0, 1, &src);
 
-	m_deviceContext->RSSetViewports(1, &m_viewport);
-	m_deviceContext->RSSetState(nullptr);
+    m_deviceContext->RSSetViewports(1, &m_viewport);
+    m_deviceContext->RSSetState(nullptr);
 
-	m_deviceContext->Draw(3, 0);
+    m_deviceContext->Draw(3, 0);
 }
 
 void RenderWindow::NewImGuiFrame()
 {
-	ImGui_ImplDX11_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	ImGui::NewFrame();
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
 }
 
 void RenderWindow::RenderImGui()
 {
-	m_ui.Draw();
+    m_ui.Draw();
 
-	ImGui::Render();
-	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ImGui::Render();
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
 
 wil::com_ptr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* device, HWND window)
 {
-	wil::com_ptr<IDXGISwapChain> swapChain;
+    wil::com_ptr<IDXGISwapChain> swapChain;
 
-	float refreshRate = gGeneral.GetSettings()->m_refreshRate;
+    float refreshRate = gGeneral.GetSettings()->m_refreshRate;
 
-	DXGI_SWAP_CHAIN_DESC swapChainDesc {};
-	swapChainDesc.BufferDesc.RefreshRate.Numerator = static_cast<UINT>(refreshRate * 10000);
-	swapChainDesc.BufferDesc.RefreshRate.Denominator = 10000;
-	swapChainDesc.BufferDesc.Format = OUTPUT_FORMAT;
-	swapChainDesc.SampleDesc.Count = 1;                             
-	swapChainDesc.SampleDesc.Quality = 0;
-	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swapChainDesc.BufferCount = 2;
-	swapChainDesc.OutputWindow = window;
-	swapChainDesc.Windowed = TRUE;
+    DXGI_SWAP_CHAIN_DESC swapChainDesc {};
+    swapChainDesc.BufferDesc.RefreshRate.Numerator = static_cast<UINT>(refreshRate * 10000);
+    swapChainDesc.BufferDesc.RefreshRate.Denominator = 10000;
+    swapChainDesc.BufferDesc.Format = OUTPUT_FORMAT;
+    swapChainDesc.SampleDesc.Count = 1;
+    swapChainDesc.SampleDesc.Quality = 0;
+    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDesc.BufferCount = 2;
+    swapChainDesc.OutputWindow = window;
+    swapChainDesc.Windowed = TRUE;
 
-	wil::com_ptr<IDXGIDevice> dxgiDevice;
-	HRESULT hr = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.addressof()));
-	THROW_IF_FAILED(hr);
+    wil::com_ptr<IDXGIDevice> dxgiDevice;
+    HRESULT hr = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.addressof()));
+    THROW_IF_FAILED(hr);
 
-	wil::com_ptr<IDXGIAdapter> adapter;
-	hr = dxgiDevice->GetAdapter(adapter.addressof());
-	THROW_IF_FAILED(hr);
+    wil::com_ptr<IDXGIAdapter> adapter;
+    hr = dxgiDevice->GetAdapter(adapter.addressof());
+    THROW_IF_FAILED(hr);
 
-	wil::com_ptr<IDXGIFactory> factory;
-	hr = adapter->GetParent(IID_PPV_ARGS(factory.addressof()));
-	THROW_IF_FAILED(hr);
+    wil::com_ptr<IDXGIFactory> factory;
+    hr = adapter->GetParent(IID_PPV_ARGS(factory.addressof()));
+    THROW_IF_FAILED(hr);
 
 
 	// Try flip models, if it fails (because of an old Windows version), try a normal blit model
-	for (auto swapEffect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_SWAP_EFFECT_DISCARD})
-	{
-		swapChainDesc.SwapEffect = swapEffect;
-		hr = factory->CreateSwapChain(device, &swapChainDesc, swapChain.put());
-		if (SUCCEEDED(hr))
-		{
-			break;
-		}
-	}
-	THROW_IF_FAILED(hr);
+    for (auto swapEffect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_SWAP_EFFECT_DISCARD})
+    {
+        swapChainDesc.SwapEffect = swapEffect;
+        hr = factory->CreateSwapChain(device, &swapChainDesc, swapChain.put());
+        if (SUCCEEDED(hr))
+        {
+            break;
+        }
+    }
+    THROW_IF_FAILED(hr);
 
-	return swapChain;
+    return swapChain;
 }
 
 void RenderWindow::CreateRenderResources()
@@ -581,8 +634,8 @@ void RenderWindow::CalculateViewport()
 		m_viewport.Height = m_height;
 	}
 
-	m_viewport.MinDepth = 0.0f;
-	m_viewport.MaxDepth = 1.0f;
+    m_viewport.MinDepth = 0.0f;
+    m_viewport.MaxDepth = 1.0f;
 
 	m_requiresClear = m_viewport.TopLeftX != 0 || m_viewport.TopLeftY != 0;
 }

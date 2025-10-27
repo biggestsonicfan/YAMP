@@ -1,6 +1,12 @@
 #pragma once
 
-inline void (*shift_next_mode)(int mode);
-inline void (*shift_next_mode_sub)(int modeSub);
+namespace Y6
+{
+	namespace VF5FS
+	{
+		inline void (*shift_next_mode)(int mode);
+		inline void (*shift_next_mode_sub)(int modeSub);
 
-bool dest_cs_autoload();
+		bool dest_cs_autoload();
+	}
+}
