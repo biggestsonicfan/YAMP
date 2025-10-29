@@ -3,10 +3,10 @@
 #include <cstdio>
 #include <utility>
 
-namespace Y6 {
-
-	namespace VF5FS {
-
+namespace Y6
+{
+	namespace VF5FS
+	{
 		uint32_t csl_file_async_request::sm_serial = 0;
 
 		csl_file_async_request::csl_file_async_request(isl_file_access** pp_interface, uint32_t max_req_item)

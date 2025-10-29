@@ -7,14 +7,14 @@
 #include <xmmintrin.h>
 
 #include "../pxd_shader.h"
-#include "../pxd_types.h"
+#include "pxd_types.h"
+
+class RenderWindow;
 
 namespace Y6
 {
-	namespace VF5FS {
-
-		class RenderWindow;
-
+	namespace VF5FS
+	{
 		enum sbgl_format_t
 		{
 			SBGL_FORMAT_UNKNOWN = 0x0,
@@ -168,10 +168,10 @@ namespace Y6
 			public:
 				union
 				{
-					ID3D11Resource *m_pD3DResource;
-					ID3D11Texture1D *m_pD3DTexture1D;
-					ID3D11Texture2D *m_pD3DTexture2D;
-					ID3D11Texture3D *m_pD3DTexture3D;
+					ID3D11Resource* m_pD3DResource;
+					ID3D11Texture1D* m_pD3DTexture1D;
+					ID3D11Texture2D* m_pD3DTexture2D;
+					ID3D11Texture3D* m_pD3DTexture3D;
 				};
 			};
 
@@ -216,10 +216,10 @@ namespace Y6
 					unsigned int height;
 				};
 
-				IDXGISwapChain *m_pDXGISwapChain;
-				ID3D11RenderTargetView *m_pD3DRenderTargetView;
-				ID3D11DepthStencilView *m_pD3DDepthStencilView;
-				ID3D11Texture2D *m_pD3DDepthStencilBuffer;
+				IDXGISwapChain* m_pDXGISwapChain;
+				ID3D11RenderTargetView* m_pD3DRenderTargetView;
+				ID3D11DepthStencilView* m_pD3DDepthStencilView;
+				ID3D11Texture2D* m_pD3DDepthStencilBuffer;
 				sbgl::csurface m_color_surface;
 				sbgl::csurface m_depth_surface;
 				unsigned int m_buffer_index;
@@ -236,14 +236,14 @@ namespace Y6
 			public:
 				struct timestamp_st
 				{
-					ID3D11Query *pD3DQuery;
+					ID3D11Query* pD3DQuery;
 					int64_t frequency;
 					unsigned __int32 disjoint : 8;
 					unsigned __int32 state : 8;
 				};
 
 				cswap_chain_common m_swap_chain;
-				ID3D11DeviceContext *m_pD3DDeviceContext;
+				ID3D11DeviceContext* m_pD3DDeviceContext;
 				ccontext_native::desc_st m_context_desc;
 				D3D_FEATURE_LEVEL m_FeatureLevelSupported;
 				unsigned int m_mwa_flags;
@@ -251,7 +251,7 @@ namespace Y6
 #ifdef _Y6_DAY1_DLL // Removed in a patch
 				timestamp_st m_timestamp;
 #endif
-				ID3D11Query *m_pD3DQuery;
+				ID3D11Query* m_pD3DQuery;
 				//__m128 m_fast_clear_color; // YLAD only
 				__m128 m_p_border_color[256];
 				DXGI_ADAPTER_DESC1 m_DXGIAdapterDesc;
@@ -283,9 +283,9 @@ namespace Y6
 			{
 				union
 				{
-					ID3D11View *m_pD3DView;
-					ID3D11RenderTargetView *m_pD3DRenderTargetView;
-					ID3D11DepthStencilView *m_pD3DDepthStencilView;
+					ID3D11View* m_pD3DView;
+					ID3D11RenderTargetView* m_pD3DRenderTargetView;
+					ID3D11DepthStencilView* m_pD3DDepthStencilView;
 				};
 				//__m128 m_fast_clear_color; // Probably YLAD only
 			};
@@ -531,14 +531,14 @@ namespace Y6
 			} uid;
 			union
 			{
-				/*sbgl::cbase_buffer*/void *mp_sbgl_resource;
-				/*csbgl_staging_buffer_gs*/void *mp_sbgl_staging_resource;
-				/*csbgl_vertex_buffer_gs*/void *mp_sbgl_vertex_buffer;
-				/*csbgl_index_buffer_gs*/void *mp_sbgl_index_buffer;
-				/*csbgl_constant_buffer_gs*/void *mp_sbgl_constant_buffer;
-				/*csbgl_rw_buffer_gs*/void *mp_sbgl_rw_buffer;
-				/*csbgl_ro_buffer_gs*/void *mp_sbgl_ro_buffer;
-				/*csbgl_buffer_gs*/void *mp_sbgl_base_buffer;
+				/*sbgl::cbase_buffer*/void* mp_sbgl_resource;
+				/*csbgl_staging_buffer_gs*/void* mp_sbgl_staging_resource;
+				/*csbgl_vertex_buffer_gs*/void* mp_sbgl_vertex_buffer;
+				/*csbgl_index_buffer_gs*/void* mp_sbgl_index_buffer;
+				/*csbgl_constant_buffer_gs*/void* mp_sbgl_constant_buffer;
+				/*csbgl_rw_buffer_gs*/void* mp_sbgl_rw_buffer;
+				/*csbgl_ro_buffer_gs*/void* mp_sbgl_ro_buffer;
+				/*csbgl_buffer_gs*/void* mp_sbgl_base_buffer;
 			} buffer;
 		};
 
@@ -612,9 +612,9 @@ namespace Y6
 		{
 			cgs_cb_pool* mp_link = nullptr;
 			unsigned int m_cb_num = 0;
-			cgs_cb *mp_small_tbl[96][32] {};
-			cgs_cb *mp_large_tbl[96][32] {};
-			cgs_cb *mp_huge_tbl[96][32] {};
+			cgs_cb* mp_small_tbl[96][32]{};
+			cgs_cb* mp_large_tbl[96][32]{};
+			cgs_cb* mp_huge_tbl[96][32]{};
 		};
 
 		struct cgs_up_pool
@@ -637,8 +637,8 @@ namespace Y6
 			cgs_up_pool* mp_link = nullptr;
 			cgs_vb* mp_vb = nullptr;
 			cgs_ib* mp_ib = nullptr;
-			void *mp_push_polygon = nullptr;
-			void *mp_push_line = nullptr;
+			void* mp_push_polygon = nullptr;
+			void* mp_push_line = nullptr;
 		};
 		static_assert(sizeof(cgs_up_pool) == 88);
 
@@ -649,7 +649,7 @@ namespace Y6
 
 		public:
 			cgs_shader_uniform* mp_link = nullptr;
-		uint64_t m_dirty_status[2] {};
+			uint64_t m_dirty_status[2]{};
 			uint64_t m_uniform_status[94];
 			float m_clip_near;
 			float m_clip_far;
@@ -683,7 +683,7 @@ namespace Y6
 			cgs_shader_uniform* mp_shader_uniform;
 			std::byte gap[7882];
 
-			static inline void (__thiscall *reset_state_all_internal)(cgs_device_context* obj);
+			static inline void(__thiscall* reset_state_all_internal)(cgs_device_context* obj);
 		};
 		static_assert(sizeof(cgs_device_context) == 7952);
 		static_assert(offsetof(cgs_device_context, mp_sbgl_context) == 24);
@@ -726,10 +726,10 @@ namespace Y6
 				cgs_device_context* p_device_context;
 				sbgl::cdevice sbgl_device;
 				std::byte gap2[32];
-				cgs_vb *p_vb_sphere[3];
-				cgs_vb *p_vb_capsule[3];
-				cgs_ib *p_ib_quad;
-				cgs_ib *p_ib_fan;
+				cgs_vb* p_vb_sphere[3];
+				cgs_vb* p_vb_capsule[3];
+				cgs_ib* p_ib_quad;
+				cgs_ib* p_ib_fan;
 				//cgs_ib *p_ib_rect; // YLAD only
 				std::byte gap3[96];
 				t_lockfree_stack<cgs_cb_pool> stack_cb_pool;

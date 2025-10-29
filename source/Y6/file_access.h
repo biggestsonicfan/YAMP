@@ -2,9 +2,9 @@
 
 #include "sl.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		class __declspec(novtable) isl_file_access
 		{
@@ -14,7 +14,7 @@ namespace Y6
 			virtual bool create(const char* path, sl::handle_t handle) = 0;
 			virtual bool remove(const char*) = 0;
 			virtual bool close(sl::handle_t handle) = 0;
-			virtual bool is_exist(const char *) = 0;
+			virtual bool is_exist(const char*) = 0;
 			virtual int64_t read(sl::handle_t handle, void* buffer, unsigned int size) = 0;
 			virtual int64_t write(sl::handle_t handle, const void* buffer, unsigned int size) = 0;
 			virtual int64_t get_size(sl::handle_t handle) = 0;
@@ -22,7 +22,7 @@ namespace Y6
 			virtual int64_t read_offset(sl::handle_t handle, void* buffer, unsigned int size, uint64_t offset) = 0;
 
 			// These don't seem to exist in Yakuza 6, but keep them for now
-			virtual uint64_t burst_read(sl::handle_t, void *, unsigned int, unsigned __int64) = 0;
+			virtual uint64_t burst_read(sl::handle_t, void*, unsigned int, unsigned __int64) = 0;
 			virtual uint64_t burst_read_flush(sl::handle_t) = 0;
 			virtual uint64_t burst_read_wait(sl::handle_t) = 0;
 			virtual void burst_status_write(unsigned int) = 0;
@@ -88,7 +88,7 @@ namespace Y6
 			sl::mutex_t m_mutex_decode_buffer;
 			sector_cache_t m_sector_cache_tbl[16];
 			t_pointer_list<sector_cache_t> m_sector_cache_list;
-			void *mp_decode_buffer[2] = {};
+			void* mp_decode_buffer[2] = {};
 		};
 		static_assert(sizeof(csl_file_access_archive) == 416);
 

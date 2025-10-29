@@ -6,9 +6,9 @@
 
 using namespace hook::txn;
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		template<typename T = void>
 		static auto get_module_pattern(void* module, std::string_view pattern_string, ptrdiff_t offset = 0)

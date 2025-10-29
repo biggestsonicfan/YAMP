@@ -398,6 +398,8 @@ void YAMPUserInterface::DrawDebug()
 {
 	if (m_debugInfoAccepted.has_value())
 	{
+		ImGui::TextDisabled("Graphics backend: DX11 on D3D12");
+
 		bool accept = m_debugInfoAccepted.value();
 
 		ImGui::PushTextWrapPos();

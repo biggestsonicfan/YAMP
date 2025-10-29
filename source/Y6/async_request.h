@@ -3,9 +3,9 @@
 #include "sl.h"
 #include "file_access.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		class csl_file_async_request
 		{
@@ -26,8 +26,8 @@ namespace Y6
 
 			sl::handle_t m_request;
 			sl::handle_t m_h_thread;
-			isl_file_access **mpp_file_access = nullptr;
-			csl_file_async_request::req_item_t *mp_req_item_buf = nullptr;
+			isl_file_access** mpp_file_access = nullptr;
+			csl_file_async_request::req_item_t* mp_req_item_buf = nullptr;
 			volatile int m_is_finish_req = 0;
 			sl::handle_t m_h_busy_file;
 			sl::mutex_t m_mutex_request;

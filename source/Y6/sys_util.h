@@ -1,8 +1,8 @@
 #pragma once
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		bool sys_util_check_enable_storage(int port);
 		void sys_util_start_load_systemdata_task(int port, void* buf, unsigned int buf_size, bool autoload, bool create, void (*cbfunc)(bool success, bool creator));

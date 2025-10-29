@@ -7,7 +7,6 @@
 
 #include "wil/resource.h"
 #include "wil/com.h"
-#include <wrl/client.h>
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*lpCmdLine*/, int nShowCmd)
 {

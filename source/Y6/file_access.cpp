@@ -3,9 +3,9 @@
 #include <string_view>
 #include "../YAMPGeneral.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		bool csl_file_access::open(const char* path, sl::handle_t handle)
 		{

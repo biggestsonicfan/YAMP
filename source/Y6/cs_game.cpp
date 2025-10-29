@@ -1,8 +1,8 @@
 #include "cs_game.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		bool dest_cs_autoload()
 		{

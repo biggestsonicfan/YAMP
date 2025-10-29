@@ -1,7 +1,7 @@
 #include "Patch.h"
 
 #include "file_access.h"
-#include "../pxd_types.h"
+#include "pxd_types.h"
 #include "async_request.h"
 
 #include "../wil/resource.h"
@@ -14,9 +14,9 @@
 #include "ImportSymbols.h"
 #include "../Imports.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		void PatchSl(sl::context_t* context)
 		{

@@ -7,14 +7,13 @@
 #define NOMINMAX
 #include <Windows.h>
 
-#include "../pxd_types.h"
+#include "pxd_types.h"
 #include "sl_internal.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
-
 		class isl_file_access;
 		class csl_file_access_archive;
 

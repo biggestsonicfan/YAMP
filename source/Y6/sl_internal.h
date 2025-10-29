@@ -1,10 +1,10 @@
 #pragma once
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
-		namespace sl
+		namespace sl 
 		{
 
 			struct handle_internal_buffer_t

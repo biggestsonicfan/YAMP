@@ -2,9 +2,9 @@
 
 #include "../RenderWindow.h"
 
-namespace Y6 
+namespace Y6
 {
-	namespace VF5FS 
+	namespace VF5FS
 	{
 		namespace gs 
 		{
