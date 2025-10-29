@@ -13,7 +13,6 @@
 #include <algorithm>
 
 #include "YAMPGeneral.h"
-#include "DX12/DX12Example.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3d12.lib")
@@ -153,7 +152,6 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 		m_window = std::unique_ptr<std::remove_pointer_t<HWND>, hwnd_deleter>(window.release());
 
 		CreateRenderResources();
-		DX12Example::Initialize(m_d3d12Device.get(), m_cmdQueue.get());
 		EnumerateDisplayModes();
 		CalculateViewport();
 
