@@ -23,6 +23,18 @@ class RenderWindow
 public:
 	RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdShow);
 	~RenderWindow();
+	
+	ID3D12Device* GetD3D12Device() const { return m_d3d12Device.get(); }
+	ID3D12CommandQueue* GetD3D12Queue()  const { return m_cmdQueue.get(); }
+	HWND                 GetHWND()        const { return m_window.get(); }
+
+	IDXGISwapChain3* GetSwapChain3() const {
+		IDXGISwapChain3* sc3 = nullptr;
+		if (m_swapChain) {
+			(void)m_swapChain->QueryInterface(IID_PPV_ARGS(&sc3));
+		}
+		return sc3;
+	}
 
 	ID3D11Device* GetD3D11Device() const { return m_device.get(); }
 	ID3D11DeviceContext* GetD3D11DeviceContext() const { return m_deviceContext.get(); }

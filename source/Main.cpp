@@ -1,14 +1,13 @@
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-
+// Main.cpp
+#include "YAMPGeneral.h"
 #include "RenderWindow.h"
 #include "Y6/VF5FS.h"
 #include "imgui/imgui.h"
 
-#include "wil/resource.h"
-#include "wil/com.h"
+// NEW: forward-declare in our DX12::Example namespace
+namespace DX12 { namespace Example { void Run(RenderWindow& window); } }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*lpCmdLine*/, int nShowCmd)
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
 {
 	// TODO: This is a hack, currently shutdown crashes because of mismatched allocators
 	// Once this is handled, remove this
@@ -24,8 +23,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*lpCmdLine*/, int nSh
 
     HMODULE dll = Y6::VF5FS::LoadDLL();
     if (!dll) {
-        // TODO: Show a native error message about game DLL not found
-        return -1;
+        gGeneral.SetDLLName("DX12 Fallback");
+        gGeneral.SetDLLTimestamp(0);
+        gGeneral.SetDataPath(u8"Sega", u8"Virtua Fighter 5 Final Showdown");
+        gGeneral.LoadSettings();
+
+        RenderWindow window(hInstance, hInstance, nShowCmd);
+        DX12::Example::Run(window);
+        ImGui::DestroyContext();
+        return 0;
     }
 
     Y6::VF5FS::PreInitialize();
