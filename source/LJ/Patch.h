@@ -6,9 +6,9 @@
 
 #include "Imports.h"
 
-namespace Y6
+namespace LJ
 {
-	namespace VF5FS
+	namespace StF
 	{
 		void PatchSl(sl::context_t* context);
 		void PatchGs(gs::context_t* context, const RenderWindow& window);

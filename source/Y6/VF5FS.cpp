@@ -8,7 +8,7 @@
 
 #include "sl.h"
 #include "gs.h"
-#include "../Imports.h"
+#include "Imports.h"
 #include "Patch.h"
 #include "sys_util.h"
 #include "cs_game.h"

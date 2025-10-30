@@ -1,5 +1,5 @@
 #include "ImportSymbols.h"
-#include "../Imports.h"
+#include "Imports.h"
 
 #include "../Utils/Patterns.h"
 #include "../Utils/MemoryMgr.h"

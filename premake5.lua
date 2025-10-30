@@ -19,7 +19,7 @@ workspace "*"
 	}
 
 	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*", "source/Y6/*",
-			"source/imgui/*", "source/DX12/*" }
+			"source/imgui/*", "source/DX12/*", "source/LJ/*" }
 
 	cppdialect "C++17"
 	staticruntime "on"
