@@ -105,6 +105,8 @@ namespace LJ
             Import(cgs_device_context::reset_state_all_internal, ImportSymbol::DEVICE_CONTEXT_RESET_STATE_ALL);
             Import(gs::vb_create, ImportSymbol::VB_CREATE);
             Import(gs::ib_create, ImportSymbol::IB_CREATE);
+			Import(sl::kernel_calloc_internal, ImportSymbol::SL_KERNEL_CALLOC);
+			//Import(sl::memset, ImportSymbol::MEMSET);
         }
 
         static void PrefillVariables(const Imports& symbols, const RenderWindow& window)
@@ -134,6 +136,18 @@ namespace LJ
             // Saves having to reimplement all the complex constructors and data types
             ImportFunctions(symbolMap);
             PrefillVariables(symbolMap, window); // Pre-fill those variables gs/sl initialization relies on
+
+            // Only once
+            if (sl::sm_context && sl::sm_context->handles.p_handle_buffer == nullptr) {
+                // Pick a capacity that’s plenty for StF (tweak if you learn the real number)
+                constexpr uint32_t kHandleCapacity = 0x100000;
+
+                const int rc = sl::handle_initialize(kHandleCapacity);
+                if (rc != 0) {
+                    // Mirror E_FAIL path used in your implementation; abort init on failure.
+                    return false;
+                }
+            }
 
             if (!gGeneral.GetSettings()->m_dontApplyPatches)
             {

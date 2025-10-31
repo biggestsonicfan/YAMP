@@ -10,6 +10,8 @@
 #include "pxd_types.h"
 #include "sl_internal.h"
 
+#include <windows.h>
+
 namespace LJ
 {
 	namespace StF
@@ -89,6 +91,14 @@ namespace LJ
 			// Imported function
 			extern handle_t* (*handle_create_internal)(handle_t* obj, void* ptr, uint32_t type);
 			handle_t handle_create(void* ptr, uint32_t type);
+
+			extern void* (*kernel_calloc_internal)(uint64_t bytes, uint32_t flags_or_zero);
+
+			inline void* kernel_calloc(uint64_t bytes, uint32_t flags_or_zero) {
+				void* _Dst;
+				_Dst = kernel_calloc_internal(bytes, flags_or_zero);
+				return _Dst;
+			}
 
 			handle_t semaphore_create(uint32_t initialCount);
 			handle_t thread_create(uint32_t(*p_routine)(uint64_t), uint64_t arg, const char* name);
@@ -177,10 +187,10 @@ namespace LJ
 				double count_per_tick;
 				union
 				{
-					handle_internal_buffer_t* p_handle_buffer;
+					handle_internal_buffer_t* p_handle_buffer; //node_base 0x70
 					handle_internal_t* p_handle_tbl;
 				} handles;
-				uint32_t handle_max;
+				uint32_t handle_max; //node count 0x78
 				uint32_t file_handle_max;
 				uint32_t file_callback_thread_stack_size;
 				std::byte gap[12];
@@ -198,9 +208,10 @@ namespace LJ
 				void* p_libc_realloc;
 				void* p_pxd_std_free;
 				void* p_libc_msize;
-				std::byte gap3[6576];
-				t_locked_queue<handle_internal_buffer_t> handle_free_queue;
-				std::byte gap4[4];
+				//std::byte gap3[6576];
+				std::byte gap3[1336];
+				t_locked_queue<handle_internal_buffer_t> handle_free_queue;//0x6C0
+				std::byte gap4[436];
 				t_fixed_deque<file_handle_internal_t*> file_handle_pool;
 				std::byte gap5[32];
 				handle_t sync_archive_condvar;
@@ -256,7 +267,7 @@ namespace LJ
 
 
 			template<typename T>
-			inline T* handle_instance(handle_t handle, uint32_t type)
+			inline T* handle_instance(handle_t handle, uint32_t type) //This fails for StF, why?
 			{
 				T* result = nullptr;
 				if (handle.h.data.m_bank < sm_context->handle_max)
@@ -280,6 +291,12 @@ namespace LJ
 			{
 				return handle_instance<semaphore_internal_t>(handle, 2);
 			}
+
+			extern const char* const g_tag_names[14];
+
+			extern const uint8_t* gDefaultTag128Ptr;
+
+			int handle_initialize(uint32_t max_handles);
 
 		};
 	}

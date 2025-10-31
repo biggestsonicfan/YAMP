@@ -20,6 +20,95 @@ namespace LJ
             handle_t* (*handle_create_internal)(handle_t* obj, void* ptr, uint32_t type);
             void (*archive_lock_wlock)(handle_t handle);
             void (*archive_lock_wunlock)(handle_t handle);
+            void* (*kernel_calloc_internal)(uint64_t bytes, uint32_t flags_or_zero);
+
+            extern void (*spinlock_lock_internal)(spinlock_t*);
+            extern void (*spinlock_unlock_internal)(spinlock_t*);
+
+            // string table of initial tag names (e.g., "Unknown", "Thread", ...).
+            extern const char* const g_tag_names[]; // = PTR_s_Unknown_143458080 in target
+
+            static const uint8_t kDefaultTag128_Fallback[16] = {
+                0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+            };
+
+            const char* const g_tag_names[14] = {
+                "Unknown", "Thread", "Semaphore",
+                "Event", "RwLock", "File", "Archive",
+                "FindFile", "ArchiveDirectory", "Module",
+                "Notify", "CtNode", "Buffer", "Texlib" // 14th
+            };
+
+
+            // 128-bit default tag “GUID” pattern copied into the remaining slots:
+            const uint8_t* gDefaultTag128Ptr = kDefaultTag128_Fallback;
+
+            inline void write_tag16(uint8_t* dst, const char* s) {
+                const size_t n = std::min<size_t>(16, std::strlen(s));
+                std::memcpy(dst, s, n);
+                if (n < 16) std::memset(dst + n, 0, 16 - n);
+            }
+
+            int handle_initialize(uint32_t max_handles)
+            {
+                // 1) Allocate the per-handle buffer and stash it.
+                auto* buf = static_cast<handle_internal_buffer_t*>(
+                    kernel_calloc(static_cast<size_t>(max_handles) * 8, 0)); // matches ref: count*8
+                sm_context->handles.p_handle_buffer = buf;
+                if (sm_context->handles.p_handle_buffer == nullptr) {
+                    // matches ref’s -0x7fffbffb (0x80004005)
+                    return 0x80004005; // E_FAIL
+                }
+
+                sm_context->handle_max = max_handles;
+
+
+                constexpr unsigned kFileHandlePool = 0x800;
+                sm_context->file_handle_max = kFileHandlePool;
+                sm_context->file_handle_pool.reserve(kFileHandlePool);
+
+                // 2) Populate the free-handle queue with nodes backed by the buffer.
+                auto* ctx = sm_context;
+
+                // The buffer is an array of embedded nodes laid out every 8 bytes.
+                using Node = t_locked_queue_node<handle_internal_buffer_t>;
+                auto* q = &ctx->handle_free_queue;
+                q->reset_bootstrap();
+
+                auto* node = reinterpret_cast<Node*>(ctx->handles.p_handle_buffer);
+                static_assert(sizeof(Node) == 8, "node must be 8 bytes");
+
+                for (uint32_t i = 0; i < max_handles; ++i) {
+                    // owner record starts at m_node (offset 0), so rec == node
+                    auto* rec = reinterpret_cast<handle_internal_buffer_t*>(node);
+                    q->append_unlocked(rec);
+                    node = reinterpret_cast<Node*>(
+                        reinterpret_cast<std::byte*>(node) + sizeof(Node)); // +8
+                }
+
+                // 3) Initialize the 256 tag_id entries (each 16 bytes) in sm_context.
+                // First: copy explicit names from g_tag_names into tag_id[0 .. N-1].
+                // Target copies 14 names (0xE) at offset +0x800: ref copies 13 (0xD) at +0x800.
+                // Both finish with total 256 entries by filling the remainder with the default 128-bit value.
+                uint8_t* out = reinterpret_cast<uint8_t*>(sm_context) + 0x800;
+                for (const char* s : g_tag_names) {
+                    write_tag16(out, s);              // or write_tag16_cstr(out, s);
+                    out += 16;
+                }
+
+                // 4) Fill the remaining entries with the default 128-bit pattern.
+                // Target starts at +0x8e0 and writes 0xF2 entries (242),
+                // which with 14 named entries yields 256 total. (Ref uses +0x8d0, 0xF3 entries.)
+
+                uint8_t* tail = reinterpret_cast<uint8_t*>(sm_context) + 0x8e0;
+                for (int i = 0; i < 0xF2; ++i) {        // 242 entries
+                    std::memcpy(tail, gDefaultTag128Ptr, 16);
+                    tail += 0x10;
+                }
+
+                return 0;
+            }
 
             void mutex_construct(mutex_t& mutex)
             {
@@ -138,6 +227,7 @@ namespace LJ
                 InterlockedExchangeAdd(&spinlock.m_lock_status, 0xFFFFFFFF);
             }
 
+
             handle_t semaphore_create(uint32_t initialCount)
             {
                 handle_t result;
@@ -241,25 +331,8 @@ namespace LJ
                 return result;
             }
 
-            void inject_pointer_sl(context_t* sm_context) {
-                uintptr_t value_addr = (uintptr_t)sm_context + 0x600;
-                uintptr_t value2_addr = (uintptr_t)sm_context + 0x608;
-                uintptr_t value3_addr = (uintptr_t)sm_context + 0x610;
-
-                // Read the data stored at those addresses
-                uintptr_t value_data = *(uintptr_t*)value_addr;
-                uintptr_t value2_data = *(uintptr_t*)value2_addr;
-                uintptr_t value3_data = *(uintptr_t*)value3_addr;
-
-                // Copy the actual data to new locations
-                memcpy((uint8_t*)sm_context + 0x6c0, &value_data, sizeof(void*));
-                memcpy((uint8_t*)sm_context + 0x6c8, &value2_data, sizeof(void*));
-                memcpy((uint8_t*)sm_context + 0x6d0, &value3_data, sizeof(void*));
-            }
-
             handle_t handle_create(void* ptr, uint32_t type)
             {
-                //inject_pointer_sl(sm_context);
                 handle_t result{};
                 handle_create_internal(&result, ptr, type);
                 return result;

@@ -47,6 +47,8 @@ namespace LJ
 				//{ S::GS_CONTEXT_PTR, immediate(get_module_pattern(dll, "46 8D 34 06", 7)) }, //18009809A
 				//{ S::GS_CONTEXT_PTR, immediate(get_module_pattern(dll, "75 17 48 89 0D ? ? ? ?", 5)) }, //180093015
 				{ S::D3DDEVICE, immediate(get_module_pattern(dll, "EB B5 48 89 1F", -0x46)) }, //180086F56
+				{ S::SL_KERNEL_CALLOC, immediate(get_module_pattern(dll, "E8 ? ? ? ? 4C 8B C0 48 89 05", 1)) },
+				//{ S::MEMSET, immediate(get_module_pattern(dll,"48 03 C8 E8 ? ? ? ? C5 F8 10 44 24 20", 4)) },
 				{ S::SL_FILE_CREATE, immediate(get_module_pattern(dll, "E8 ? ? ? ? 48 8B 56 20", 1)) }, //1800A2A15
 				{ S::SL_FILE_OPEN, immediate(get_module_pattern(dll, "E8 ? ? ? ? 8B 08 85 C9", 1)) }, //180024404
 				{ S::SL_FILE_READ, immediate(get_module_pattern(dll, "49 89 46 18", 5)) }, //18002451E

@@ -127,52 +127,74 @@ namespace LJ
 		}
 
 		template<typename T>
-		struct t_locked_queue_node
-		{
-			t_locked_queue_node<T>* volatile mp_next = nullptr;
+		struct t_locked_queue_node {
+			t_locked_queue_node* mp_next = nullptr;
 		};
 
 		template<typename T>
-		class alignas(16) t_locked_queue
-		{
+		class alignas(16) t_locked_queue {
 		public:
-			void enqueue(T* p)
-			{
+			// Normal, thread-safe enqueue
+			void enqueue(T* p) {
 				sl::spinlock_lock(m_sync);
-
-				m_size++;
-				p->m_node.mp_next = nullptr;
-				if (this->mp_head != nullptr)
-					mp_tail->mp_next = &p->m_node;
-				else
-					this->mp_head = &p->m_node;
-				this->mp_tail = &p->m_node;
-
+				link_unlocked(p);
 				sl::spinlock_unlock(m_sync);
 			}
 
-			T* dequeue()
-			{
-				T* item = nullptr;
+			// Normal, thread-safe dequeue
+			T* dequeue() {
 				sl::spinlock_lock(m_sync);
-				t_locked_queue_node<T>* head = this->mp_head;
-				if (head != nullptr)
-				{
-					m_size--;
-					this->mp_head = head->mp_next;
-					if (this->mp_tail == head)
-						this->mp_tail = nullptr;
+				T* item = nullptr;
+				auto* head = mp_head;
+				if (head) {
+					--m_size;
+					mp_head = head->mp_next;
+					if (mp_tail == head) mp_tail = nullptr;
 					head->mp_next = nullptr;
+					// container_of: T starts at m_node
 					item = reinterpret_cast<T*>(reinterpret_cast<char*>(head) - offsetof(T, m_node));
 				}
 				sl::spinlock_unlock(m_sync);
 				return item;
 			}
 
+			// --- Bootstrap helpers (use ONLY during initialization) ---
+
+			// Hard reset to a known empty, unlocked state
+			void reset_bootstrap() {
+				mp_head = nullptr;
+				mp_tail = nullptr;
+				m_size = 0;
+				m_sync.m_lock_status = 0; // unlock
+			}
+
+			// Append without taking the lock (bootstrap only)
+			void append_unlocked(T* p) {
+				link_unlocked(p);
+			}
+
+			// Optional trivial accessors (non-locking)
+			t_locked_queue_node<T>* head() const { return mp_head; }
+			t_locked_queue_node<T>* tail() const { return mp_tail; }
+			uint32_t size() const { return m_size; }
+
 		private:
+			// Common link logic (no locking inside)
+			void link_unlocked(T* p) {
+				++m_size;
+				p->m_node.mp_next = nullptr;
+				if (mp_head) {
+					mp_tail->mp_next = &p->m_node;
+				}
+				else {
+					mp_head = &p->m_node;
+				}
+				mp_tail = &p->m_node;
+			}
+
 			t_locked_queue_node<T>* mp_head = nullptr;
 			t_locked_queue_node<T>* mp_tail = nullptr;
-			spinlock_t m_sync;
+			spinlock_t m_sync{};          // value-initialize
 			uint32_t m_size = 0;
 		};
 
@@ -190,9 +212,12 @@ namespace LJ
 
 			void reserve(unsigned int size)
 			{
-				assert(mp_element == nullptr);
-				mp_element = new T[size + 1];
-				m_deque_size = size;
+				assert(mp_element == nullptr);               // only once
+				mp_element = new T[size + 1];                // +1 sentinel slot in the ring
+				m_deque_size = size;                       // capacity (excludes sentinel)
+				m_element_size = 0;                          // current number of elements
+				m_index_begin = 0;
+				m_index_end = 0;
 			}
 
 		private:

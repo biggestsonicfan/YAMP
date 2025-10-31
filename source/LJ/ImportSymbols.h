@@ -11,6 +11,10 @@ namespace LJ
 			GS_CONTEXT_PTR,
 			D3DDEVICE,
 
+			// Needed for semaphore_create
+			SL_KERNEL_CALLOC,
+			//MEMSET,
+			
 			SL_FILE_CREATE,
 			SL_FILE_OPEN,
 			SL_FILE_READ,
