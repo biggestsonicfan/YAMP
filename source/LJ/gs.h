@@ -718,8 +718,8 @@ namespace LJ
 				unsigned int max_frame_latency;
 				unsigned int backbuffer_count;
 				unsigned int unk_int1;
-				important_thing* p_csl_allocator;
-				important_thing* p_csl_allocator_with_pool;
+				csl_allocator* p_csl_allocator;
+				csl_allocator* p_csl_allocator_with_pool;
 				std::byte gap1[40];
 				uint64_t* _p_isl_allocator; //Unpopulated
 				uint64_t* unpop_pointer2;

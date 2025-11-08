@@ -174,6 +174,7 @@ namespace LJ
 				uint32_t tag_id;
 				uint32_t version;
 				uint32_t size_of_struct;
+				uint32_t unknown_0;
 				export_context_t export_context;
 				uint32_t processor_num;
 				uint64_t main_thread_id;
@@ -191,16 +192,16 @@ namespace LJ
 					handle_internal_t* p_handle_tbl;
 				} handles;
 				uint32_t handle_max; //node count 0x78
-				uint32_t file_handle_max;
-				uint32_t file_callback_thread_stack_size;
-				std::byte gap[12];
+				uint32_t file_handle_max;  //0x7c
+				uint32_t file_callback_thread_stack_size; //0x80
+				file_handle_internal_t* p_file_handle_tbl; //0x88
 				isl_file_access* p_file_access;
 				csl_file_async_request* p_file_async_request;
 				std::byte gap1[120];
 				csl_file_access_archive* p_archive_access;
 				csl_file_async_request* p_archive_async_request;
-				important_thing* p_csl_allocator;
-				important_thing* p_csl_allocator_with_pool;
+				csl_allocator* p_csl_allocator;
+				csl_allocator* p_csl_allocator_with_pool;
 				std::byte gap2[32];
 				uint64_t* _p_csl_allocator;
 				uint64_t* __p_csl_allocator;
@@ -208,14 +209,22 @@ namespace LJ
 				void* p_libc_realloc;
 				void* p_pxd_std_free;
 				void* p_libc_msize;
-				//std::byte gap3[6576];
-				std::byte gap3[1336];
+				uint64_t unknown_0_1;
+				uint64_t unknown_value;
+				std::byte gap3[240];
+				uint64_t thread_sid_index;
+				uint32_t is_utf8_file_path;
+				uint32_t fs_root_len;
+				char sz_fs_root[0x410];
+				std::byte gap3a[272];
 				t_locked_queue<handle_internal_buffer_t> handle_free_queue;//0x6C0
 				std::byte gap4[436];
 				t_fixed_deque<file_handle_internal_t*> file_handle_pool;
 				std::byte gap5[32];
 				handle_t sync_archive_condvar;
-				//std::byte gap6[54352];
+				std::byte gap6[4656];
+				void* allocated_heap;
+				uint64_t heap_size;
 			};
 			// Validate important offsets
 			//static_assert(offsetof(context_t, handles) == 0x70);
@@ -297,6 +306,15 @@ namespace LJ
 			extern const uint8_t* gDefaultTag128Ptr;
 
 			int handle_initialize(uint32_t max_handles);
+			int initialize();
+
+			struct HevtRec {
+				uint32_t tag;   // "HEVT" = 0x54564548
+				uint32_t pad;   // unused/alignment
+				HANDLE   h;     // OS event handle (at +8)
+			};
+
+			void heap_free(void* p);
 
 		};
 	}

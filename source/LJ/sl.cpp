@@ -4,6 +4,9 @@
 #include "../YAMPGeneral.h"
 #include "../wil/resource.h"
 #include <Xinput.h>
+#include <Windows.h>
+#include <mmsystem.h>   // timeBeginPeriod
+#pragma comment(lib, "winmm.lib")
 
 #include <algorithm>
 
@@ -44,10 +47,215 @@ namespace LJ
             // 128-bit default tag “GUID” pattern copied into the remaining slots:
             const uint8_t* gDefaultTag128Ptr = kDefaultTag128_Fallback;
 
-            inline void write_tag16(uint8_t* dst, const char* s) {
-                const size_t n = std::min<size_t>(16, std::strlen(s));
+            inline void write_tag16_cstr(uint8_t* dst, const char* s) {
+                // cap at 15 to leave room for the NUL terminator
+                const size_t n = std::min<size_t>(15, std::strlen(s));
                 std::memcpy(dst, s, n);
-                if (n < 16) std::memset(dst + n, 0, 16 - n);
+                // pad the rest with zeros (guarantees dst[15] == 0)
+                std::memset(dst + n, 0, 16 - n);
+            }
+
+            inline long long initialize_timing()  // HRESULT-style: 0 on success, 0x80004005 on fail
+            {
+                LARGE_INTEGER qpf{};
+                if (QueryPerformanceFrequency(&qpf)) {
+                    const uint64_t freq = static_cast<uint64_t>(qpf.QuadPart);
+                    sm_context->count_frequency = freq;
+
+                    const double f = static_cast<double>(static_cast<unsigned long long>(qpf.QuadPart));
+                    sm_context->count_per_milli_second = 1000.0 / f;   // seconds→ms scale per tick
+                    sm_context->count_per_micro_second = 1'000'000.0 / f;
+                    sm_context->count_per_nano_second = 1'000'000'000.0 / f;
+                    sm_context->count_per_tick = 3000.0 / f;    // 3 ms per tick (used by the game)
+
+                    timeBeginPeriod(1);  // request 1 ms timer resolution
+                    return 0;            // S_OK
+                }
+                return 0x80004005;       // E_FAIL
+            }
+
+            static int scan_bytes_00_01_FF(const uint8_t* buf, size_t len) {
+                if (!buf || len == 0) return -1;
+
+                // 0x0000FF01 repeated → bytes {01,FF,00,00} across the lane
+                const __m128i needles = _mm_set1_epi32(0x0000FF01);
+
+                const uint8_t* p = buf;
+                const uint8_t* end = buf + len;
+
+                // process full 16B chunks
+                while (size_t(end - p) >= 16) {
+                    __m128i block = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+                    // imm=0x14: equal-any, unsigned bytes
+                    int idx = _mm_cmpistri(needles, block, 0x14);
+                    // if any match in block, cmpistrz (ZF==0) → we found it
+                    if (!_mm_cmpistrz(needles, block, 0x14)) {
+                        return int((p - buf) + idx);
+                    }
+                    p += 16;
+                }
+
+                // tail (≤15 bytes) — do a scalar check (or a masked load if you prefer)
+                for (; p < end; ++p) {
+                    if (*p == 0x00 || *p == 0x01 || *p == 0xFF) return int(p - buf);
+                }
+                return -1;
+            }
+
+            void* __fastcall heap_calloc(size_t size, unsigned long long align)
+            {
+                // choose at least 16-byte alignment (matches the pattern in your decomp)
+                size_t a = (align < 16) ? 16 : static_cast<size_t>(align);
+
+                auto* self = sm_context ? sm_context->p_csl_allocator : nullptr;
+                if (!self || !self->alloc) return nullptr;
+
+                void* p = self->alloc(self, size, a);
+                if (p) {
+                    std::memset(p, 0, size);
+                }
+                return p;
+            }
+
+            void heap_free(void* p) {
+                using free_fn = void (*)(void*);
+                if (!p || !sm_context->p_pxd_std_free) return;
+                auto fn = reinterpret_cast<free_fn>(sm_context->p_pxd_std_free);
+                fn(p);
+            }
+
+            // Returns a1 for parity with the decomp; writes the numeric id to *a1 (0 on failure).
+            int* __fastcall event_create(int* a1, unsigned char initial)
+            {
+                *a1 = 0;
+
+                // 16-byte record: "HEVT" tag + OS handle
+                struct HevtRec { uint32_t tag; uint32_t pad{}; HANDLE h; };
+
+                auto* rec = static_cast<HevtRec*>(heap_calloc(sizeof(HevtRec), sizeof(HevtRec)));
+                if (!rec) return a1;
+
+                HANDLE h = CreateEventA(nullptr, TRUE, initial != 0, nullptr); // or your imported pointer
+                if (!h || h == INVALID_HANDLE_VALUE) {
+                    heap_free(rec);
+                    return a1;
+                }
+
+                rec->tag = 0x54564548u; // "HEVT"
+                rec->h = h;
+
+                // Your project's signature: handle_create returns handle_t
+                handle_t hand = handle_create(/*record*/rec, /*type*/3u);
+                int id = static_cast<int>(hand.h.m_handle);
+                *a1 = id;                       // <-- write back to the out param
+
+                if (id == 0) {                  // registration failed: clean up
+                    CloseHandle(h);
+                    heap_free(rec);
+                }
+                return a1;
+            }
+
+            int file_system_initialize(uint32_t param1, uint64_t param2)
+            {
+                if (reinterpret_cast<int*>(sm_context->is_utf8_file_path) == 0) {
+                    auto* path_buf = reinterpret_cast<char*>(sm_context->sz_fs_root); // char[0x410] lives here
+                    DWORD len = GetCurrentDirectoryA(0x410, path_buf); // returns length, excl NUL
+                    if (len > 0 && len < 0x410) {
+                        sm_context->is_utf8_file_path = 1;
+                    }
+                }
+                else
+                {
+                    // TO DO: Convert utf16_to_utf8
+                    auto* path_wbuf = reinterpret_cast<wchar_t*>(sm_context->sz_fs_root); // char[0x410] lives here
+                    DWORD len = GetCurrentDirectoryW(0x104, path_wbuf); // returns length, excl NUL
+                    if (len > 0 && len < 0x410) {
+                        sm_context->is_utf8_file_path = 1;
+                    }
+                }
+
+                // Example if you’re scanning a fixed buffer in sm_context:
+                // say sm_context->sz_fs_root starts at sm_context+0x298
+                auto* base = reinterpret_cast<const uint8_t*>(sm_context->sz_fs_root);
+                int pos = scan_bytes_00_01_FF(base, 0x410);  // bounded to 0x410 bytes
+
+                auto* str_base = reinterpret_cast<const char*>(sm_context->sz_fs_root);
+                uint32_t len = static_cast<uint32_t>(strnlen_s(str_base, 0x410)); // returns <= 0x410
+
+                sm_context->fs_root_len = len;
+
+                auto* idk = kernel_calloc((static_cast<uint64_t>(param1) * 4) + 32 * ((static_cast<uint64_t>(param1) * 0x4d0)+2048), 0);
+
+                // Opaque dispatch object
+                struct libc_alloc_dispatch { void** table; };
+
+                // Function signature (x64): size_t is 64-bit
+                using libc_alloc_fn = void* (*)(libc_alloc_dispatch* self, size_t size, size_t align);
+
+                // Get the function from slot 1 (+8) and call it
+                auto* self = reinterpret_cast<libc_alloc_dispatch*>(sm_context->__p_csl_allocator);
+                auto** tab = *reinterpret_cast<void***>(self);
+                auto  c_alloc = reinterpret_cast<libc_alloc_fn>(tab[1]);
+
+                sm_context->allocated_heap = c_alloc(self, (static_cast<size_t>(param1) + 1) << 3, 8);
+				sm_context->heap_size = param1;
+
+                if(idk == 0) {
+                    sm_context->allocated_heap = reinterpret_cast<void*>(0x80004005); // E_FAIL
+				}
+                auto* tbl = static_cast<file_handle_internal_t*>(sm_context->p_file_handle_tbl);
+                //tbl[0].m_async_event.h.m_handle = static_cast<uint32_t>(idk);
+
+                // pool lives in sm_context->file_handle_pool and is a t_fixed_deque<file_handle_internal_t*>
+                using FH = file_handle_internal_t;
+
+                // Ensure the pool is reserved once somewhere before use:
+                sm_context->file_handle_pool.reserve(sm_context->file_handle_max);
+
+                FH* pfVar17 = sm_context->p_file_handle_tbl;                                    // current entry
+                unsigned remaining = sm_context->file_handle_max;
+
+                while (remaining--) {
+                    // event_create(1) → numeric handle id at +0x468
+                    int id = 0;
+                    event_create(&id, /*initial*/1);
+                    pfVar17->m_async_event.h.m_handle = static_cast<uint32_t>(id);
+
+                    // overflow check (matches the assert/printf/break in disasm)
+                    //assert(sm_context->file_handle_pool_size() < sm_context->file_handle_pool_capacity());
+
+                    // enqueue pointer to this entry
+                    sm_context->file_handle_pool.push_back(pfVar17);
+
+                    // next table entry
+                    ++pfVar17;                                         // if contiguous array of FH
+                    // If it’s a raw byte blob with 0x4D0 stride, use:
+                    // pfVar17 = reinterpret_cast<FH*>(reinterpret_cast<uint8_t*>(pfVar17) + 0x4D0);
+                }
+
+
+                return 0;
+
+            }
+
+            int initialize()
+            {
+                sm_context->export_context.size_of_struct = 0x10;
+                sm_context->export_context.p_context = &sm_context;
+                sm_context->processor_num = 0x10;
+                sm_context->main_thread_id = GetCurrentThreadId();
+                sm_context->processor_affinity_mask = 0x0FFFF;
+                sm_context->temp_work_size = 0x80000;
+                sm_context->p_temp_work = kernel_calloc(sm_context->temp_work_size, 0);
+                sm_context->file_handle_max = 0x80000;
+                auto timing = initialize_timing();
+                auto fs_init = file_system_initialize(0x800, 0x800000);
+
+
+
+
+                return 0;
             }
 
             int handle_initialize(uint32_t max_handles)
@@ -93,7 +301,7 @@ namespace LJ
                 // Both finish with total 256 entries by filling the remainder with the default 128-bit value.
                 uint8_t* out = reinterpret_cast<uint8_t*>(sm_context) + 0x800;
                 for (const char* s : g_tag_names) {
-                    write_tag16(out, s);              // or write_tag16_cstr(out, s);
+                    write_tag16_cstr(out, s);
                     out += 16;
                 }
 

@@ -414,22 +414,29 @@ namespace LJ
 			} hash{};
 		};
 
+
+		// Forward
+		struct csl_allocator;
+
+		// Function pointer types (x64 ABI; no special calling conv needed)
+		using csl_dtor_fn = void  (*)(csl_allocator* self, unsigned deleteFlags);
+		using csl_alloc_fn = void* (*)(csl_allocator* self, uint32_t size, uint32_t align);
+		using csl_realloc_fn = void* (*)(csl_allocator* self, void* oldPtr, uint32_t size, uint32_t align);
+		using csl_free_fn = void  (*)(csl_allocator* self, void* ptr);
+		using csl_blocksize_fn = size_t(*)(csl_allocator* self, const void* ptr);
+		using csl_guard_fn = void  (*)(); // placeholders for the guard thunks
+
 		struct csl_allocator
 		{
-			std::byte* csl_allocator[8];
+			csl_dtor_fn      scalar_deleting_destructor; // 0x00
+			csl_alloc_fn     alloc;                      // 0x08  (confirmed)
+			csl_realloc_fn   realloc_;                   // 0x10
+			csl_free_fn      free_;                      // 0x18
+			csl_blocksize_fn block_size;                 // 0x20
+			csl_guard_fn     _guard_check_ical0;         // 0x28
+			csl_guard_fn     _guard_check_ical1;         // 0x30
 		};
 
-
-		struct important_thing
-		{
-			csl_allocator* scalar_deleting_destructor;
-			void* alloc;
-			void* realloc;
-			void* free;
-			uint64_t* block_size;
-			void* _guard_check_ical0;
-			void* _guard_check_ical1;
-		};
 
 		struct important_thing1
 		{

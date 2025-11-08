@@ -142,6 +142,13 @@ namespace LJ
                 // Pick a capacity that’s plenty for StF (tweak if you learn the real number)
                 constexpr uint32_t kHandleCapacity = 0x100000;
 
+                const int ic = sl::initialize();
+
+                if (ic != 0) {
+                    // Mirror E_FAIL path used in your implementation; abort init on failure.
+                    return false;
+                }
+
                 const int rc = sl::handle_initialize(kHandleCapacity);
                 if (rc != 0) {
                     // Mirror E_FAIL path used in your implementation; abort init on failure.
