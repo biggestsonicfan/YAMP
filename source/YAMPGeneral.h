@@ -43,6 +43,14 @@ static std::string WcharToUTF8(std::wstring_view text)
 class YAMPGeneral
 {
 public:
+	// Which arcade module this process is hosting; drives the per-game UI panels.
+	enum class GameId
+	{
+		VF5FS,
+		StF,
+		VF2,
+	};
+
 	const auto& GetDataPath() const { return m_userDataPath; }
 	const auto* GetSettings() const { return m_settings.get(); }
 	const auto& GetPressedKeys() const { return m_pressedKeyboardKeys; }
@@ -59,6 +67,9 @@ public:
 	
 	void SetDLLName(std::string name) { m_dllName = std::move(name); }
 	void SetDLLTimestamp(uint32_t timestamp) { m_dllTimestamp = timestamp; }
+
+	GameId GetGameId() const { return m_gameId; }
+	void SetGameId(GameId id) { m_gameId = id; }
 
 	void SetKeyPressed(uint32_t key, bool pressed)
 	{
@@ -83,6 +94,7 @@ private:
 
 	std::string m_dllName;
 	uint32_t m_dllTimestamp = 0;
+	GameId m_gameId = GameId::VF5FS;
 	std::filesystem::path m_userDataPath;
 	std::unique_ptr<YAMPSettings> m_settings;
 

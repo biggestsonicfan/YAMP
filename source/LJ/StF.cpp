@@ -1,20 +1,36 @@
 #include "StF.h"
 
+// Defined in HostCdevice.cpp: close + ExecuteCommandLists StF's recorded render lists (host's job).
+void ExecuteStfRenderListsNow();
+// Defined in HostCdevice.cpp: mark the DLL's per-frame render window so the ResourceBarrier hook
+// only corrects StF's own barrier StateBefore values (not d3d11on12's blit barriers).
+void SetStfRenderActiveNow(bool active);
+// Defined in HostCdevice.cpp: PATH B — close+execute+flush+reopen StF's own draw list each frame.
+void SubmitStfFrameListNow();
+// Defined in HostCdevice.cpp: true once a submit hung/removed the device (stop the loop, DRED dumped).
+bool StfExecDisabledNow();
+// Defined in HostCdevice.cpp: the host's per-frame upload-pool frame-advance — bump the upload-frame
+// stamp + recycle StF's upload buffers (in-use -> available). Fixes the pool-exhaustion crash.
+void AdvanceFrameStampNow();
+
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include "../wil/resource.h"
 
-#include "../criware/CriStub.h"
+#include "../criware/Cri.h"
 
 #include "sl.h"
 #include "gs.h"
+#include "m2ftg.h"
 #include "Imports.h"
 #include "Patch.h"
 #include "sys_util.h"
 #include "cs_game.h"
 
 #include "ImportSymbols.h"
+#include "HostCdevice.h"
 #include "../YAMPGeneral.h"
+#include "../imgui/imgui.h"
 
 #include "../Utils/MemoryMgr.h"
 #include "../Utils/ScopedUnprotect.hpp"
@@ -25,65 +41,34 @@ namespace LJ
     {
         static const wchar_t* DLL_NAME = L"stf-pxd-w64-d3d12_retail.dll";
 
+        // Resolved from the DLL (ImportSymbol::STF_*): M2FTGAppModule's per-frame render-system submit
+        // (FUN_18003b530) and the live-execute_info global (DAT_1801ee4a0) that submit dereferences.
+        // module_main only RECORDS StF's frame; the host must drive this submit each frame (see GameLoop).
+        static void  (*g_stfFrameSubmit)()   = nullptr;
+        static void** g_stfRenderExecInfo    = nullptr;
+
         // Contexts
         // TODO: Move elsewhere, as they will get very, very long
         // But not in V6-VF5FS.h as they are private!
 
-        // Seems unused, so don't bother getting it right
+        // ct::initialize_module (0x1800c6ff0) requires size_of_struct == 0x30
         struct ct_context_t
         {
             uint32_t tag_id; // Unknown
             uint32_t version; // Unknown
-            uint32_t size_of_struct = sizeof(decltype(*this)); // Should be 48 when complete
+            uint32_t size_of_struct = 0x30;
+            std::byte pad[36]{};
         };
+        static_assert(sizeof(ct_context_t) == 0x30);
 
         // TODO: Later these can be put by value, for now put them on the heap to make full use of page heap
         // and catch any out-of-bounds access
         ct_context_t* g_ct_context = new ct_context_t;
 
-        // Configs
-        struct vf5fs_game_config_t
-        {
-            // TODO: Fill with defaults
-            uint16_t energy;
-            int8_t round;
-            int8_t time;
-            int8_t diff;
-            int8_t game_mode;
-            int8_t lang;
-            bool is_triangle_start : 4;
-            bool is_dural_unlocked : 4;
-        };
-        static_assert(sizeof(vf5fs_game_config_t) == 8);
+        // m2ftg_config_t / m2ftg_pad_t / m2ftg_execute_info_t now live in m2ftg.h (shared with
+        // the VF2 host). module_start (0x180062830) memcpys the 0x100C config into DAT_1801ed490.
 
-        struct alignas(16) vf5fs_execute_info_t
-        {
-            enum assign_t
-            {
-                assign_invalid = 0x0,
-                assign_none = 0x1,
-                assign_p = 0x2,
-                assign_k = 0x3,
-                assign_g = 0x4,
-                assign_pg = 0x5,
-                assign_pkg = 0x6,
-                assign_pk = 0x7,
-                assign_kg = 0x8,
-            };
 
-            size_t size_of_struct;
-            cgs_device_context* p_device_context;
-            int status;
-            int result;
-            unsigned int output_texid;
-            std::byte gap[4];
-            uint8_t assign[2][8];
-            csl_pad pad[2];
-            std::byte gap2[16];
-        };
-        static_assert(sizeof(vf5fs_execute_info_t) == 800);
-        static_assert(offsetof(vf5fs_execute_info_t, assign) == 0x20);
-        static_assert(offsetof(vf5fs_execute_info_t, pad) == 0x30);
 
         static void ImportFunctions(const Imports& symbols)
         {
@@ -107,6 +92,8 @@ namespace LJ
             Import(gs::ib_create, ImportSymbol::IB_CREATE);
 			Import(sl::kernel_calloc_internal, ImportSymbol::SL_KERNEL_CALLOC);
 			//Import(sl::memset, ImportSymbol::MEMSET);
+            Import(g_stfFrameSubmit, ImportSymbol::STF_FRAME_SUBMIT);
+            Import(g_stfRenderExecInfo, ImportSymbol::STF_RENDER_EXECINFO);
         }
 
         static void PrefillVariables(const Imports& symbols, const RenderWindow& window)
@@ -120,9 +107,18 @@ namespace LJ
             Import(ppContext, ImportSymbol::GS_CONTEXT_PTR);
             *ppContext = gs::sm_context;
 
-            ID3D12Device** ppDevice12;
+            // The DLL's "D3DDEVICE" symbol is cdevice_common::g_pD3DDevice: a POINTER
+            // slot the DX12 renderer treats as the pxd host cdevice object (freelist at
+            // +0x38, device at +0x08, allocator at +0x68, resource factory at +0x17b0).
+            // Writing the raw ID3D12Device here (as the VF5FS/DX11 path does) leaves the
+            // intermediate-buffer freelist empty -> infinite spin. Build a proper host
+            // cdevice and store a pointer to IT instead.
+            void** ppDevice12;
             Import(ppDevice12, ImportSymbol::D3DDEVICE);
-            *ppDevice12 = window.GetD3D12Device();
+
+            using cdevice_ctor_fn = void* (*)(void*);
+            auto cdeviceCtor = reinterpret_cast<cdevice_ctor_fn>(symbols.GetSymbol(ImportSymbol::CDEVICE_CTOR));
+            *ppDevice12 = BuildHostCdevice(window.GetD3D12Device(), window.GetD3D12Queue(), cdeviceCtor);
         }
 
         static bool ResolveSymbolsAndInstallPatches(void* dll, const RenderWindow& window) try
@@ -139,7 +135,7 @@ namespace LJ
 
             // Only once
             if (sl::sm_context && sl::sm_context->handles.p_handle_buffer == nullptr) {
-                // Pick a capacity that�s plenty for StF (tweak if you learn the real number)
+                // Pick a capacity that�s plenty for StF (tweak if you learn the real number)
                 constexpr uint32_t kHandleCapacity = 0x100000;
 
                 const int ic = sl::initialize();
@@ -179,6 +175,28 @@ namespace LJ
             return false;
         }
 
+        // Sonic the Fighters is a native 4:3 arcade game (Model 2: 496x384 internal, upscaled by
+        // the module to a 1024x768 display texture). The presentation is a user setting: 0 = keep
+        // 4:3 (pillarboxed in widescreen windows), 1 = stretch to 16:9, 2 = fill the whole window.
+        // Called at startup and re-applied live from GameLoop whenever the setting changes.
+        static void ApplyAspectSetting(RenderWindow& window, uint32_t mode)
+        {
+            switch (mode)
+            {
+            case 1:
+                window.SetGameStretchToFill(false);
+                window.SetGameAspectRatio(16.0f / 9.0f);
+                break;
+            case 2:
+                window.SetGameStretchToFill(true);
+                break;
+            default:
+                window.SetGameStretchToFill(false);
+                window.SetGameAspectRatio(4.0f / 3.0f);
+                break;
+            }
+        }
+
         // TODO: Move elsewhere
         static std::filesystem::path gamePath;
 
@@ -197,7 +215,7 @@ namespace LJ
             if (gameDll == nullptr)
             {
                 // Try loading from a subdirectory
-                gamePath.append(L"stf");   // <<� FIX: use "stf" subfolder for StF
+                gamePath.append(L"stf");   // <<� FIX: use "stf" subfolder for StF
                 gameDll.reset(LoadLibraryW((gamePath / DLL_NAME).c_str()));
             }
 
@@ -269,11 +287,13 @@ namespace LJ
             if (!ResolveSymbolsAndInstallPatches(gameDll.get(), window))
             {
                 // Init failed
+                OutputDebugStringA("[StF::Run] ResolveSymbolsAndInstallPatches FAILED\n");
                 return;
             }
+            OutputDebugStringA("[StF::Run] patches installed OK\n");
 
             // Initialize Criware stub and module stubs
-            CriStub criware_stub;
+            Cri criware;
 
             struct sl_module_t
             {
@@ -284,10 +304,11 @@ namespace LJ
 
             struct gs_module_t
             {
-                size_t size = sizeof(decltype(*this)); // Should be 80 when complete, but other fields are unknown so far
+                size_t size = sizeof(decltype(*this)); // gs::initialize_module (0x180092fe0) requires 0x58
                 gs::context_t* context;
-                uint8_t pad[64];
+                uint8_t pad[72];
             } gs_module;
+            static_assert(sizeof(gs_module_t) == 0x58);
             gs_module.context = gs::sm_context;
 
             const struct ct_module_t
@@ -305,29 +326,33 @@ namespace LJ
                 const icri* cri_ptr;
                 const char* root_path;
                 module_func_t* module_main;
-                vf5fs_game_config_t config{};
+                m2ftg_config_t config{};
             } params;
-            static_assert(sizeof(params) == 64);
+            static_assert(offsetof(module_params_t, config) == 0x38);
 
             const std::string utf8Path = gamePath.u8string();
 
             params.sl_module = &sl_module;
             params.gs_module = &gs_module;
             params.ct_module = &ct_module;
-            params.cri_ptr = &criware_stub;
+            params.cri_ptr = &criware;
             params.module_main = &module_main;
             params.root_path = utf8Path.c_str();
 
             const auto* settings = gGeneral.GetSettings();
 
-            params.config.is_dural_unlocked = false;
-            params.config.is_triangle_start = false;
-            params.config.game_mode = settings->m_arcadeMode ? 1 : 0;
-            params.config.lang = settings->m_language;
-            params.config.diff = 1;
-            params.config.energy = 200;
-            params.config.round = 2;
-            params.config.time = 60;
+            // Config values captured from a LIVE Lost Judgment m2ftg minigame (DAT_1801ed490) and
+            // field-named via YLAD's symbolized scene ctor: LJ ran kind=2, difficulty=1 (normal),
+            // is_freeplay=0 (LJ charges in-game money), is_vs_mode=1 (its minigame boots a credited
+            // 2P quick match — see m2ftg.h +0x0A notes). YAMP defaults to the authentic ARCADE
+            // boot instead (vs_mode off: attract loop -> coin/start -> 1P ladder); all of these
+            // are dip switches in the YAMP settings (module_start copies the config once, so
+            // changes need a restart).
+            params.config.kind = 2;      // Sonic the Fighters
+            params.config.difficulty = settings->m_stfDifficulty <= 3 ? static_cast<uint8_t>(settings->m_stfDifficulty) : 1;
+            params.config.country = settings->m_stfCountry <= 2 ? static_cast<uint8_t>(settings->m_stfCountry) : 0;
+            params.config.is_freeplay = settings->m_stfFreeplay ? 1 : 0;
+            params.config.is_vs_mode = settings->m_stfVersusMode ? 1 : 0;
 
             // Set up a FPS limiter
             // TODO: Do more gracefully
@@ -346,14 +371,20 @@ namespace LJ
                 }
             }
 
+            ApplyAspectSetting(window, settings->m_stfAspect);
+
             // Kick off the game
-            if (module_start(sizeof(params), &params) == 0)
+            OutputDebugStringA("[StF::Run] calling module_start...\n");
+            const auto msRet = module_start(sizeof(params), &params);
+            { char b[96]; _snprintf_s(b, _TRUNCATE, "[StF::Run] module_start returned %lld\n", (long long)msRet); OutputDebugStringA(b); }
+            if (msRet == 0)
             {
                 LARGE_INTEGER lastTime;
                 QueryPerformanceCounter(&lastTime);
                 while (!window.IsShuttingDown())
                 {
-                    if (!GameLoop(module_main, window)) break;
+                    OutputDebugStringA("[StF::Run] GameLoop iter\n");
+                    if (!GameLoop(module_main, window)) { OutputDebugStringA("[StF::Run] GameLoop returned false\n"); break; }
 
                     // TODO: Waitable timer
                     LARGE_INTEGER currentTime;
@@ -368,38 +399,349 @@ namespace LJ
             }
         }
 
+        // The Escape pause menu, mirroring Lost Judgment's. RE ground truth (2026-07-26): LJ's
+        // menu SHELL (View Controls / Button/Key Configuration / Quit) is HOST UI — the strings
+        // exist nowhere in the DLL, the DLL imports no keyboard APIs, and the DLL's own internal
+        // menu (TaskCsMenu/TaskCmdList singleton @0x18058ab00 with MENU_EXPLAIN/MENU_CONTROL
+        // panels) is dead code in the LJ build: it is constructed at DLL init but never registered
+        // into the task list (verified by a full rip-relative reference scan — ctor + dtor thunk
+        // only). What IS the module's own handling is the PAUSE: status bit0 makes module_main
+        // freeze the emulation, pause all 6 audio channels (FUN_180043020) and keep presenting
+        // the last completed frame; clearing the bit resumes. So, like LJ, the host draws the
+        // menu and the module handles the pause. Returns false when the player picks Quit.
+        static bool DrawStfPauseMenu(RenderWindow& window, bool& menuOpen)
+        {
+            bool keepRunning = true;
+
+            const ImVec2& displaySize = ImGui::GetIO().DisplaySize;
+            ImGui::SetNextWindowPos({ displaySize.x / 2.0f, displaySize.y / 2.0f }, ImGuiCond_Always, { 0.5f, 0.5f });
+            if (ImGui::Begin("Paused", nullptr,
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove))
+            {
+                constexpr float BUTTON_WIDTH = 240.0f;
+                if (ImGui::Button("Resume", { BUTTON_WIDTH, 0 }))
+                {
+                    menuOpen = false;
+                }
+                if (ImGui::Button("View Controls / Settings", { BUTTON_WIDTH, 0 }))
+                {
+                    window.GetUI().OpenSettings();
+                }
+                if (ImGui::Button("Quit", { BUTTON_WIDTH, 0 }))
+                {
+                    keepRunning = false;
+                }
+            }
+            ImGui::End();
+
+            return keepRunning;
+        }
+
+        // SEH-guarded call of StF's per-frame render-system submit (FUN_18003b530). Kept in its own
+        // function because __try/__except cannot share a scope with C++ object unwinding. One-shot: on a
+        // fault it latches off so we never repeat a crash. Returns false once disabled.
+        static bool CallStfFrameSubmit(void* submitFn)
+        {
+            static bool s_ok = true;
+            if (!s_ok || !submitFn) return false;
+            __try { reinterpret_cast<void(__cdecl*)()>(submitFn)(); }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                s_ok = false;
+                OutputDebugStringA("[stf-submit] FUN_18003b530 faulted -> disabled\n");
+            }
+            return s_ok;
+        }
+
         bool LJ::StF::GameLoop(module_func_t func, RenderWindow& window)
         {
-            vf5fs_execute_info_t execute_info{};
+            // Persistent input/arcade state (LJ keeps these in the scene object across frames):
+            // s_startScreen  <- module status bit6 from last frame (scene+0x2B58, "press start" active)
+            // s_coinPending  <- a credit was inserted, START injection phase   (scene+0x2B59)
+            // s_startToggle  <- alternate-frame START injector                 (scene+0x2B5A)
+            static csl_pad s_pads[2];
+            static bool s_startScreen = false;
+            static bool s_coinPending = false;
+            static bool s_startToggle = false;
+
+            const auto* settings = gGeneral.GetSettings();
+
+            // Live-apply the aspect-ratio setting (the ImGui Apply button only writes the settings
+            // struct; this poll is what makes the change take effect without a restart).
+            {
+                static uint32_t s_lastAspect = UINT32_MAX;
+                if (settings->m_stfAspect != s_lastAspect)
+                {
+                    s_lastAspect = settings->m_stfAspect;
+                    ApplyAspectSetting(window, s_lastAspect);
+                }
+            }
+
+            // PERSISTENT across frames (confirmed via YLAD's symbolized driver
+            // cscene_minigame_m2ftg::method_pre_render @0x1426a78b0: the execute_info is embedded in
+            // the scene and only these fields are refreshed per frame — the +0x1660 "work" region is
+            // module-visible state (game kind + assigns + event payloads) that must NOT be wiped).
+            static m2ftg_execute_info_t execute_info{};
             execute_info.size_of_struct = sizeof(execute_info);
             execute_info.p_device_context = gs::sm_context->p_device_context;
+            execute_info.status = 0;          // host zeroes each frame, then ORs pause/coin bits
+            execute_info.output_texid = 0;
+            execute_info.result = 0x80004005; // LJ presets E_FAIL; module_main overwrites
+            execute_info.sound_volume = 1.0f;
 
-            // TODO: Set up mappings better
-            // They're ignored now, in-game mappings are used instead
+            // Escape toggles the pause menu; while it is open, drive the MODULE'S OWN pause path
+            // (status bit0 — see DrawStfPauseMenu's RE notes). Escape is reserved for this, like
+            // in LJ, and is no longer a game button on the StF keyboard layout (sl.cpp).
+            static bool s_pauseMenuOpen = false;
+            {
+                static bool s_escWasDown = false;
+                const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
+                if (escDown && !s_escWasDown)
+                {
+                    s_pauseMenuOpen = !s_pauseMenuOpen;
+                }
+                s_escWasDown = escDown;
+            }
+            if (s_pauseMenuOpen)
+            {
+                execute_info.status |= 1;
+            }
 
-            // TODO: Beautify
-            execute_info.pad[0].set_state(0);
-            execute_info.pad[1].set_state(1);
-            execute_info.status |= 2;
+            // Input: collect via the existing csl_pad (XInput + keyboard), then copy the shared
+            // 0xE0-byte prefix into the m2ftg pad blocks (same pxd sl layout, same button bits).
+            s_pads[0].set_state(0);
+            s_pads[1].set_state(1);
+            for (int i = 0; i < 2; i++)
+            {
+                memcpy(&execute_info.pad[i], &s_pads[i], 0xE0);
+                execute_info.pad[i].m_port = static_cast<unsigned int>(i);
+                execute_info.pad[i].m_user_id = i;
+                execute_info.pad[i].m_is_connected = true;
+            }
+
+            // Button assignments (host->module; LJ fills these from player settings, we fill them
+            // from the YAMP Controls page — re-read every frame, so edits apply live). Slot order
+            // is the module's own (slot template @DLL 0x180126770): A, B, Y, X, LT, LB, RT, RB.
+            // Both players share the one assignment set.
+            for (int p = 0; p < 2; p++)
+            {
+                for (int i = 0; i < 8; i++)
+                {
+                    uint32_t a = settings->m_stfAssign[i];
+                    if (a < m2ftg_execute_info_t::assign_none || a > m2ftg_execute_info_t::assign_kg)
+                        a = m2ftg_execute_info_t::assign_none;
+                    execute_info.assign[p][i] = static_cast<uint8_t>(a);
+                }
+            }
+
+            // Arcade coin/start protocol (LJ FUN_142494450): while the module shows the start
+            // screen (status bit6 out), a START press becomes a COIN INSERT (status bit5 in, the
+            // press itself is swallowed); afterwards START is injected on alternating frames until
+            // the module leaves the start screen. ONLY meaningful with the freeplay dip switch
+            // OFF — with is_freeplay=1 the module takes START directly and there is no coin to
+            // insert; the dance would just swallow the player's first press. Follows the same
+            // setting Run passed to module_start as config.is_freeplay (changing it needs a
+            // restart, so the two always agree within a session).
+            const bool isFreeplay = settings->m_stfFreeplay;
+            if (!isFreeplay && !s_pauseMenuOpen)
+            {
+                if (s_coinPending && s_startScreen)
+                {
+                    if (!s_startToggle)
+                    {
+                        execute_info.pad[0].m_now |= 0x100;
+                        execute_info.pad[0].m_push |= 0x100;
+                    }
+                    s_startToggle = !s_startToggle;
+                }
+                else
+                {
+                    s_coinPending = false;
+                    if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
+                    {
+                        execute_info.status |= 0x20;
+                        execute_info.pad[0].m_now &= ~0x100u;
+                        execute_info.pad[0].m_push &= ~0x100u;
+                        s_coinPending = true;
+                        s_startToggle = false;
+                    }
+                }
+            }
+
+            // TEMP: the D3D11-on-12 overlay/blit path trips the D3D12 debug layer at frame 0
+            // (a null-SRV/shared-resource issue in d3d11), crashing before the StF DX12 PSO builds
+            // at ~frame 18 and masking the CreatePipelineState error we're diagnosing. func() (the
+            // StF render that builds the PSO) is independent of it, so skip the D3D11 path while
+            // debugging the PSO. Flip back to false to restore the visible overlay/output.
+            constexpr bool kDebugSkipD3D11Overlay = false;
 
             window.BeginFrame();
-            window.NewImGuiFrame();
+            if (!kDebugSkipD3D11Overlay) window.NewImGuiFrame();
+            if (!kDebugSkipD3D11Overlay && s_pauseMenuOpen)
+            {
+                if (!DrawStfPauseMenu(window, s_pauseMenuOpen))
+                {
+                    return false; // Quit picked
+                }
+            }
 
-            if (func(sizeof(execute_info), &execute_info) != 0) return false;
+            // The CBV/SRV descriptor-copy rings are per-frame transient; reset their cursors before the
+            // DLL's render (func) records this frame, or they grow past the heap -> CopyDescriptors AV.
+            ResetCbvSrvRingCursors(gs::sm_context);
+
+            // Bracket the DLL's render so the ResourceBarrier hook corrects StF's barrier StateBefore
+            // values (ping-pong RTs assume last-frame state; YAMP creates in COMMON -> id=527 desync).
+            SetStfRenderActiveNow(true);
+            const int funcResult = func(sizeof(execute_info), &execute_info);
+            SetStfRenderActiveNow(false);
+
+            // Module->host feedback: bit6 = "press start" screen active (LJ mirrors it to
+            // scene+0x2B58 and gates the coin/start injection on it).
+            s_startScreen = (execute_info.status & 0x40) != 0;
+
+            // One-time state trace to correlate with the arcade flow (status out, event channel).
+            {
+                static int s_frame = 0;
+                static int s_lastLogged = -1;
+                const int interesting = (execute_info.status & ~0x20) | (execute_info.work_kind << 16);
+                if (interesting != s_lastLogged && s_frame < 2000)
+                {
+                    char buf[128];
+                    sprintf_s(buf, "[m2ftg] frame=%d status=0x%X result=0x%X event=%d texid=%u\n",
+                        s_frame, execute_info.status, execute_info.result,
+                        execute_info.work_kind, execute_info.output_texid);
+                    OutputDebugStringA(buf);
+                    s_lastLogged = interesting;
+                }
+                s_frame++;
+            }
+
+            if (funcResult != 0) return false;
+
+            // THE REAL SUBMIT (found by RE): module_main only RECORDS. In "handler mode" (which StF's
+            // vtbl[0] init installs: DAT_18058aad0 = FUN_18003b530), module_main's submit stage vtbl[5] is
+            // a no-op — StF's actual per-frame GPU submit is g_stfFrameSubmit (FUN_18003b530), invoked ONLY
+            // by the engine's render-system loop (the 0x180c945xx table walker) that LJ runs but YAMP does
+            // not. So the host must call it every frame after module_main.
+            // g_stfFrameSubmit dereferences g_stfRenderExecInfo (DAT_1801ee4a0 = the LIVE execute_info):
+            // module_main sets it on entry and CLEARS it to 0 on return, so by here it's null -> the
+            // submit's FUN_180062470 did `*(execinfo + n*400 + 0x20)` = null+0x20 AV. Restore it around the
+            // call (then clear, matching module_main's post-frame cleanup).
+            // PATH B: StF records its whole frame into its own command list but never submits it (host's
+            // job). Close + ExecuteCommandLists + flush + reopen that exact list now. Do this BEFORE the
+            // handler below so the GPU has the frame before StF's frame-boundary recycle runs.
+            // TEST (black-screen): the draws bind CBVs at ring offsets 512/768 whose contents are
+            // never written (stale NaN / zeros) while ring+0 holds a valid 2D ortho. Hand-copy the
+            // valid matrix into the dead slots before the submit: if ANY geometry appears (even
+            // wrongly transformed), those slots are proven to be the live 3D-transform CBs and the
+            // missing piece is their writer — not the D3D12 plumbing.
+            {
+                constexpr bool kTestFillDeadCbSlots = false; // tested 2026-07-25: no change (see memory)
+                if (kTestFillDeadCbSlots)
+                {
+                    auto* ringCpu = *reinterpret_cast<uint8_t**>(
+                        reinterpret_cast<uint8_t*>(gs::sm_context) + 0x188208);
+                    if (ringCpu != nullptr)
+                    {
+                        memcpy(ringCpu + 256, ringCpu, 64);
+                        memcpy(ringCpu + 512, ringCpu, 64);
+                        memcpy(ringCpu + 768, ringCpu, 64);
+                    }
+                }
+            }
+
+            // TEST (overlay canary): the ImGui/11on12 overlay renders every frame but never
+            // reaches the screen, while VF2's identical overlay path DOES show. The only thing
+            // StF's loop adds is this mid-frame close/execute/flush of StF's list. Disable it to
+            // see whether OUR submit is what destroys the presented frame.
+            // *** ORDER MATTERS (HUD-flashing fix, 2026-07-26): record EVERYTHING, then submit ONCE. ***
+            // FUN_18003b530 is NOT just profiling: its second half (FUN_18003a540) is the TASK PUMP that
+            // records TaskM2E's draws (the Model 2 -> D3D12 frame translation). The old order
+            // (submit THEN pump) meant every submit executed a MIX of this frame's func() recordings and
+            // LAST frame's task-pump recordings — the display texture was composed from two different
+            // frames' passes, flashing the HUD every frame regardless of which texture we blitted.
+            // Needs the live execute_info in DAT_1801ee4a0 (module_main clears it on return) or it AVs.
+            // *** GAME-SPEED FIX (2026-07-26): DISABLED. module_main's render stages ALREADY invoke
+            // FUN_18003b530 internally through the installed submit-handler hook (DAT_18058aad0 —
+            // see the "render stages call the handler" RE finding). Calling it here again ran the
+            // TASK PUMP (FUN_18003a540 -> TaskM2E = the Model 2 emulator step) a SECOND time per
+            // frame -> the whole game (timers included) ran ~2x. Left compiled for quick A/B.
+            constexpr bool kCallFrameSubmitManually = false;
+            if (kCallFrameSubmitManually && g_stfFrameSubmit && g_stfRenderExecInfo)
+            {
+                *g_stfRenderExecInfo = &execute_info;
+                CallStfFrameSubmit(reinterpret_cast<void*>(g_stfFrameSubmit));
+                *g_stfRenderExecInfo = nullptr;
+            }
+
+            // Now the whole frame (func() + task pump) is recorded: close/execute/flush it in ONE submit.
+            // PAUSED (LJ ground truth, C:\temp\menu PIX captures 2026-07-26): while the pause menu is
+            // open LJ drops the module's command list from ExecuteCommandLists entirely (10 lists -> 9,
+            // zero module draws, zero ResolveSubresource, no module upload traffic; the CRT pass keeps
+            // re-sampling the LAST resolved frame, which receives no barriers). With status bit0 set the
+            // module records nothing anyway, so skip the close/execute/reopen dance and the upload-stamp
+            // advance — submit nothing, exactly like LJ.
+            constexpr bool kDisableStfSubmit = false;
+            if (!kDisableStfSubmit && !s_pauseMenuOpen) SubmitStfFrameListNow();
+            if (StfExecDisabledNow())
+            {
+                // A submit hung/removed the GPU — DRED was dumped. Stop now so StF's next-frame upload
+                // allocation doesn't crash on the dead device (that cascade was masking the real fault).
+                OutputDebugStringA("[StF::Run] submit hang/device-removed -> stopping loop (see [DRED])\n");
+                return false;
+            }
+
+            // The other half of the host's per-frame job (twin of SubmitStfFrameListNow): advance the
+            // upload-frame stamp + recycle StF's upload buffers (in-use -> available). Runs AFTER the flush
+            // above, so every recycled buffer is GPU-complete. This is the fix for the upload-pool
+            // exhaustion crash (FUN_18009be60, ~frame 570). Must precede StF's next-frame func().
+            if (!s_pauseMenuOpen) AdvanceFrameStampNow();
+
+            // (Legacy) our force-submit of StF's lists — currently a no-op (kExecuteStfLists=false). The
+            // handler call above is the correct engine-driven submit; keep this disabled.
+            ExecuteStfRenderListsNow();
 
             cgs_tex* display_tex = gs::sm_context->handle_tex.get(execute_info.output_texid);
             if (display_tex == nullptr) return false;
             if (display_tex->m_type != 2) return false;
 
-            // Draw StF�s output into the swapchain backbuffer (mirror VF5FS behavior)
-            window.BlitGameFrame(display_tex->mp_sbgl_resource->m_pD3DShaderResourceView);
-
-            // Overlay UI
-            window.RenderImGui();
+            if (!kDebugSkipD3D11Overlay)
+            {
+                // StF renders DX12-native; the DX11-typed fields (m_pD3DShaderResourceView / m_pD3DResource)
+                // are null on this path. The output ID3D12Resource lives at sbgl_resource+0x98 (found via QI:
+                // a 1024x768 B8G8R8A8 Texture2D). Wrap it through 11on12 into a D3D11 SRV and blit it.
+                auto* res = display_tex->mp_sbgl_resource;
+                ID3D12Resource* rt = res
+                    ? *reinterpret_cast<ID3D12Resource**>(reinterpret_cast<uint8_t*>(res) + 0x98)
+                    : nullptr;
+                // CANARY TEST: skip the StF-texture 11on12 blit, keep ONLY ImGui. If the overlay
+                // reappears, BlitDX12Texture's wrap/acquire is what kills the whole overlay path.
+                constexpr bool kSkipStfBlit = false; // canary test done: skipping the blit does NOT restore ImGui
+                if (!kSkipStfBlit) window.BlitDX12Texture(rt);
+                else (void)rt;
+                window.RenderImGui();
+            }
             window.EndFrame();
 
             // Present using the swapchain the game already created
             auto& swapChain = gs::sm_context->sbgl_device.m_swap_chain;
+            // CANARY (user insight): YAMP's own ImGui/11on12 overlay never reaches the screen in the
+            // StF path but does in VF2 — a HOST-side symptom. If the gs swapchain is not the very
+            // object the 11on12 backbuffers were wrapped from, we composite into one swapchain and
+            // present a different one => black screen AND no overlay, regardless of what StF renders.
+            {
+                static bool s_logged = false;
+                if (!s_logged)
+                {
+                    s_logged = true;
+                    char b[192];
+                    sprintf_s(b, "[swapchain] gs=%p window=%p SAME=%d\n",
+                        static_cast<void*>(swapChain.m_pDXGISwapChain),
+                        static_cast<void*>(window.GetSwapChain()),
+                        swapChain.m_pDXGISwapChain == window.GetSwapChain() ? 1 : 0);
+                    OutputDebugStringA(b);
+                }
+            }
             HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
             if (FAILED(hr)) return false;
 

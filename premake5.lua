@@ -58,3 +58,11 @@ filter { "toolset:*_xp"}
 filter { "toolset:not *_xp"}
 	defines { "WINVER=0x0601", "_WIN32_WINNT=0x0601" } -- Target Win7
 	buildoptions { "/permissive-" }
+
+-- The audio decoders (and the engine's PCM-conversion loops in AtomEngine.cpp) chew through
+-- whole BGM streams at cue start; keep them optimized even in Debug so first-play decode stays
+-- in the tens of milliseconds and the chunked-start tail never misses its splice.
+filter { "files:**HcaDecoder.cpp or **AdxDecoder.cpp or **AtomEngine.cpp" }
+	optimize "Speed"
+
+filter {}

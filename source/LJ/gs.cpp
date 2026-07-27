@@ -2,6 +2,14 @@
 
 #include "../RenderWindow.h"
 
+// Lock the handle-table offsets to the DLL's true layout. Verified against a live
+// Lost Judgment gs context dump (LostJudgment.exe+0x3B722C0) and the DLL constructor
+// (pxd::gs::context_t::context_t). YAMP loads the 0x388A00-size DLL variant, so these
+// are the authoritative offsets. See scratchpad/live-gscontext-spec.md.
+static_assert(offsetof(LJ::StF::gs::context_t, handle_mesh) == 0x107A98, "handle_mesh offset drift");
+static_assert(offsetof(LJ::StF::gs::context_t, handle_tex)  == 0x107AB8, "handle_tex offset drift");
+static_assert(offsetof(LJ::StF::gs::context_t, handle_fx)   == 0x107BB8, "handle_fx offset drift");
+
 namespace LJ
 {
 	namespace StF
@@ -65,17 +73,20 @@ namespace LJ
 
 		void cgs_device_context::initialize(sbgl::ccontext* p_context)
 		{
-			if (p_context != nullptr)
-			{
-				mp_sbgl_context = p_context;
+			// Native DX12 has no D3D11 immediate context, so p_context is null here. The old
+			// `if (p_context != nullptr)` guard therefore skipped the ENTIRE body under DX12,
+			// leaving the pools (mp_cb_pool/up_pool/shader_uniform) and device state
+			// uninitialized (mp_sbgl_context/+0x28 read as 0 in a live dump). Run it regardless;
+			// reset_state_all is safe with an unbound command context because its +0xC8 block is
+			// gated on gs_context+0x7690, which YAMP leaves 0.
+			mp_sbgl_context = p_context;
 
-				mp_cb_pool = gs::sm_context->stack_cb_pool.pop();
-				mp_up_pool = gs::sm_context->stack_up_pool.pop();
-				mp_shader_uniform = gs::sm_context->stack_shader_uniform.pop();
-				reset_state_all();
+			mp_cb_pool = gs::sm_context->stack_cb_pool.pop();
+			mp_up_pool = gs::sm_context->stack_up_pool.pop();
+			mp_shader_uniform = gs::sm_context->stack_shader_uniform.pop();
+			reset_state_all();
 
-				// TODO: Yakuza 6 returns an error code here??
-			}
+			// TODO: Yakuza 6 returns an error code here??
 		}
 
 		namespace sbgl {
@@ -144,6 +155,13 @@ namespace LJ
 					wil::com_ptr<IDXGISwapChain> scBase(window.GetSwapChain());
 					if (!scBase)
 						return E_POINTER;
+
+					// Store the swapchain so the present path can reach it via
+					// sm_context->sbgl_device.m_swap_chain.m_pDXGISwapChain->Present(1,0). The DX11
+					// branch below sets this; the DX12 branch only used the swapchain locally for
+					// RTV/DSV setup, leaving m_pDXGISwapChain null -> Present on a null ptr AVs.
+					// RenderWindow owns the swapchain for the process lifetime (borrowed raw ptr).
+					m_pDXGISwapChain = window.GetSwapChain();
 
 					wil::com_ptr<IDXGISwapChain3> sc3 = scBase.try_query<IDXGISwapChain3>();
 					if (!sc3)

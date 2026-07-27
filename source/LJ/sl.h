@@ -216,26 +216,35 @@ namespace LJ
 				uint32_t is_utf8_file_path;
 				uint32_t fs_root_len;
 				char sz_fs_root[0x410];
-				std::byte gap3a[272];
-				t_locked_queue<handle_internal_buffer_t> handle_free_queue;//0x6C0
-				std::byte gap4[436];
-				t_fixed_deque<file_handle_internal_t*> file_handle_pool;
-				std::byte gap5[32];
-				handle_t sync_archive_condvar;
-				std::byte gap6[4656];
-				void* allocated_heap;
-				uint64_t heap_size;
+				// Offsets below verified against pxd::sl::context_t::context_t (0x18006c990)
+				// in the StF DLL: queue @0x6C0, tag table @0x800..0x1800, pool sync @0x1C00,
+				// pool @0x1C08, tail fields @0xEFD0, total size 0xF000.
+				std::byte gap3a[24];
+				t_locked_queue<handle_internal_buffer_t> handle_free_queue; //0x6C0
+				std::byte gap4[5408]; //contains the 256*16 tag table at 0x800
+				uint32_t sync_file_handle_pool; //0x1C00, spinlock
+				std::byte gap4a[4];
+				t_fixed_deque<file_handle_internal_t*> file_handle_pool; //0x1C08
+				uint32_t sync_archive_condvar; //0x1C20 recursive spinlock word (archive_lock_wlock reads *ptr, not a handle)
+				std::byte gap6[54188];
+				void* allocated_heap;  //0xEFD0
+				uint64_t heap_size;    //0xEFD8
+				std::byte gap7[32];
 			};
-			// Validate important offsets
-			//static_assert(offsetof(context_t, handles) == 0x70);
-			//static_assert(offsetof(context_t, p_file_access) == 0x90);
-			//static_assert(offsetof(context_t, p_file_async_request) == 0x98);
-			//static_assert(offsetof(context_t, p_archive_access) == 0x118);
-			//static_assert(offsetof(context_t, p_archive_async_request) == 0x120);
-			//static_assert(offsetof(context_t, handle_free_queue) == 0x600);
-			//static_assert(offsetof(context_t, sync_file_handle_pool) == 0x1B40);
-			//static_assert(offsetof(context_t, file_handle_pool) == 0x1B48);
-			//static_assert(offsetof(context_t, sync_archive_condvar) == 0x1B80);
+			// Validate important offsets against the DLL's context_t constructor
+			static_assert(offsetof(context_t, handles) == 0x70);
+			static_assert(offsetof(context_t, p_file_handle_tbl) == 0x88);
+			static_assert(offsetof(context_t, p_file_access) == 0x90);
+			static_assert(offsetof(context_t, p_file_async_request) == 0x98);
+			static_assert(offsetof(context_t, p_archive_access) == 0x118);
+			static_assert(offsetof(context_t, p_archive_async_request) == 0x120);
+			static_assert(offsetof(context_t, _p_csl_allocator) == 0x158);
+			static_assert(offsetof(context_t, sz_fs_root) == 0x298);
+			static_assert(offsetof(context_t, handle_free_queue) == 0x6C0);
+			static_assert(offsetof(context_t, sync_file_handle_pool) == 0x1C00);
+			static_assert(offsetof(context_t, file_handle_pool) == 0x1C08);
+			static_assert(offsetof(context_t, allocated_heap) == 0xEFD0);
+			static_assert(sizeof(context_t) == 0xF000);
 
 			// TODO: Consider changing this to a pointer to real sm_context
 			extern context_t* sm_context;
@@ -270,9 +279,10 @@ namespace LJ
 			};
 			static_assert(sizeof(file_handle_event) == 16);
 
-			// Y:LAD changed this to a recursive_rwspinlock
-			extern void (*archive_lock_wlock)(handle_t handle);
-			extern void (*archive_lock_wunlock)(handle_t handle);
+			// Y:LAD changed this to a recursive_rwspinlock. These take a POINTER to the lock word
+			// (they read *lock), NOT a handle — create_instance passes &sm_context->sync_archive_condvar.
+			extern void (*archive_lock_wlock)(uint32_t* lock);
+			extern void (*archive_lock_wunlock)(uint32_t* lock);
 
 
 			template<typename T>

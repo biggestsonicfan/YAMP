@@ -142,19 +142,58 @@ namespace LJ
 					}
 
 					const uint32_t asyncMethod = (prevStatus & 0xFF0000) >> 16;
+					{
+						char dbg[128];
+						sprintf_s(dbg, "[async] dequeued method=%u prevStatus=0x%X\n", asyncMethod, prevStatus);
+						OutputDebugStringA(dbg);
+					}
 					switch (asyncMethod) // TODO: Verify correctness
 					{
-					case 1:
+					case 1: // Command: Open
+					case 2: // Command: Create
 					{
-						// TODO: Do
-						assert(!"Unimplemented");
-						break;
-					}
-					case 2:
-					{
-						// TODO: Do
-						assert(!"Unimplemented");
-						break;
+						// The file object stores its normalized path inline at +0x44 — the same
+						// pointer the DLL's synchronous open hands to isl_file_access::open
+						// (StF FUN_180070550: host->open(obj+0x44, handle), size -> obj+0x490,
+						// flags |= 0x40). VF2's shader-farc load goes through THIS async path,
+						// which used to be an unimplemented assert.
+						const char* path = reinterpret_cast<const char*>(file) + 0x44;
+						uint32_t error = 0;
+						const bool ok = (asyncMethod == 1)
+							? file_access->open(path, item->m_h_file)
+							: file_access->create(path, item->m_h_file);
+						{
+							char dbg[600];
+							sprintf_s(dbg, "[async] method=%u path='%s' ok=%d\n", asyncMethod, path, ok ? 1 : 0);
+							OutputDebugStringA(dbg);
+						}
+						if (ok)
+						{
+							const int64_t size = file_access->get_size(item->m_h_file);
+							file->m_real_file_size = size >= 0 ? static_cast<uint64_t>(size) : 0;
+							file->m_flags |= 0x40;
+						}
+						else
+						{
+							error = file->m_error_code != 0 ? file->m_error_code : 135;
+						}
+
+						m_h_busy_file = {};
+						const uint32_t newStatus = error | (asyncMethod << 16) | 0x100;
+						sl::spinlock_lock(item->m_locked);
+						if (item->m_abort)
+						{
+							sl::rwspinlock_wlock(file->m_locked);
+							file->mp_callback_func = nullptr;
+							sl::rwspinlock_wunlock(file->m_locked);
+						}
+						item->m_status = newStatus;
+						sl::spinlock_unlock(item->m_locked);
+
+						file->callback(static_cast<sl::FILE_ASYNC_METHOD>(asyncMethod - 1), newStatus);
+						m_free_queue.enqueue(item);
+						skipSemaWait = lastSkipSemaWait;
+						continue;
 					}
 					case 3:
 					{

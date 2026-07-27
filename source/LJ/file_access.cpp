@@ -7,10 +7,70 @@ namespace LJ
 {
 	namespace StF
 	{
+		// Debug feature: when "load loose ROM files" is enabled and a fully extracted
+		// rom/stf_rom directory sits next to rom/stf_rom.par, refuse to open the archive.
+		// module_start treats the failed mount as "no archive" (the handle it stores is only
+		// ever released in module_stop, which tolerates 0), and the DLL's path resolver then
+		// falls back from the archive-mount tree to plain file opens - so rom/stf_rom/*.bin
+		// load straight from disk through the engine's own loose-file path.
+		static bool ShouldBypassRomArchive(const char* path)
+		{
+			const auto* settings = gGeneral.GetSettings();
+			if (settings == nullptr || !settings->m_stfLooseRomFiles)
+			{
+				return false;
+			}
+
+			const std::string_view pathView(path);
+			constexpr std::string_view archiveName("stf_rom.par");
+			if (pathView.size() < archiveName.size() ||
+				_strnicmp(pathView.data() + (pathView.size() - archiveName.size()), archiveName.data(), archiveName.size()) != 0)
+			{
+				return false;
+			}
+
+			// Only bypass when every ROM image the boot loader requests is present, as the boot
+			// state machine polls forever waiting for a file that never opens.
+			static constexpr const wchar_t* ROM_FILES[] = {
+				L"rom_code1.bin", L"rom_data.bin", L"rom_ep.bin", L"rom_pol.bin", L"rom_tex.bin",
+			};
+			const std::wstring directory = UTF8ToWchar(pathView.substr(0, pathView.size() - 4)); // strip ".par"
+			for (const wchar_t* romFile : ROM_FILES)
+			{
+				const std::wstring romPath = directory + L'/' + romFile;
+				const DWORD attributes = GetFileAttributesW(romPath.c_str());
+				if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+				{
+					char buf[600];
+					sprintf_s(buf, "[file] loose-rom: '%ls' is missing, loading the archive as usual\n", romPath.c_str());
+					OutputDebugStringA(buf);
+					return false;
+				}
+			}
+
+			char buf[600];
+			sprintf_s(buf, "[file] loose-rom: hiding '%s', ROM images will load from the stf_rom directory\n", path);
+			OutputDebugStringA(buf);
+			return true;
+		}
 
 		bool csl_file_access::open(const char* path, sl::handle_t handle)
 		{
+			if (ShouldBypassRomArchive(path))
+			{
+				return false;
+			}
+
 			HANDLE file = CreateFileW(UTF8ToWchar(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+			// TEMP diagnostic: trace every host file open (loader-loop investigation)
+			{
+				char buf[600];
+				sprintf_s(buf, "[file] open '%s' -> %s (h=%u)\n", path,
+					file == INVALID_HANDLE_VALUE ? "FAIL" : "ok", handle.h.m_handle);
+				OutputDebugStringA(buf);
+			}
+
 			if (file == INVALID_HANDLE_VALUE)
 			{
 				return false;
@@ -58,7 +118,14 @@ namespace LJ
 
 		bool csl_file_access::is_exist(const char* path)
 		{
-			return GetFileAttributesW(UTF8ToWchar(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+			const bool exists = GetFileAttributesW(UTF8ToWchar(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+			// TEMP diagnostic (loader-loop investigation)
+			{
+				char buf[600];
+				sprintf_s(buf, "[file] is_exist '%s' -> %d\n", path, exists ? 1 : 0);
+				OutputDebugStringA(buf);
+			}
+			return exists;
 		}
 
 		int64_t csl_file_access::read(sl::handle_t handle, void* buffer, unsigned int size)
@@ -194,6 +261,12 @@ namespace LJ
 
 		bool csl_file_access_archive::open(const char* path, sl::handle_t handle)
 		{
+			// TEMP diagnostic (loader-loop investigation)
+			{
+				char buf[600];
+				sprintf_s(buf, "[file] archive::open '%s' -> false (stub)\n", path != nullptr ? path : "(null)");
+				OutputDebugStringA(buf);
+			}
 			return false;
 		}
 
@@ -318,13 +391,13 @@ namespace LJ
 
 		csl_archive* csl_archive::create_instance(sl::handle_t handle)
 		{
-			sl::archive_lock_wlock(sl::sm_context->sync_archive_condvar);
+			sl::archive_lock_wlock(&sl::sm_context->sync_archive_condvar);
 			csl_archive* archive = sl::handle_instance<csl_archive>(handle, 6);
 			if (archive != nullptr)
 			{
 				archive->add_ref();
 			}
-			sl::archive_lock_wunlock(sl::sm_context->sync_archive_condvar);
+			sl::archive_lock_wunlock(&sl::sm_context->sync_archive_condvar);
 			return archive;
 		}
 	}

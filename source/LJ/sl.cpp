@@ -21,8 +21,8 @@ namespace LJ
 
             context_t* sm_context;
             handle_t* (*handle_create_internal)(handle_t* obj, void* ptr, uint32_t type);
-            void (*archive_lock_wlock)(handle_t handle);
-            void (*archive_lock_wunlock)(handle_t handle);
+            void (*archive_lock_wlock)(uint32_t* lock);
+            void (*archive_lock_wunlock)(uint32_t* lock);
             void* (*kernel_calloc_internal)(uint64_t bytes, uint32_t flags_or_zero);
 
             extern void (*spinlock_lock_internal)(spinlock_t*);
@@ -226,7 +226,7 @@ namespace LJ
                     //assert(sm_context->file_handle_pool_size() < sm_context->file_handle_pool_capacity());
 
                     // enqueue pointer to this entry
-                    sm_context->file_handle_pool.push_back(pfVar17);
+                    sm_context->file_handle_pool.push_back(&pfVar17);
 
                     // next table entry
                     ++pfVar17;                                         // if contiguous array of FH
@@ -241,6 +241,10 @@ namespace LJ
 
             int initialize()
             {
+                // sl::initialize_module in the DLL (0x18006d2e0) validates the context
+                // header: it requires size_of_struct (+8) == 0xF000, silently leaving
+                // sm_context unset otherwise.
+                sm_context->size_of_struct = 0xF000;
                 sm_context->export_context.size_of_struct = 0x10;
                 sm_context->export_context.p_context = &sm_context;
                 sm_context->processor_num = 0x10;
@@ -248,12 +252,11 @@ namespace LJ
                 sm_context->processor_affinity_mask = 0x0FFFF;
                 sm_context->temp_work_size = 0x80000;
                 sm_context->p_temp_work = kernel_calloc(sm_context->temp_work_size, 0);
-                sm_context->file_handle_max = 0x80000;
-                auto timing = initialize_timing();
-                auto fs_init = file_system_initialize(0x800, 0x800000);
-
-
-
+                initialize_timing();
+                // TODO: file_system_initialize is a WIP reconstruction: it never assigns
+                // p_file_handle_tbl (the "idk" allocation), so its handle loop derefs null.
+                // PatchSl builds the file handle pool the proven VF5FS way instead for now.
+                //file_system_initialize(0x800, 0x800000);
 
                 return 0;
             }
@@ -785,16 +788,15 @@ namespace LJ
                     m_buttons[button] = 0xFF;
                     };
 
-                // TODO: Un-hardcode, for now these correspond to default Yakuza 6 controls
+                // TODO: Un-hardcode, for now these correspond to default Yakuza 6 controls.
+                // NOTE: unlike the Y6/VF5FS layout, Escape is NOT a game button here — it is
+                // reserved for the host pause menu (StF.cpp GameLoop), matching Lost Judgment.
+                // Cancel/back in the game's own menus is the L key (B button).
                 const auto& keys = gGeneral.GetPressedKeys();
                 const bool circleIsConfirm = gGeneral.GetSettings()->m_circleConfirm;
                 if (keys[VK_RETURN])
                 {
                     setButton(circleIsConfirm ? sl::BUTTON_B : sl::BUTTON_A);
-                }
-                if (keys[VK_ESCAPE])
-                {
-                    setButton(circleIsConfirm ? sl::BUTTON_A : sl::BUTTON_B);
                 }
 
                 if (keys['K'])

@@ -72,6 +72,8 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"Debug";
 		m_dontApplyPatches = GetPrivateProfileIntW(SECTION_NAME, L"DoNotApplyPatches", 0, iniPath.c_str()) != 0;
 		m_useD3DDebugLayer = GetPrivateProfileIntW(SECTION_NAME, L"UseDebugD3D", 0, iniPath.c_str()) != 0;
+		m_stfShowDebugFeatures = GetPrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", 0, iniPath.c_str()) != 0;
+		m_stfLooseRomFiles = GetPrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", 0, iniPath.c_str()) != 0;
 	}
 
 	{
@@ -79,6 +81,22 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_arcadeMode = GetPrivateProfileIntW(SECTION_NAME, L"ArcadeMode", 0, iniPath.c_str()) != 0;
 		m_circleConfirm = GetPrivateProfileIntW(SECTION_NAME, L"CircleConfirm", 0, iniPath.c_str()) != 0;
 		m_language = GetPrivateProfileIntW(SECTION_NAME, L"Language", 1, iniPath.c_str());
+	}
+
+	{
+		const wchar_t* SECTION_NAME = L"StF";
+		m_stfAspect = GetPrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_stfAspect, iniPath.c_str());
+		m_stfCrtFilter = GetPrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_stfCrtFilter, iniPath.c_str()) != 0;
+		m_stfDifficulty = GetPrivateProfileIntW(SECTION_NAME, L"Difficulty", m_stfDifficulty, iniPath.c_str());
+		m_stfCountry = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
+		m_stfFreeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str()) != 0;
+		m_stfVersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str()) != 0;
+		for (int i = 0; i < 8; i++)
+		{
+			wchar_t key[16];
+			swprintf_s(key, L"Assign%d", i);
+			m_stfAssign[i] = GetPrivateProfileIntW(SECTION_NAME, key, m_stfAssign[i], iniPath.c_str());
+		}
 	}
 }
 
@@ -107,6 +125,8 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"Debug";
 		WritePrivateProfileIntW(SECTION_NAME, L"DoNotApplyPatches", m_dontApplyPatches, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"UseDebugD3D", m_useD3DDebugLayer, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", m_stfShowDebugFeatures, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", m_stfLooseRomFiles, iniPath.c_str());
 	}
 
 	{
@@ -114,5 +134,21 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"ArcadeMode", m_arcadeMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"CircleConfirm", m_circleConfirm, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Language", m_language, iniPath.c_str());
+	}
+
+	{
+		const wchar_t* SECTION_NAME = L"StF";
+		WritePrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_stfAspect, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_stfCrtFilter, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Difficulty", m_stfDifficulty, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str());
+		for (int i = 0; i < 8; i++)
+		{
+			wchar_t key[16];
+			swprintf_s(key, L"Assign%d", i);
+			WritePrivateProfileIntW(SECTION_NAME, key, m_stfAssign[i], iniPath.c_str());
+		}
 	}
 }

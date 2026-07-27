@@ -4,7 +4,7 @@
 #include <Windows.h>
 #include "../wil/resource.h"
 
-#include "../criware/CriStub.h"
+#include "../criware/Cri.h"
 
 #include "sl.h"
 #include "gs.h"
@@ -78,7 +78,7 @@ namespace Y6
 			int status;
 			int result;
 			unsigned int output_texid;
-			std::byte gap[4];
+			float sound_volume; // +0x1C (base_execute_info_t, confirmed in YLAD); 0 mutes ALL audio
 			uint8_t assign[2][8];
 			csl_pad pad[2];
 			std::byte gap2[16];
@@ -263,7 +263,7 @@ namespace Y6
 			}
 
 			// Initialize Criware stub and module stubs
-			CriStub criware_stub;
+			Cri criware;
 
 			struct sl_module_t
 			{
@@ -304,7 +304,7 @@ namespace Y6
 			params.sl_module = &sl_module;
 			params.gs_module = &gs_module;
 			params.ct_module = &ct_module;
-			params.cri_ptr = &criware_stub;
+			params.cri_ptr = &criware;
 			params.module_main = &module_main;
 			params.root_path = utf8Path.c_str();
 
@@ -363,6 +363,7 @@ namespace Y6
 			vf5fs_execute_info_t execute_info{};
 			execute_info.size_of_struct = sizeof(execute_info);
 			execute_info.p_device_context = gs::sm_context->p_device_context;
+			execute_info.sound_volume = 1.0f;
 
 			// TODO: Set up mappings better
 			// They're ignored now, in-game mappings are used instead

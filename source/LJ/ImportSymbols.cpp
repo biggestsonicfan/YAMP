@@ -47,7 +47,7 @@ namespace LJ
 				//{ S::GS_CONTEXT_PTR, immediate(get_module_pattern(dll, "46 8D 34 06", 7)) }, //18009809A
 				//{ S::GS_CONTEXT_PTR, immediate(get_module_pattern(dll, "75 17 48 89 0D ? ? ? ?", 5)) }, //180093015
 				{ S::D3DDEVICE, immediate(get_module_pattern(dll, "EB B5 48 89 1F", -0x46)) }, //180086F56
-				{ S::SL_KERNEL_CALLOC, immediate(get_module_pattern(dll, "E8 ? ? ? ? 4C 8B C0 48 89 05", 1)) },
+				{ S::SL_KERNEL_CALLOC, get_module_pattern(dll, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 8B FA 48 8B F1 E8 ? ? ? ? 48 8B D8 48 85 C0 74 ? 40 F6 C7 08") }, //180065E40
 				//{ S::MEMSET, immediate(get_module_pattern(dll,"48 03 C8 E8 ? ? ? ? C5 F8 10 44 24 20", 4)) },
 				{ S::SL_FILE_CREATE, immediate(get_module_pattern(dll, "E8 ? ? ? ? 48 8B 56 20", 1)) }, //1800A2A15
 				{ S::SL_FILE_OPEN, immediate(get_module_pattern(dll, "E8 ? ? ? ? 8B 08 85 C9", 1)) }, //180024404
@@ -65,6 +65,11 @@ namespace LJ
 				//{ S::SHIFT_NEXT_MODE, immediate(get_module_pattern(dll, "E8 ? ? ? ? 33 C9 83 7B 58 01", 1)) }, //1801BC669
 				//{ S::SHIFT_NEXT_MODE_SUB, immediate(get_module_pattern(dll, "E8 ? ? ? ? EB 0E 84 C0", 1)) }, //1801C3AB4
 				{ S::TRAP_ALLOC_INSTANCE_TBL, immediate8(get_module_pattern(dll, "73 ? 4C 8B 41 08", 1)) }, //180010812
+				{ S::CDEVICE_CTOR, get_module_pattern(dll, "48 89 5C 24 08 57 48 83 EC 20 33 FF 48 B8 00 00 00 00 00 00 FF FF 89 39 48 8B D9") }, //18008D5F0 pxd cdevice ctor
+				// FUN_18003b530 (M2FTGAppModule per-frame submit): SUB RSP,0x28 / CALL / ADD RSP,0x28 / JMP.
+				{ S::STF_FRAME_SUBMIT, get_module_pattern(dll, "48 83 EC 28 E8 ? ? ? ? 48 83 C4 28 E9 ? ? ? ?") }, //18003B530
+				// DAT_1801ee4a0 (live execute_info): module_main's `CMP RCX,0x1760 / JNZ / MOV [rip],RDX`.
+				{ S::STF_RENDER_EXECINFO, immediate(get_module_pattern(dll, "48 81 F9 60 17 00 00 0F 85 ? ? ? ? 48 89 15 ? ? ? ?", 16)) }, //1801EE4A0
 			};
 
 			return symbols;

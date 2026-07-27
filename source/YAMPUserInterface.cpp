@@ -1,6 +1,7 @@
 #include "YAMPUserInterface.h"
 
 #include "YAMPGeneral.h"
+#include "LJ/StfDebugWindows.h"
 
 #include "imgui/imgui.h"
 
@@ -46,13 +47,25 @@ void YAMPUserInterface::Draw()
 		DrawDisclaimer();
 	}
 
+	// The game DLL's own debug windows are independent of the F1 settings window.
+	LJ::StF::DrawDebugWindows();
+
 	if (!ProcessF1Key())
 	{
 		return;
 	}
 
+	// Center the window on first appearance AND whenever the display size changes (window
+	// resize / resolution change), so it never ends up off-center or off-screen.
 	const ImVec2& displaySize = ImGui::GetIO().DisplaySize;
-	ImGui::SetNextWindowPos({ displaySize.x / 2.0f, displaySize.y / 2.0f }, ImGuiCond_Once, { 0.5f, 0.5f });
+	ImGuiCond posCond = ImGuiCond_Appearing;
+	if (displaySize.x != m_lastDisplayW || displaySize.y != m_lastDisplayH)
+	{
+		m_lastDisplayW = displaySize.x;
+		m_lastDisplayH = displaySize.y;
+		posCond = ImGuiCond_Always;
+	}
+	ImGui::SetNextWindowPos({ displaySize.x / 2.0f, displaySize.y / 2.0f }, posCond, { 0.5f, 0.5f });
 	ImGui::SetNextWindowSize({ 600, 600 }, ImGuiCond_Once);
 
 	if (ImGui::Begin("YAMP Settings", &m_settingsOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
@@ -100,7 +113,10 @@ void YAMPUserInterface::Draw()
 		ImGui::SameLine();
 
 		ImGui::BeginGroup();
-		bool drawButtons = selectedTab != about_id && selectedTab != controls_id;
+		// About is informational; Controls is read-only except for StF, whose button assignments
+		// are editable and go through the same Apply/Cancel flow as the other pages.
+		const bool controlsEditable = gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
+		bool drawButtons = selectedTab != about_id && (selectedTab != controls_id || controlsEditable);
 
 		float rightPanelHeight = 0.0f;
 		if (drawButtons)
@@ -195,11 +211,24 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_circleConfirm = settings->m_circleConfirm;
 	m_language = settings->m_language;
 
+	m_stfAspect = settings->m_stfAspect;
+	m_stfCrtFilter = settings->m_stfCrtFilter;
+	m_stfDifficulty = settings->m_stfDifficulty;
+	m_stfCountry = settings->m_stfCountry;
+	m_stfFreeplay = settings->m_stfFreeplay;
+	m_stfVersusMode = settings->m_stfVersusMode;
+	for (int i = 0; i < 8; i++)
+	{
+		m_stfAssign[i] = settings->m_stfAssign[i];
+	}
+
 	m_dontApplyPatches = settings->m_dontApplyPatches;
 	m_useD3DDebugLayer = settings->m_useD3DDebugLayer;
+	m_stfShowDebugFeatures = settings->m_stfShowDebugFeatures;
+	m_stfLooseRomFiles = settings->m_stfLooseRomFiles;
 
 	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session
-	if (m_dontApplyPatches || m_useD3DDebugLayer)
+	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles)
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -314,6 +343,12 @@ void YAMPUserInterface::DrawGraphics()
 // TODO: This will have to be subclassed once more games are added
 void YAMPUserInterface::DrawGame()
 {
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	{
+		DrawGameStF();
+		return;
+	}
+
 	{
 		const char* labels[] = { "Japanese", "English" };
 		if (ImGui::BeginCombo("Language", labels[m_language]))
@@ -369,8 +404,137 @@ void YAMPUserInterface::DrawGame()
 	}
 }
 
+void YAMPUserInterface::DrawGameStF()
+{
+	{
+		const char* labels[] = { "4:3 (Original)", "16:9 (Stretched)", "Fill Window" };
+		if (m_stfAspect >= std::size(labels))
+		{
+			m_stfAspect = 0;
+		}
+		if (ImGui::BeginCombo("Aspect ratio", labels[m_stfAspect]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_stfAspect;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_stfAspect = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Sonic the Fighters is a native 4:3 arcade game.\nApplies immediately.");
+		}
+	}
+
+	if (ImGui::Checkbox("CRT filter", &m_stfCrtFilter))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Lost Judgment's own CRT effect (scanlines + aperture grille),\n"
+			"an exact port of the shader LJ draws this game with.\nApplies immediately.");
+	}
+
+	ImGui::NewLine();
+	ImGui::Separator();
+	ImGui::TextUnformatted("ARCADE DIP SWITCHES:");
+
+	{
+		const char* labels[] = { "Easy", "Normal", "Hard", "Hardest" };
+		if (m_stfDifficulty >= std::size(labels))
+		{
+			m_stfDifficulty = 1;
+		}
+		if (ImGui::BeginCombo("Difficulty", labels[m_stfDifficulty]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_stfDifficulty;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_stfDifficulty = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Arcade difficulty dip switch (Normal is the arcade default).\nRequires a restart.");
+		}
+	}
+
+	{
+		const char* labels[] = { "Japan", "USA", "Export" };
+		if (m_stfCountry >= std::size(labels))
+		{
+			m_stfCountry = 0;
+		}
+		if (ImGui::BeginCombo("Region", labels[m_stfCountry]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_stfCountry;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_stfCountry = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Region the arcade board boots as. USA runs the game as\n"
+				"Sonic Championship, its western release.\nRequires a restart.");
+		}
+	}
+
+	if (ImGui::Checkbox("Free Play", &m_stfFreeplay))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("When unchecked, the game asks for credits like a real cabinet:\n"
+			"press Start (F key) on the coin screen to insert a coin.\nRequires a restart.");
+	}
+
+	if (ImGui::Checkbox("Versus Mode", &m_stfVersusMode))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Boots straight into a credited 2-player versus match, the way\n"
+			"Lost Judgment's minigame runs. Unchecked: authentic arcade boot\n"
+			"(attract mode, single-player ladder).\nRequires a restart.");
+	}
+}
+
 void YAMPUserInterface::DrawControls()
 {
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	{
+		DrawControlsStF();
+		return;
+	}
+
 	ImGui::PushItemWidth(ImGui::CalcItemWidth() / 2.0f);
 
 	// TODO: Make these controls customizable
@@ -392,6 +556,75 @@ void YAMPUserInterface::DrawControls()
 	ImGui::LabelText("Open YAMP Settings", "F1");
 
 	ImGui::PopItemWidth();
+}
+
+void YAMPUserInterface::DrawControlsStF()
+{
+	ImGui::PushTextWrapPos();
+	ImGui::TextUnformatted("Assign Punch/Kick/Guard combinations to each button, like the arcade cabinet's "
+		"test menu. Applies to both players when you press Apply - no restart needed.");
+	ImGui::PopTextWrapPos();
+	ImGui::NewLine();
+
+	// Indexed by m2ftg assign_t (1=None ... 8=K+G); assign_invalid(0) is never shown.
+	static constexpr const char* ASSIGN_LABELS[] = {
+		"", "None", "P", "K", "G", "P + G", "P + K + G", "P + K", "K + G"
+	};
+	// Combo rows in P/K/G-first order, mapped back to assign_t values
+	static constexpr uint32_t ASSIGN_ORDER[] = { 2, 3, 4, 5, 7, 8, 6, 1 }; // P, K, G, PG, PK, KG, PKG, None
+
+	// The module consumes assign[] in ITS slot order: A, B, Y, X, LT, LB, RT, RB (m_stfAssign uses
+	// that order too). Present the rows grouped by keyboard layout instead; keyboard keys are the
+	// fixed Yakuza 6 defaults from sl.cpp (_set_state_keyboard).
+	struct Row { const char* label; int slot; };
+	static constexpr Row ROWS[] = {
+		{ "K key / A button",  0 },
+		{ "L key / B button",  1 },
+		{ "J key / X button",  3 },
+		{ "Gamepad Y button",  2 },
+		{ "M key / LB button", 5 },
+		{ "U key / RB button", 7 },
+		{ "I key / LT button", 4 },
+		{ "O key / RT button", 6 },
+	};
+
+	ImGui::PushItemWidth(ImGui::CalcItemWidth() / 2.0f);
+	for (const Row& row : ROWS)
+	{
+		uint32_t& value = m_stfAssign[row.slot];
+		if (value >= std::size(ASSIGN_LABELS) || value == 0)
+		{
+			value = 1; // None
+		}
+		if (ImGui::BeginCombo(row.label, ASSIGN_LABELS[value]))
+		{
+			for (uint32_t candidate : ASSIGN_ORDER)
+			{
+				const bool isSelected = candidate == value;
+				if (ImGui::Selectable(ASSIGN_LABELS[candidate], isSelected))
+				{
+					m_pageModified = true;
+					value = candidate;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+	}
+
+	ImGui::NewLine();
+	ImGui::LabelText("Movement", "Arrow Keys / WSAD / Left Stick / D-Pad");
+	ImGui::LabelText("Start / Insert Coin", "F / Start");
+	ImGui::LabelText("Back", "Tab / Back");
+	ImGui::NewLine();
+	ImGui::LabelText("Pause Menu", "Escape");
+	ImGui::LabelText("Open YAMP Settings", "F1");
+	ImGui::PopItemWidth();
+
+	ImGui::NewLine();
+	ImGui::TextDisabled("Keyboard controls Player 1 only; XInput gamepads 1 and 2 control Players 1 and 2.");
 }
 
 void YAMPUserInterface::DrawDebug()
@@ -446,6 +679,31 @@ void YAMPUserInterface::DrawDebug()
 	{
 		ImGui::SetTooltip("Enables a debug D3D layer when supported by the system.");
 	}
+
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	{
+		if (ImGui::Checkbox("Display debugging features", &m_stfShowDebugFeatures))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Shows the game's own developer debug-menu windows (DEBUG MENU, CONFIG, PERFORMANCE, 960STAT),\n"
+				"reconstructed from data inside the game DLL. Actions run the DLL's own handlers; some of them are\n"
+				"stubs in the retail DLL and have no effect. Takes effect immediately after Apply.");
+		}
+
+		if (ImGui::Checkbox("Load ROM files from a directory", &m_stfLooseRomFiles))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Bypasses rom/stf_rom.par and reads the ROM images directly from a rom/stf_rom directory.\n"
+				"All five files extracted from the archive (rom_code1.bin, rom_data.bin, rom_ep.bin, rom_pol.bin,\n"
+				"rom_tex.bin) must be present, otherwise the archive is used as usual. Requires a restart.");
+		}
+	}
 }
 
 void YAMPUserInterface::DrawAbout()
@@ -473,9 +731,25 @@ void YAMPUserInterface::DrawAbout()
 	ImGui::Separator();
 	ImGui::TextUnformatted("GAME INFORMATION:");
 
-	// TODO: For now it's hardcoded, but it will have to be un-hardcoded later
-	ImGui::TextUnformatted("Current arcade: Virtua Fighter 5: Final Showdown");
-	ImGui::TextUnformatted("Base game: Yakuza 6");
+	const char* arcadeName;
+	const char* baseGameName;
+	switch (gGeneral.GetGameId())
+	{
+	case YAMPGeneral::GameId::StF:
+		arcadeName = "Sonic the Fighters";
+		baseGameName = "Lost Judgment";
+		break;
+	case YAMPGeneral::GameId::VF2:
+		arcadeName = "Virtua Fighter 2";
+		baseGameName = "Yakuza: Like a Dragon";
+		break;
+	default:
+		arcadeName = "Virtua Fighter 5: Final Showdown";
+		baseGameName = "Yakuza 6";
+		break;
+	}
+	ImGui::Text("Current arcade: %s", arcadeName);
+	ImGui::Text("Base game: %s", baseGameName);
 	ImGui::Text("DLL name: %s", gGeneral.GetDLLName().c_str());
 	{
 		const time_t timestamp = gGeneral.GetDLLTimestamp();
@@ -498,7 +772,7 @@ void YAMPUserInterface::DrawAbout()
 			"Pirated game copies WILL NOT receive any support.");
 
 	ImGui::NewLine();
-	ImGui::TextUnformatted("All rights to Virtua Fighter 5: Final Showdown belong to SEGA.");
+	ImGui::Text("All rights to %s belong to SEGA.", arcadeName);
 
 	ImGui::PopTextWrapPos();
 }
@@ -594,6 +868,26 @@ void YAMPUserInterface::ApplySettings()
 	auto token = gGeneral.GetSettingsUpdateToken();
 	auto* settings = token.first;
 
+	// StF's aspect ratio, CRT filter and button assignments are re-read by the game loop every
+	// frame, so they take effect immediately; only warn about a restart when a setting that is
+	// consumed once at startup actually changed.
+	const bool needsRestart =
+		settings->m_resX != m_resolutions[m_currentResolutionIndex].width ||
+		settings->m_resY != m_resolutions[m_currentResolutionIndex].height ||
+		settings->m_refreshRate != m_resolutions[m_currentResolutionIndex].refreshRates[m_currentRefRateIndex].refreshRate ||
+		settings->m_fullscreen != m_currentFullscreen ||
+		settings->m_enableFpsCap != m_enableFpsCap ||
+		settings->m_arcadeMode != m_arcadeMode ||
+		settings->m_circleConfirm != m_circleConfirm ||
+		settings->m_language != m_language ||
+		settings->m_stfDifficulty != m_stfDifficulty ||
+		settings->m_stfCountry != m_stfCountry ||
+		settings->m_stfFreeplay != m_stfFreeplay ||
+		settings->m_stfVersusMode != m_stfVersusMode ||
+		settings->m_dontApplyPatches != m_dontApplyPatches ||
+		settings->m_useD3DDebugLayer != m_useD3DDebugLayer ||
+		settings->m_stfLooseRomFiles != m_stfLooseRomFiles;
+
 	settings->m_resX = m_resolutions[m_currentResolutionIndex].width;
 	settings->m_resY = m_resolutions[m_currentResolutionIndex].height;
 	settings->m_refreshRate = m_resolutions[m_currentResolutionIndex].refreshRates[m_currentRefRateIndex].refreshRate;
@@ -604,11 +898,29 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_circleConfirm = m_circleConfirm;
 	settings->m_language = m_language;
 
+	settings->m_stfAspect = m_stfAspect;
+	settings->m_stfCrtFilter = m_stfCrtFilter;
+	settings->m_stfDifficulty = m_stfDifficulty;
+	settings->m_stfCountry = m_stfCountry;
+	settings->m_stfFreeplay = m_stfFreeplay;
+	settings->m_stfVersusMode = m_stfVersusMode;
+	for (int i = 0; i < 8; i++)
+	{
+		settings->m_stfAssign[i] = m_stfAssign[i];
+	}
+
 	settings->m_dontApplyPatches = m_dontApplyPatches;
 	settings->m_useD3DDebugLayer = m_useD3DDebugLayer;
+	// The debug-window overlay is read every frame, so it applies live (no restart warning).
+	settings->m_stfShowDebugFeatures = m_stfShowDebugFeatures;
+	// Consumed once when module_start mounts the ROM archive, hence the restart warning above.
+	settings->m_stfLooseRomFiles = m_stfLooseRomFiles;
 
 	m_pageModified = false;
-	m_showRestartWarning = true;
+	if (needsRestart)
+	{
+		m_showRestartWarning = true;
+	}
 }
 
 void YAMPUserInterface::DiscardSettings()

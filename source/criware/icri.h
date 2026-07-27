@@ -274,16 +274,20 @@ class __declspec(novtable) icri
 {
 public:
 	virtual struct CriAtomExPlayerTag *criAtomExPlayer_Create(CriAtomExPlayerConfigTag *, void *, int) = 0;
-	// These are private or never used, as IDA defined them as a "gap"
-	virtual void gap1() = 0;
-	virtual void gap2() = 0;
-	virtual void gap3() = 0;
-	virtual void gap4() = 0;
-	virtual void gap5() = 0;
-	virtual void gap6() = 0;
-	virtual void gap7() = 0;
-	virtual void gap8() = 0;
-	virtual void gap9() = 0;
+	// Slot identities recovered from YLAD's symbolized icri_m2ftg vtable (0x144029b80):
+	// the "gaps" IDA couldn't name in the VF5FS typelib are these CriAtomEx methods.
+	virtual void criAtomExPlayer_Destroy(struct CriAtomExPlayerTag *) = 0;
+	virtual int criAtomExPlayer_GetStatus(struct CriAtomExPlayerTag *) = 0;
+	// Signatures corrected against Y6's icri_base (0x1426a6560 / 0x1426a6520): LoadAcbData takes
+	// SIX args — an AWB binder handle AND an AWB path string precede the work buffer (games pass
+	// null for both; external-AWB resolution is the host's job). The VF5FS typelib was short.
+	virtual struct CriAtomExAcbTag *criAtomExAcb_LoadAcbData(void *acbData, int acbDataSize, struct CriFsBinderHnObjTag *awbBinder, const char *awbPath, void *work, int workSize) = 0;
+	virtual int criAtomExAcb_CalculateWorkSizeForLoadAcbData(void *acbData, int acbDataSize, struct CriFsBinderHnObjTag *awbBinder, const char *awbPath) = 0;
+	virtual void criAtomExAcb_Release(struct CriAtomExAcbTag *) = 0;
+	virtual void criAtomExPlayer_AttachAisac(struct CriAtomExPlayerTag *, const char *) = 0;
+	virtual void criAtomExPlayer_DetachAisac(struct CriAtomExPlayerTag *, const char *) = 0;
+	virtual void criAtomExPlayer_SetCueName(struct CriAtomExPlayerTag *, struct CriAtomExAcbTag *, const char *) = 0;
+	virtual void criAtomExPlayer_SetVolume(struct CriAtomExPlayerTag *, float) = 0;
 	virtual int criAtomExPlayer_CalculateWorkSize(CriAtomExPlayerConfigTag *) = 0;
 	virtual unsigned int criAtomExPlayer_Start(struct CriAtomExPlayerTag *) = 0;
 	virtual void criAtomExPlayer_Stop(struct CriAtomExPlayerTag *) = 0;

@@ -674,11 +674,16 @@ namespace LJ
 			cgs_cb_pool* mp_cb_pool;
 			cgs_up_pool* mp_up_pool;
 			cgs_shader_uniform* mp_shader_uniform;
-			std::byte gap[7882];
+			// The real pxd cgs_device_context is FAR larger than the old 7952-byte guess: the
+			// DLL's flush/reset paths touch fields out to ~+0x14c94 (e.g. FUN_180089fa0 @+0x14bf8,
+			// FUN_180088cd0's viewport/scissor batch arrays at +0x14b84 + count*0x10). YAMP `new`s
+			// this object, so under-sizing it corrupts adjacent heap. Size to 0x16000 (headroom
+			// over the observed max). Named fields above keep their offsets (gap trails them).
+			std::byte gap[0x16000 - 0x40];
 
 			static inline void(__thiscall* reset_state_all_internal)(cgs_device_context* obj);
 		};
-		static_assert(sizeof(cgs_device_context) == 7952);
+		static_assert(sizeof(cgs_device_context) == 0x16000);
 		static_assert(offsetof(cgs_device_context, mp_sbgl_context) == 24);
 		static_assert(offsetof(cgs_device_context, mp_shader_uniform) == 56);
 
@@ -787,8 +792,16 @@ namespace LJ
 				t_lockfree_stack<cgs_cb_pool> stack_cb_pool;
 				t_lockfree_stack<cgs_up_pool> stack_up_pool;
 				t_lockfree_stack<cgs_shader_uniform> stack_shader_uniform;
-				//std::byte gap22[808];
-				t_instance_tbl<cgs_mesh> handle_mesh;
+				// The real DX12 pxd context embeds two 0x10000-entry descriptor-handle arrays
+				// (0x80000 bytes each; built by the DLL ctor at ~+0x7A10 and +0x87A10) plus
+				// heap-allocator state between the pools and the handle tables. gs.h originally
+				// omitted them, collapsing the tail by ~1MB and mis-placing every handle table,
+				// which made the DLL's t_instance_tbl allocator (FUN_18008e6d0) int3-assert.
+				// This padding restores the true offsets so handle_mesh lands at +0x107A98.
+				// Verified against a live LJ gs context dump + the DLL constructor; the offsets
+				// are locked by static_asserts in gs.cpp. See scratchpad/live-gscontext-spec.md.
+				std::byte gap_descriptor_handle_arrays[0xFF030];
+				t_instance_tbl<cgs_mesh> handle_mesh; // +0x107A98
 				t_instance_tbl<cgs_tex> handle_tex;
 				t_instance_tbl<cgs_vs> handle_vs;
 				t_instance_tbl<cgs_ps> handle_ps;

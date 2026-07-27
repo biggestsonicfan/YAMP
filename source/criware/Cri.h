@@ -2,19 +2,19 @@
 
 #include "icri.h"
 
-class CriStub final : public icri
+class Cri final : public icri
 {
 public:
 	virtual CriAtomExPlayerTag* criAtomExPlayer_Create(CriAtomExPlayerConfigTag*, void*, int) override;
-	virtual void gap1() override;
-	virtual void gap2() override;
-	virtual void gap3() override;
-	virtual void gap4() override;
-	virtual void gap5() override;
-	virtual void gap6() override;
-	virtual void gap7() override;
-	virtual void gap8() override;
-	virtual void gap9() override;
+	virtual void criAtomExPlayer_Destroy(CriAtomExPlayerTag*) override;
+	virtual int criAtomExPlayer_GetStatus(CriAtomExPlayerTag*) override;
+	virtual CriAtomExAcbTag* criAtomExAcb_LoadAcbData(void*, int, CriFsBinderHnObjTag*, const char*, void*, int) override;
+	virtual int criAtomExAcb_CalculateWorkSizeForLoadAcbData(void*, int, CriFsBinderHnObjTag*, const char*) override;
+	virtual void criAtomExAcb_Release(CriAtomExAcbTag*) override;
+	virtual void criAtomExPlayer_AttachAisac(CriAtomExPlayerTag*, const char*) override;
+	virtual void criAtomExPlayer_DetachAisac(CriAtomExPlayerTag*, const char*) override;
+	virtual void criAtomExPlayer_SetCueName(CriAtomExPlayerTag*, CriAtomExAcbTag*, const char*) override;
+	virtual void criAtomExPlayer_SetVolume(CriAtomExPlayerTag*, float) override;
 	virtual int criAtomExPlayer_CalculateWorkSize(CriAtomExPlayerConfigTag*) override;
 	virtual unsigned int criAtomExPlayer_Start(CriAtomExPlayerTag*) override;
 	virtual void criAtomExPlayer_Stop(CriAtomExPlayerTag*) override;
