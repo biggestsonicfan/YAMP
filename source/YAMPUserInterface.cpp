@@ -2,6 +2,7 @@
 
 #include "YAMPGeneral.h"
 #include "LJ/StfDebugWindows.h"
+#include "LJ/m2ftg_host.h"
 
 #include "imgui/imgui.h"
 
@@ -114,9 +115,11 @@ void YAMPUserInterface::Draw()
 		ImGui::SameLine();
 
 		ImGui::BeginGroup();
-		// About is informational; Controls is read-only except for StF, whose button assignments
-		// are editable and go through the same Apply/Cancel flow as the other pages.
-		const bool controlsEditable = gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
+		// About is informational; Controls is read-only except for the LJ m2ftg games (StF/FV),
+		// whose button assignments are editable and go through the same Apply/Cancel flow as
+		// the other pages.
+		const bool controlsEditable = gGeneral.GetGameId() == YAMPGeneral::GameId::StF
+			|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
 		bool drawButtons = selectedTab != about_id && (selectedTab != controls_id || controlsEditable);
 
 		float rightPanelHeight = 0.0f;
@@ -347,7 +350,8 @@ void YAMPUserInterface::DrawGraphics()
 // TODO: This will have to be subclassed once more games are added
 void YAMPUserInterface::DrawGame()
 {
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF
+		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
 	{
 		DrawGameStF();
 		return;
@@ -434,7 +438,8 @@ void YAMPUserInterface::DrawGameStF()
 		}
 		if (ImGui::IsItemHovered())
 		{
-			ImGui::SetTooltip("Sonic the Fighters is a native 4:3 arcade game.\nApplies immediately.");
+			ImGui::SetTooltip("%s is a native 4:3 arcade game.\nApplies immediately.",
+				gGeneral.GetGameId() == YAMPGeneral::GameId::FV ? "Fighting Vipers" : "Sonic the Fighters");
 		}
 	}
 
@@ -504,8 +509,15 @@ void YAMPUserInterface::DrawGameStF()
 		}
 		if (ImGui::IsItemHovered())
 		{
-			ImGui::SetTooltip("Region the arcade board boots as. USA runs the game as\n"
-				"Sonic Championship, its western release.\nRequires a restart.");
+			if (gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
+			{
+				ImGui::SetTooltip("Region the arcade board boots as.\nRequires a restart.");
+			}
+			else
+			{
+				ImGui::SetTooltip("Region the arcade board boots as. USA runs the game as\n"
+					"Sonic Championship, its western release.\nRequires a restart.");
+			}
 		}
 	}
 
@@ -533,7 +545,8 @@ void YAMPUserInterface::DrawGameStF()
 
 void YAMPUserInterface::DrawControls()
 {
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF
+		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
 	{
 		DrawControlsStF();
 		return;
@@ -913,7 +926,13 @@ void YAMPUserInterface::DrawDebug()
 		ImGui::SetTooltip("Enables a debug D3D layer when supported by the system.");
 	}
 
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	// The DLL debug-menu windows and the emulated-RAM debug flag are reconstructed from
+	// StF-specific DLL data/addresses; the loose-ROM bypass is generic across the LJ m2ftg
+	// games (archive name and image list come from the GameDesc table).
+	const bool isStf = gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
+	const bool isLJm2ftg = isStf || gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
+
+	if (isStf)
 	{
 		if (ImGui::Checkbox("Display debugging features", &m_stfShowDebugFeatures))
 		{
@@ -925,18 +944,26 @@ void YAMPUserInterface::DrawDebug()
 				"reconstructed from data inside the game DLL. Actions run the DLL's own handlers; some of them are\n"
 				"stubs in the retail DLL and have no effect. Takes effect immediately after Apply.");
 		}
+	}
 
+	if (isLJm2ftg)
+	{
 		if (ImGui::Checkbox("Load ROM files from a directory", &m_stfLooseRomFiles))
 		{
 			m_pageModified = true;
 		}
 		if (ImGui::IsItemHovered())
 		{
-			ImGui::SetTooltip("Bypasses rom/stf_rom.par and reads the ROM images directly from a rom/stf_rom directory.\n"
-				"All five files extracted from the archive (rom_code1.bin, rom_data.bin, rom_ep.bin, rom_pol.bin,\n"
-				"rom_tex.bin) must be present, otherwise the archive is used as usual. Requires a restart.");
+			const auto& game = LJ::StF::CurrentGame();
+			ImGui::SetTooltip("Bypasses rom/%s and reads the ROM images directly from the matching rom subdirectory.\n"
+				"Every image extracted from the archive (rom_code1.bin, rom_data.bin, the EP/POL/TEX ROMs)\n"
+				"must be present, otherwise the archive is used as usual. Requires a restart.",
+				game.rom_archive_name);
 		}
+	}
 
+	if (isStf)
+	{
 		if (ImGui::Checkbox("Set the game's debug flag", &m_stfGameDebugFlag))
 		{
 			m_pageModified = true;
@@ -980,6 +1007,10 @@ void YAMPUserInterface::DrawAbout()
 	{
 	case YAMPGeneral::GameId::StF:
 		arcadeName = "Sonic the Fighters";
+		baseGameName = "Lost Judgment";
+		break;
+	case YAMPGeneral::GameId::FV:
+		arcadeName = "Fighting Vipers";
 		baseGameName = "Lost Judgment";
 		break;
 	case YAMPGeneral::GameId::VF2:

@@ -38,6 +38,31 @@ namespace LJ
 {
 	namespace StF
 	{
+		// ---- Game DLL address range (for return-address caller checks) ------
+		// StF's DLL always loads at its fixed preferred base 0x180000000 (relocs work but
+		// DYNAMIC_BASE is off), which the RA checks used to hardcode. FV's DLL is built WITH
+		// DYNAMIC_BASE and relocates, so the range must come from the loaded module. Seeded
+		// with the historical fixed range so nothing breaks if SetGameDllRange is never called.
+		static uintptr_t g_gameDllBase = 0x180000000ull;
+		static uintptr_t g_gameDllEnd  = 0x181000000ull;
+		static bool IsGameDllAddr(uintptr_t addr)
+		{
+			return addr >= g_gameDllBase && addr < g_gameDllEnd;
+		}
+		void SetGameDllRange(void* dllBase)
+		{
+			const auto* dos = static_cast<const IMAGE_DOS_HEADER*>(dllBase);
+			const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+				static_cast<const uint8_t*>(dllBase) + dos->e_lfanew);
+			g_gameDllBase = reinterpret_cast<uintptr_t>(dllBase);
+			g_gameDllEnd = g_gameDllBase + nt->OptionalHeader.SizeOfImage;
+			char b[96];
+			_snprintf_s(b, _TRUNCATE, "[dll-range] game module 0x%llX..0x%llX\n",
+				static_cast<unsigned long long>(g_gameDllBase),
+				static_cast<unsigned long long>(g_gameDllEnd));
+			D3D12LogLine(b);
+		}
+
 		namespace
 		{
 			// ---- Sizing -----------------------------------------------------
@@ -746,16 +771,16 @@ namespace LJ
 			static ID3D12CommandQueue* g_yampQueue = nullptr;
 			static void STDMETHODCALLTYPE HookedExec(ID3D12CommandQueue* self, UINT n, ID3D12CommandList* const* lists)
 			{
-				// Does StF actually submit? Log the CALLER: return address in the StF DLL (0x180000000..)
-				// means StF's own sbgl backend is doing ExecuteCommandLists; else it's 11on12/our blit.
+				// Does StF actually submit? Log the CALLER: return address inside the game DLL
+				// means its own sbgl backend is doing ExecuteCommandLists; else it's 11on12/our blit.
 				static int s_n = 0;
 				if (s_n < 24) { ++s_n;
 					const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
-					const bool inStf = (ra >= 0x180000000ull && ra < 0x181000000ull);
+					const bool inStf = IsGameDllAddr(ra);
 					char b[144];
 					_snprintf_s(b, _TRUNCATE, "[exec] n=%u SAME=%d caller=%s (%s+0x%llX)\n",
 						n, self == g_yampQueue ? 1 : 0, inStf ? "StF" : "other",
-						inStf ? "StF" : "?", inStf ? static_cast<unsigned long long>(ra - 0x180000000ull) : static_cast<unsigned long long>(ra));
+						inStf ? "StF" : "?", inStf ? static_cast<unsigned long long>(ra - g_gameDllBase) : static_cast<unsigned long long>(ra));
 					D3D12LogLine(b);
 				}
 				if (lists) for (UINT i = 0; i < n; ++i) if (lists[i] == g_lastStfCmdList) g_stfListExecs++;
@@ -1413,11 +1438,11 @@ namespace LJ
 			}
 			static void STDMETHODCALLTYPE HookedCopyBufferRegion(ID3D12GraphicsCommandList* self, ID3D12Resource* dst, UINT64 dstOff, ID3D12Resource* src, UINT64 srcOff, UINT64 bytes)
 			{
-				// GATE ON THE CALLER, not StfRenderActive(): StF records copies from loader/worker
-				// threads OUTSIDE the func() bracket. The StF DLL loads at fixed base 0x180000000
-				// (no ASLR) - a return address in that range is definitively StF, never d3d11on12/YAMP.
+				// GATE ON THE CALLER, not StfRenderActive(): the module records copies from
+				// loader/worker threads OUTSIDE the func() bracket. A return address inside the
+				// loaded game DLL's range is definitively the module, never d3d11on12/YAMP.
 				const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				const bool fromStf = ra >= 0x180000000ull && ra < 0x181000000ull;
+				const bool fromStf = IsGameDllAddr(ra);
 				if (fromStf)
 					ShadowRecordBufferCopy(dst, dstOff, src, srcOff, bytes);
 				if (fromStf || StfRenderActive())
@@ -1493,7 +1518,7 @@ namespace LJ
 				// No MarkStfRenderList here: the resolve rides StF's DRAW list (already flagged by the
 				// draw hooks); flagging based on the resolve alone risks touching a foreign list.
 				const uintptr_t raRS = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				if (raRS >= 0x180000000ull && raRS < 0x181000000ull)
+				if (IsGameDllAddr(raRS))
 					g_lastStfResolveDst = dst; // fallback display source (see BlitDX12Texture)
 				static int s_rs = 0;
 				if (s_rs < 12)
@@ -1515,7 +1540,7 @@ namespace LJ
 				// CopyResource is not shadowed (never observed from StF: g_copyResCount==0 all runs);
 				// log if it ever fires so we know to extend the shadow list to it.
 				const uintptr_t raCR = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				const bool fromStfCR = raCR >= 0x180000000ull && raCR < 0x181000000ull;
+				const bool fromStfCR = IsGameDllAddr(raCR);
 				if (fromStfCR || StfRenderActive())
 				{
 					++g_copyResCount;

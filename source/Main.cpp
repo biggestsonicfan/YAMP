@@ -63,8 +63,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-    // Toggle which game to run: StF by default, "-vf5fs" runs VF5FS (Y6), "-vf2" runs VF2 (YLAD).
+    // Toggle which game to run: StF by default, "-fv" runs Fighting Vipers (LJ, same m2ftg
+    // path as StF), "-vf5fs" runs VF5FS (Y6), "-vf2" runs VF2 (YLAD).
     const bool runVF2 = wcsstr(GetCommandLineW(), L"-vf2") != nullptr;
+    const bool runFV = !runVF2 && wcsstr(GetCommandLineW(), L"-fv") != nullptr;
     const bool runStF = !runVF2 && wcsstr(GetCommandLineW(), L"-vf5fs") == nullptr;
 
     if (runVF2) {
@@ -106,14 +108,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         return 0;
     }
     else {
-        // --- StF path (DX12 game DLL if present; otherwise DX12 fallback)
-        gGeneral.SetGameId(YAMPGeneral::GameId::StF);
-        HMODULE stfDll = LJ::StF::LoadDLL();  // tries to load stf-pxd-w64-d3d12_retail.dll
+        // --- LJ m2ftg path: StF by default, FV with "-fv" (DX12 game DLL if present;
+        // otherwise DX12 fallback). Both games share the whole hosting path; the per-game
+        // differences live in LJ::StF::GameDesc (StF.cpp).
+        gGeneral.SetGameId(runFV ? YAMPGeneral::GameId::FV : YAMPGeneral::GameId::StF);
+        HMODULE stfDll = LJ::StF::LoadDLL();  // stf-pxd-w64-d3d12_retail.dll / fv-pxd-w64-d3d12_retail.dll
 
         // Always seed settings so UI has something to read
-        gGeneral.SetDLLName("Sonic the Fighters");
+        gGeneral.SetDLLName(runFV ? "Fighting Vipers" : "Sonic the Fighters");
         gGeneral.SetDLLTimestamp(0);
-        gGeneral.SetDataPath(u8"Sega", u8"Sonic The Fighters");
+        if (runFV)
+            gGeneral.SetDataPath(u8"Sega", u8"Fighting Vipers");
+        else
+            gGeneral.SetDataPath(u8"Sega", u8"Sonic The Fighters");
         gGeneral.LoadSettings();
 
         if (!stfDll) {

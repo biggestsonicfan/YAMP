@@ -37,5 +37,13 @@ namespace LJ
 		// slot, which the LJ host normally binds. Requires BuildHostCdevice to have run first
 		// (needs the ID3D12Device); returns null otherwise.
 		void* BuildRenderCommandContext();
+
+		// Registers the loaded game DLL's address range for the "did this call come from the
+		// module?" return-address checks in the hooks. The StF DLL always loads at its fixed
+		// preferred base 0x180000000 (no ASLR), but the FV DLL is built with DYNAMIC_BASE and
+		// relocates — hardcoding the range silently broke every RA-gated hook there (shadow
+		// copy list, resolve-dst tracking, exec-caller attribution) -> black screen.
+		// Call from ResolveSymbolsAndInstallPatches with the LoadLibrary'd module handle.
+		void SetGameDllRange(void* dllBase);
 	}
 }

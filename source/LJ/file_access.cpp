@@ -2,17 +2,19 @@
 
 #include <string_view>
 #include "../YAMPGeneral.h"
+#include "m2ftg_host.h" // GameDesc / CurrentGame()
 
 namespace LJ
 {
 	namespace StF
 	{
 		// Debug feature: when "load loose ROM files" is enabled and a fully extracted
-		// rom/stf_rom directory sits next to rom/stf_rom.par, refuse to open the archive.
+		// rom/<game>_rom directory sits next to rom/<game>_rom.par, refuse to open the archive.
 		// module_start treats the failed mount as "no archive" (the handle it stores is only
 		// ever released in module_stop, which tolerates 0), and the DLL's path resolver then
-		// falls back from the archive-mount tree to plain file opens - so rom/stf_rom/*.bin
-		// load straight from disk through the engine's own loose-file path.
+		// falls back from the archive-mount tree to plain file opens - so rom/<game>_rom/*.bin
+		// load straight from disk through the engine's own loose-file path. Archive name and
+		// the per-game ROM image list come from the GameDesc table (StF.cpp).
 		static bool ShouldBypassRomArchive(const char* path)
 		{
 			const auto* settings = gGeneral.GetSettings();
@@ -21,8 +23,9 @@ namespace LJ
 				return false;
 			}
 
+			const GameDesc& game = CurrentGame();
 			const std::string_view pathView(path);
-			constexpr std::string_view archiveName("stf_rom.par");
+			const std::string_view archiveName(game.rom_archive_name);
 			if (pathView.size() < archiveName.size() ||
 				_strnicmp(pathView.data() + (pathView.size() - archiveName.size()), archiveName.data(), archiveName.size()) != 0)
 			{
@@ -31,13 +34,10 @@ namespace LJ
 
 			// Only bypass when every ROM image the boot loader requests is present, as the boot
 			// state machine polls forever waiting for a file that never opens.
-			static constexpr const wchar_t* ROM_FILES[] = {
-				L"rom_code1.bin", L"rom_data.bin", L"rom_ep.bin", L"rom_pol.bin", L"rom_tex.bin",
-			};
 			const std::wstring directory = UTF8ToWchar(pathView.substr(0, pathView.size() - 4)); // strip ".par"
-			for (const wchar_t* romFile : ROM_FILES)
+			for (size_t i = 0; i < game.rom_file_count; i++)
 			{
-				const std::wstring romPath = directory + L'/' + romFile;
+				const std::wstring romPath = directory + L'/' + game.rom_files[i];
 				const DWORD attributes = GetFileAttributesW(romPath.c_str());
 				if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
 				{
@@ -49,7 +49,7 @@ namespace LJ
 			}
 
 			char buf[600];
-			sprintf_s(buf, "[file] loose-rom: hiding '%s', ROM images will load from the stf_rom directory\n", path);
+			sprintf_s(buf, "[file] loose-rom: hiding '%s', ROM images will load from the extracted directory\n", path);
 			OutputDebugStringA(buf);
 			return true;
 		}

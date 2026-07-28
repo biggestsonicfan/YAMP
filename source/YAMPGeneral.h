@@ -49,6 +49,7 @@ public:
 		VF5FS,
 		StF,
 		VF2,
+		FV,
 	};
 
 	const auto& GetDataPath() const { return m_userDataPath; }

@@ -2,6 +2,8 @@
 
 #include "../RenderWindow.h"
 
+#include "m2ftg_host.h" // GameDesc / CurrentGame() — the StF/FV-shared LJ hosting facts
+
 using module_func_t = int(*)(size_t args, const void* argp);
 
 namespace LJ {

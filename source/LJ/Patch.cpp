@@ -14,6 +14,7 @@
 #include "ImportSymbols.h"
 #include "Imports.h"
 #include "HostCdevice.h"
+#include "m2ftg_host.h" // GameDesc / CurrentGame()
 
 #include <d3d12.h>
 #include <vector>
@@ -592,9 +593,11 @@ namespace LJ
 			// DLL globals by fixed RVA (same layout StfDebugWindows relies on): the i960
 			// context pointer, the 0x1000-entry opcode dispatch table the original indexes,
 			// and the work-RAM host base (the emulated address is added directly to it).
-			constexpr uintptr_t RVA_CPU_CTX_PTR = 0x58A960;
-			constexpr uintptr_t RVA_OPCODE_TABLE = 0x168630;
-			constexpr uintptr_t RVA_RAM_BASE_PTR = 0x8F7CC8;
+			// Per-game — the StF and FV DLLs place them differently; values live in the
+			// GameDesc table (StF.cpp) and are latched at install time.
+			static uintptr_t RVA_CPU_CTX_PTR = 0;
+			static uintptr_t RVA_OPCODE_TABLE = 0;
+			static uintptr_t RVA_RAM_BASE_PTR = 0;
 			// Work-RAM window the trampoline lives in (memory-map region 5).
 			constexpr uint32_t RAM_START = 0x500000;
 			constexpr uint32_t RAM_SIZE = 0x100000;
@@ -639,6 +642,10 @@ namespace LJ
 
 		void InstallRamExecFetch(void* dll, const Imports& symbols)
 		{
+			const GameDesc& game = CurrentGame();
+			RamExecFetch::RVA_CPU_CTX_PTR = game.rva_cpu_ctx_ptr;
+			RamExecFetch::RVA_OPCODE_TABLE = game.rva_opcode_table;
+			RamExecFetch::RVA_RAM_BASE_PTR = game.rva_ram_base_ptr;
 			RamExecFetch::dllBase = static_cast<uint8_t*>(dll);
 			Trampoline* t = Trampoline::MakeTrampoline(dll);
 			Memory::InjectHook(symbols.GetSymbol(ImportSymbol::I960_FETCH_EXEC),

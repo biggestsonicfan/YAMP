@@ -40,7 +40,8 @@ namespace LJ
 {
     namespace StF
     {
-        static const wchar_t* DLL_NAME = L"stf-pxd-w64-d3d12_retail.dll";
+        // Per-game facts (DLL name, config.kind, ROM names, i960 RVAs) live in m2ftg_host.h
+        // (GameDesc / CurrentGame()) — the LJ-specific but m2ftg-generic hosting header.
 
         // Resolved from the DLL (ImportSymbol::STF_*): M2FTGAppModule's per-frame render-system submit
         // (FUN_18003b530) and the live-execute_info global (DAT_1801ee4a0) that submit dereferences.
@@ -124,6 +125,10 @@ namespace LJ
 
         static bool ResolveSymbolsAndInstallPatches(void* dll, const RenderWindow& window) try
         {
+            // Register the module's real load range for the hooks' return-address checks.
+            // The FV DLL is ASLR'd (DYNAMIC_BASE) so it does NOT sit at 0x180000000 like StF.
+            SetGameDllRange(dll);
+
             const Imports symbolMap = BuildSymbolMap(dll);
 
             const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
@@ -172,7 +177,7 @@ namespace LJ
         catch (...)
         {
             // TODO: Show this in native UI
-            const std::wstring str(L"Failed to resolve imports and/or patch " + std::wstring(DLL_NAME) + L".dll!\n\nIt's either not a valid Virtua Fighter 5: Final Showdown DLL file from Yakuza 6, "
+            const std::wstring str(L"Failed to resolve imports and/or patch " + std::wstring(CurrentGame().dll_name) + L"!\n\nIt's either not a valid arcade module DLL from Lost Judgment, "
                 "or the game has been updated and YAMP is not forward compatible with that new version.");
             MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
 
@@ -207,6 +212,8 @@ namespace LJ
         static wil::unique_hmodule gameDll;
         HMODULE LJ::StF::LoadDLL()
         {
+            const GameDesc& game = CurrentGame();
+
             // TODO: Clean up
             {
                 DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
@@ -215,22 +222,22 @@ namespace LJ
                 gamePath.assign(buf.get());
             }
 
-            gameDll.reset(LoadLibraryW((gamePath / DLL_NAME).c_str()));
+            gameDll.reset(LoadLibraryW((gamePath / game.dll_name).c_str()));
             if (gameDll == nullptr)
             {
-                // Try loading from a subdirectory
-                gamePath.append(L"stf");   // <<� FIX: use "stf" subfolder for StF
-                gameDll.reset(LoadLibraryW((gamePath / DLL_NAME).c_str()));
+                // Try loading from a subdirectory ("stf" / "fv")
+                gamePath.append(game.subdir);
+                gameDll.reset(LoadLibraryW((gamePath / game.dll_name).c_str()));
             }
 
             if (!gameDll)
             {
-                const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) + L"!\n\nMake sure that YAMP.exe is located in your Yakuza 6: The Song of Life directory or its \"stf\" subdirectory, next to the DLL file.");
+                const std::wstring str(L"Could not load " + std::wstring(game.dll_name) + L"!\n\nMake sure that YAMP.exe is located next to the DLL file or its \"" + game.subdir + L"\" subdirectory contains it.");
                 MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
             }
             else
             {
-                gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
+                gGeneral.SetDLLName(WcharToUTF8(game.dll_name));
 
                 // Get the checksum
                 PIMAGE_DOS_HEADER dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(gameDll.get());
@@ -241,7 +248,7 @@ namespace LJ
                 // Reject known old DLLs
                 if (timeStamp == 0x603E22E3 || timeStamp == 0x606D6969 || timeStamp == 0x6075A65A)
                 {
-                    const std::wstring str(std::wstring(DLL_NAME) + L" is of an unsupported version!\n\nPlease update your Yakuza 6: The Song of Life to the latest version.");
+                    const std::wstring str(std::wstring(game.dll_name) + L" is of an unsupported version!\n\nPlease update your game to the latest version.");
                     MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
                     gameDll.reset();
                 }
@@ -252,7 +259,8 @@ namespace LJ
 
         void LJ::StF::PreInitialize()
         {
-            gGeneral.SetDataPath(u8"Sega", u8"Sonic the Fighters");
+            gGeneral.SetDataPath(u8"Sega",
+                gGeneral.GetGameId() == YAMPGeneral::GameId::FV ? u8"Fighting Vipers" : u8"Sonic the Fighters");
             gGeneral.LoadSettings();
         }
 
@@ -352,7 +360,7 @@ namespace LJ
             // boot instead (vs_mode off: attract loop -> coin/start -> 1P ladder); all of these
             // are dip switches in the YAMP settings (module_start copies the config once, so
             // changes need a restart).
-            params.config.kind = 2;      // Sonic the Fighters
+            params.config.kind = CurrentGame().kind; // 2 = Sonic the Fighters, 1 = Fighting Vipers
             params.config.difficulty = settings->m_stfDifficulty <= 3 ? static_cast<uint8_t>(settings->m_stfDifficulty) : 1;
             params.config.country = settings->m_stfCountry <= 2 ? static_cast<uint8_t>(settings->m_stfCountry) : 0;
             params.config.is_freeplay = settings->m_stfFreeplay ? 1 : 0;
