@@ -29,6 +29,7 @@ void AdvanceFrameStampNow();
 
 #include "ImportSymbols.h"
 #include "HostCdevice.h"
+#include "../StFInput.h"
 #include "../YAMPGeneral.h"
 #include "../imgui/imgui.h"
 
@@ -158,6 +159,9 @@ namespace LJ
                 ReinstateLogging(dll, symbolMap);
                 // Install additional "assertions"
                 InjectTraps(symbolMap);
+                // Region-aware i960 instruction fetch, so the ROM debug menu's RAM
+                // trampoline (and any other RAM-resident code) can execute.
+                InstallRamExecFetch(dll, symbolMap);
             }
 
             PatchSl(sl::sm_context);
@@ -507,8 +511,10 @@ namespace LJ
                 execute_info.status |= 1;
             }
 
-            // Input: collect via the existing csl_pad (XInput + keyboard), then copy the shared
+            // Input: refresh the shared XInput snapshot, evaluate each player's bindings via
+            // csl_pad (StFInput, set up on the YAMP Controls page), then copy the shared
             // 0xE0-byte prefix into the m2ftg pad blocks (same pxd sl layout, same button bits).
+            StFInput::PollPads();
             s_pads[0].set_state(0);
             s_pads[1].set_state(1);
             for (int i = 0; i < 2; i++)
@@ -519,18 +525,31 @@ namespace LJ
                 execute_info.pad[i].m_is_connected = true;
             }
 
-            // Button assignments (host->module; LJ fills these from player settings, we fill them
-            // from the YAMP Controls page — re-read every frame, so edits apply live). Slot order
+            // Button assignments (host->module; LJ fills these from player settings). Slot order
             // is the module's own (slot template @DLL 0x180126770): A, B, Y, X, LT, LB, RT, RB.
-            // Both players share the one assignment set.
+            // Ours are a FIXED table: remapping happens host-side in csl_pad::set_state, which
+            // routes each player's bound inputs onto the button bit carrying the wanted combo.
             for (int p = 0; p < 2; p++)
             {
                 for (int i = 0; i < 8; i++)
                 {
-                    uint32_t a = settings->m_stfAssign[i];
-                    if (a < m2ftg_execute_info_t::assign_none || a > m2ftg_execute_info_t::assign_kg)
-                        a = m2ftg_execute_info_t::assign_none;
-                    execute_info.assign[p][i] = static_cast<uint8_t>(a);
+                    execute_info.assign[p][i] = StFInput::MODULE_ASSIGN[i];
+                }
+            }
+
+            // Dedicated coin binding: a press becomes the coin status bit (host->module bit5,
+            // same bit LJ's start/coin protocol below injects). Meaningless in freeplay, and
+            // swallowed while the pause menu is open like the rest of the inputs.
+            {
+                static bool s_coinWasDown[2] = {};
+                for (int p = 0; p < 2; p++)
+                {
+                    const bool down = StFInput::ActionDown(p, StFInput::Action_Coin);
+                    if (down && !s_coinWasDown[p] && !settings->m_stfFreeplay && !s_pauseMenuOpen)
+                    {
+                        execute_info.status |= 0x20;
+                    }
+                    s_coinWasDown[p] = down;
                 }
             }
 

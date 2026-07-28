@@ -70,6 +70,8 @@ namespace LJ
 				{ S::STF_FRAME_SUBMIT, get_module_pattern(dll, "48 83 EC 28 E8 ? ? ? ? 48 83 C4 28 E9 ? ? ? ?") }, //18003B530
 				// DAT_1801ee4a0 (live execute_info): module_main's `CMP RCX,0x1760 / JNZ / MOV [rip],RDX`.
 				{ S::STF_RENDER_EXECINFO, immediate(get_module_pattern(dll, "48 81 F9 60 17 00 00 0F 85 ? ? ? ? 48 89 15 ? ? ? ?", 16)) }, //1801EE4A0
+				// i960 fetch/decode dispatcher: `mov rax,[ctx]; lea r10,[base]; mov r9d,[rax+8]; add r9,[rax]; movzx eax,[r9+3]`.
+				{ S::I960_FETCH_EXEC, get_module_pattern(dll, "48 83 EC 28 48 8B 05 ? ? ? ? 4C 8D 15 ? ? ? ? 44 8B 48 08 4C 03 08 41 0F B6 41 03") }, //1800255F0
 			};
 
 			return symbols;

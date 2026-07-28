@@ -2,6 +2,8 @@
 
 #include <filesystem>
 
+#include "StFInput.h"
+
 class YAMPSettings
 {
 public:
@@ -36,12 +38,13 @@ public:
 	// is_vs_mode: LJ's 2P-quick-match boot (auto-credits both players, random stage).
 	// Off = authentic arcade boot (attract mode, single-player ladder).
 	bool m_stfVersusMode = false;
-	// execute_info.assign button assignments, in MODULE SLOT order: A, B, Y, X, LT, LB, RT, RB
-	// (slot->pad-button map from the DLL's slot template @0x180126770). Values are
-	// m2ftg_execute_info_t::assign_t (1=none, 2=P, 3=K, 4=G, 5=PG, 6=PKG, 7=PK, 8=KG).
-	// Defaults follow the module's own template except X, which we default to G so the
-	// documented J key (X button) guards on keyboard. Applied live.
-	uint32_t m_stfAssign[8] = { 2, 3, 4, 4, 5, 6, 7, 8 };
+	// Per-player input bindings (see StFInput.h): a keyboard key and/or an XInput button
+	// per action, plus which XInput controller each player reads (-1 = keyboard only).
+	// The game loop re-reads these every frame, so they apply live. The module-facing
+	// execute_info.assign table is fixed (StFInput::MODULE_ASSIGN) - remapping is host-side.
+	StFInput::KeyBinds m_stfKeyBinds = StFInput::DEFAULT_KEY_BINDS;
+	StFInput::PadBinds m_stfPadBinds = StFInput::DEFAULT_PAD_BINDS;
+	int32_t m_stfPadIndex[2] = { 0, 1 };
 
 	// Debug settings
 	bool m_dontApplyPatches = false;
@@ -53,6 +56,9 @@ public:
 	// the engine's archive-miss fallback opens rom/stf_rom/*.bin as plain files instead.
 	// Only honoured when all five extracted ROM images are present on disk.
 	bool m_stfLooseRomFiles = false;
+	// Sets the game's own debug flag in emulated RAM (the dword at 0x508000, flipped by
+	// XOR with 0x24), enforced every frame while the board is booted. Applied live.
+	bool m_stfGameDebugFlag = false;
 
 	// Misc
 	uint32_t m_buildLastShowedDisclaimer = 0;

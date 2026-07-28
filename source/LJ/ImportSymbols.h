@@ -47,6 +47,13 @@ namespace LJ
 			// The "live execute_info" global (DAT_1801ee4a0). module_main sets it on entry and clears it
 			// to 0 on return; STF_FRAME_SUBMIT dereferences it, so the host restores it around the call.
 			STF_RENDER_EXECINFO,
+
+			// The i960 CPU core's fetch/decode dispatcher (FUN_1800255F0). Its instruction fetch is
+			// hard-wired to the program-ROM host buffer (ctx->codeBase + IP, no memory map), so code
+			// running from emulated RAM — which the ROM's own debug menu does via a trampoline at
+			// 0x59F270 — reads past the 1MB ROM image and crashes. YAMP replaces it with a
+			// region-aware reimplementation (see InstallRamExecFetch).
+			I960_FETCH_EXEC,
 		};
 
 		class Imports BuildSymbolMap(void* dll);

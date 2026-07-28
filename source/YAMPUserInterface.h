@@ -1,9 +1,12 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <vector>
 #include <string>
 #include <tuple>
+
+#include "StFInput.h"
 
 class YAMPUserInterface
 {
@@ -23,6 +26,11 @@ private:
 	void DrawGameStF();
 	void DrawControls();
 	void DrawControlsStF();
+	void DrawControlsStFPlayer(int player);
+	void DrawStfBindingCapture();
+	void StartStfCapture(int player, bool wizard, uint32_t action, uint32_t deviceMask);
+	void AssignStfKey(int player, uint32_t action, uint32_t vk);
+	void AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex);
 	void DrawDebug();
 	void DrawAbout();
 	bool DrawSettingsConfirmation();
@@ -70,13 +78,31 @@ private:
 	uint32_t m_stfCountry = 0;
 	bool m_stfFreeplay = true;
 	bool m_stfVersusMode = false;
-	uint32_t m_stfAssign[8] = { 2, 3, 4, 4, 5, 6, 7, 8 };
+	StFInput::KeyBinds m_stfKeyBinds = StFInput::DEFAULT_KEY_BINDS;
+	StFInput::PadBinds m_stfPadBinds = StFInput::DEFAULT_PAD_BINDS;
+	int32_t m_stfPadIndex[2] = { 0, 1 };
 
 	// Debug settings
 	bool m_dontApplyPatches = false;
 	bool m_useD3DDebugLayer = false;
 	bool m_stfShowDebugFeatures = false;
 	bool m_stfLooseRomFiles = false;
+	bool m_stfGameDebugFlag = false;
+
+	// StF binding-capture state ("press a key for X"). The queue holds (action, device mask
+	// 1=keyboard 2=controller) prompts; non-empty = the capture popup is live. The prev
+	// snapshots make capture edge-triggered so held inputs are not picked up.
+	struct StfCapturePrompt
+	{
+		uint32_t action;
+		uint32_t deviceMask;
+	};
+	std::vector<StfCapturePrompt> m_stfCaptureQueue;
+	size_t m_stfCaptureStep = 0;
+	int m_stfCapturePlayer = 0;
+	bool m_stfCaptureOpenPopup = false;
+	std::array<bool, 256> m_stfCapturePrevKeys{};
+	uint32_t m_stfCapturePrevPadButtons[4] = {};
 
 	// Volatile state
 	bool m_settingsOpen = false, m_pageModified = false, m_showRestartWarning = false;

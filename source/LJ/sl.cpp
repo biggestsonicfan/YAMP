@@ -1,9 +1,9 @@
 #include "sl.h"
 
 #include "file_access.h"
+#include "../StFInput.h"
 #include "../YAMPGeneral.h"
 #include "../wil/resource.h"
-#include <Xinput.h>
 #include <Windows.h>
 #include <mmsystem.h>   // timeBeginPeriod
 #pragma comment(lib, "winmm.lib")
@@ -672,199 +672,72 @@ namespace LJ
 
         }
 
-        namespace
-        {
-            // TODO: Beautify
-            static decltype(XInputGetState)* getXInputGetState()
-            {
-                HMODULE xinputLib = LoadLibraryW(L"xinput1_3");
-                if (xinputLib == nullptr)
-                {
-                    xinputLib = LoadLibraryW(L"xinput1_4");
-                }
-                if (xinputLib == nullptr)
-                {
-                    xinputLib = LoadLibraryW(L"xinput9_1_0");
-                }
-
-                THROW_LAST_ERROR_IF_NULL(xinputLib);
-                return reinterpret_cast<decltype(XInputGetState)*>(GetProcAddress(xinputLib, "XInputGetState"));
-            }
-
-            bool _set_state_xi(unsigned int id, unsigned int* m_now, float* m_x1, float* m_y1, uint8_t* m_buttons)
-            {
-                static const auto getStateFunc = getXInputGetState();
-
-                XINPUT_STATE state;
-                if (getStateFunc(id, &state) != ERROR_SUCCESS) return false;
-
-                auto setButton = [&m_now, &m_buttons](sl::BUTTON button) {
-                    *m_now |= (1 << button);
-                    m_buttons[button] = 0xFF;
-                    };
-
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_A)
-                {
-                    setButton(sl::BUTTON_A);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_B)
-                {
-                    setButton(sl::BUTTON_B);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_X)
-                {
-                    setButton(sl::BUTTON_X);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_Y)
-                {
-                    setButton(sl::BUTTON_Y);
-                }
-
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_START)
-                {
-                    setButton(sl::BUTTON_START);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_BACK)
-                {
-                    setButton(sl::BUTTON_BACK);
-                }
-
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER)
-                {
-                    setButton(sl::BUTTON_LB);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)
-                {
-                    setButton(sl::BUTTON_RB);
-                }
-
-                if (state.Gamepad.bLeftTrigger > 48)
-                {
-                    setButton(sl::BUTTON_LT);
-                }
-                if (state.Gamepad.bRightTrigger > 48)
-                {
-                    setButton(sl::BUTTON_RT);
-                }
-
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP)
-                {
-                    setButton(sl::BUTTON_UP);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN)
-                {
-                    setButton(sl::BUTTON_DOWN);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT)
-                {
-                    setButton(sl::BUTTON_LEFT);
-                }
-                if (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT)
-                {
-                    setButton(sl::BUTTON_RIGHT);
-                }
-
-                // TODO: Proper deadzone
-                constexpr float DEADZONE = 0.25f;
-                float X = state.Gamepad.sThumbLX / 32767.0f;
-                float Y = -state.Gamepad.sThumbLY / 32767.0f;
-                if (X * X + Y * Y < DEADZONE * DEADZONE)
-                {
-                    *m_x1 = *m_y1 = 0.0f;
-                }
-                else
-                {
-                    *m_x1 = X;
-                    *m_y1 = Y;
-                }
-
-                return true;
-            }
-
-            void _set_state_keyboard(unsigned int* m_now, float* m_x1, float* m_y1, uint8_t* m_buttons)
-            {
-                auto setButton = [&m_now, &m_buttons](sl::BUTTON button) {
-                    *m_now |= (1 << button);
-                    m_buttons[button] = 0xFF;
-                    };
-
-                // TODO: Un-hardcode, for now these correspond to default Yakuza 6 controls.
-                // NOTE: unlike the Y6/VF5FS layout, Escape is NOT a game button here — it is
-                // reserved for the host pause menu (StF.cpp GameLoop), matching Lost Judgment.
-                // Cancel/back in the game's own menus is the L key (B button).
-                const auto& keys = gGeneral.GetPressedKeys();
-                const bool circleIsConfirm = gGeneral.GetSettings()->m_circleConfirm;
-                if (keys[VK_RETURN])
-                {
-                    setButton(circleIsConfirm ? sl::BUTTON_B : sl::BUTTON_A);
-                }
-
-                if (keys['K'])
-                {
-                    setButton(sl::BUTTON_A);
-                }
-                if (keys['L'])
-                {
-                    setButton(sl::BUTTON_B);
-                }
-                if (keys['J'])
-                {
-                    setButton(sl::BUTTON_X);
-                }
-
-                if (keys['M'])
-                {
-                    setButton(sl::BUTTON_LB);
-                }
-                if (keys['U'])
-                {
-                    setButton(sl::BUTTON_RB);
-                }
-                if (keys['I'])
-                {
-                    setButton(sl::BUTTON_LT);
-                }
-                if (keys['O'])
-                {
-                    setButton(sl::BUTTON_RT);
-                }
-
-                if (keys['F'])
-                {
-                    setButton(sl::BUTTON_START);
-                }
-                if (keys[VK_TAB])
-                {
-                    setButton(sl::BUTTON_BACK);
-                }
-
-                if (keys[VK_LEFT] || keys['A'])
-                {
-                    *m_x1 = -1.0f;
-                }
-                else if (keys[VK_RIGHT] || keys['D'])
-                {
-                    *m_x1 = 1.0f;
-                }
-                if (keys[VK_UP] || keys['W'])
-                {
-                    *m_y1 = -1.0f;
-                }
-                else if (keys[VK_DOWN] || keys['S'])
-                {
-                    *m_y1 = 1.0f;
-                }
-            }
-        };
-
+        // Binding-driven pad state: each player's actions (StFInput, set up on the YAMP
+        // Controls page) are routed to the sl button bits whose meaning is fixed by the
+        // assign table StF.cpp hands the module (StFInput::MODULE_ASSIGN): A=P, B=K, Y=G,
+        // X=P+G, LT=P+K+G, LB=P+K, RT=K+G. Escape stays reserved for the host pause menu
+        // (StF.cpp GameLoop), matching Lost Judgment. StF.cpp calls StFInput::PollPads()
+        // once per frame before these.
         void csl_pad::set_state(unsigned int index)
         {
             m_prev = std::exchange(m_now, 0);
             m_x1 = m_y1 = 0.0f;
-            _set_state_xi(index, &m_now, &m_x1, &m_y1, m_buttons);
-            if (index == 0)
+
+            const unsigned int player = index & 1;
+            auto setButton = [this](sl::BUTTON button) {
+                m_now |= (1u << button);
+                m_buttons[button] = 0xFF;
+                };
+            auto actionDown = [player](StFInput::Action action) {
+                return StFInput::ActionDown(player, action);
+                };
+
+            if (actionDown(StFInput::Action_Punch)) setButton(sl::BUTTON_A);
+            if (actionDown(StFInput::Action_Kick)) setButton(sl::BUTTON_B);
+            if (actionDown(StFInput::Action_Guard)) setButton(sl::BUTTON_Y);
+            if (actionDown(StFInput::Action_PG)) setButton(sl::BUTTON_X);
+            if (actionDown(StFInput::Action_PKG)) setButton(sl::BUTTON_LT);
+            if (actionDown(StFInput::Action_PK)) setButton(sl::BUTTON_LB);
+            if (actionDown(StFInput::Action_KG)) setButton(sl::BUTTON_RT);
+            if (actionDown(StFInput::Action_Start)) setButton(sl::BUTTON_START);
+            if (actionDown(StFInput::Action_Back)) setButton(sl::BUTTON_BACK);
+            // Action_Coin is not a pad button - StF.cpp turns it into the coin status bit.
+
+            // Movement: bound digital inputs get the dpad bits + full analog deflection;
+            // the player's left stick always steers as well (the cabinet lever).
+            const bool up = actionDown(StFInput::Action_Up);
+            const bool down = actionDown(StFInput::Action_Down);
+            const bool left = actionDown(StFInput::Action_Left);
+            const bool right = actionDown(StFInput::Action_Right);
+            if (left && !right)
             {
-                _set_state_keyboard(&m_now, &m_x1, &m_y1, m_buttons);
+                setButton(sl::BUTTON_LEFT);
+                m_x1 = -1.0f;
+            }
+            else if (right && !left)
+            {
+                setButton(sl::BUTTON_RIGHT);
+                m_x1 = 1.0f;
+            }
+            if (up && !down)
+            {
+                setButton(sl::BUTTON_UP);
+                m_y1 = -1.0f;
+            }
+            else if (down && !up)
+            {
+                setButton(sl::BUTTON_DOWN);
+                m_y1 = 1.0f;
+            }
+
+            const StFInput::PadState& pad = StFInput::GetPadState(gGeneral.GetSettings()->m_stfPadIndex[player]);
+            if (m_x1 == 0.0f)
+            {
+                m_x1 = pad.x;
+            }
+            if (m_y1 == 0.0f)
+            {
+                m_y1 = pad.y;
             }
 
             m_push = ~m_prev & m_now;

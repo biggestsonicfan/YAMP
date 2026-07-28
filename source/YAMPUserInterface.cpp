@@ -49,6 +49,7 @@ void YAMPUserInterface::Draw()
 
 	// The game DLL's own debug windows are independent of the F1 settings window.
 	LJ::StF::DrawDebugWindows();
+	LJ::StF::UpdateGameDebugFlag();
 
 	if (!ProcessF1Key())
 	{
@@ -217,18 +218,21 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_stfCountry = settings->m_stfCountry;
 	m_stfFreeplay = settings->m_stfFreeplay;
 	m_stfVersusMode = settings->m_stfVersusMode;
-	for (int i = 0; i < 8; i++)
+	m_stfKeyBinds = settings->m_stfKeyBinds;
+	m_stfPadBinds = settings->m_stfPadBinds;
+	for (int player = 0; player < 2; player++)
 	{
-		m_stfAssign[i] = settings->m_stfAssign[i];
+		m_stfPadIndex[player] = settings->m_stfPadIndex[player];
 	}
 
 	m_dontApplyPatches = settings->m_dontApplyPatches;
 	m_useD3DDebugLayer = settings->m_useD3DDebugLayer;
 	m_stfShowDebugFeatures = settings->m_stfShowDebugFeatures;
 	m_stfLooseRomFiles = settings->m_stfLooseRomFiles;
+	m_stfGameDebugFlag = settings->m_stfGameDebugFlag;
 
 	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session
-	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles)
+	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag)
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -561,70 +565,299 @@ void YAMPUserInterface::DrawControls()
 void YAMPUserInterface::DrawControlsStF()
 {
 	ImGui::PushTextWrapPos();
-	ImGui::TextUnformatted("Assign Punch/Kick/Guard combinations to each button, like the arcade cabinet's "
-		"test menu. Applies to both players when you press Apply - no restart needed.");
+	ImGui::TextUnformatted("Each player can play on the keyboard, an XInput controller, or both. "
+		"Use Program All Inputs to set everything up in one go, or click a single binding to change it "
+		"(right-click clears it). Applies when you press Apply - no restart needed.");
 	ImGui::PopTextWrapPos();
 	ImGui::NewLine();
 
-	// Indexed by m2ftg assign_t (1=None ... 8=K+G); assign_invalid(0) is never shown.
-	static constexpr const char* ASSIGN_LABELS[] = {
-		"", "None", "P", "K", "G", "P + G", "P + K + G", "P + K", "K + G"
-	};
-	// Combo rows in P/K/G-first order, mapped back to assign_t values
-	static constexpr uint32_t ASSIGN_ORDER[] = { 2, 3, 4, 5, 7, 8, 6, 1 }; // P, K, G, PG, PK, KG, PKG, None
-
-	// The module consumes assign[] in ITS slot order: A, B, Y, X, LT, LB, RT, RB (m_stfAssign uses
-	// that order too). Present the rows grouped by keyboard layout instead; keyboard keys are the
-	// fixed Yakuza 6 defaults from sl.cpp (_set_state_keyboard).
-	struct Row { const char* label; int slot; };
-	static constexpr Row ROWS[] = {
-		{ "K key / A button",  0 },
-		{ "L key / B button",  1 },
-		{ "J key / X button",  3 },
-		{ "Gamepad Y button",  2 },
-		{ "M key / LB button", 5 },
-		{ "U key / RB button", 7 },
-		{ "I key / LT button", 4 },
-		{ "O key / RT button", 6 },
-	};
-
-	ImGui::PushItemWidth(ImGui::CalcItemWidth() / 2.0f);
-	for (const Row& row : ROWS)
+	if (ImGui::BeginTabBar("##stfplayers"))
 	{
-		uint32_t& value = m_stfAssign[row.slot];
-		if (value >= std::size(ASSIGN_LABELS) || value == 0)
+		for (int player = 0; player < 2; player++)
 		{
-			value = 1; // None
-		}
-		if (ImGui::BeginCombo(row.label, ASSIGN_LABELS[value]))
-		{
-			for (uint32_t candidate : ASSIGN_ORDER)
+			char tab[16];
+			sprintf_s(tab, "Player %d", player + 1);
+			if (ImGui::BeginTabItem(tab))
 			{
-				const bool isSelected = candidate == value;
-				if (ImGui::Selectable(ASSIGN_LABELS[candidate], isSelected))
-				{
-					m_pageModified = true;
-					value = candidate;
-				}
-				if (isSelected)
-					ImGui::SetItemDefaultFocus();
+				DrawControlsStFPlayer(player);
+				ImGui::EndTabItem();
+			}
+		}
+		ImGui::EndTabBar();
+	}
+
+	ImGui::NewLine();
+	ImGui::TextDisabled("The left stick always steers, like the cabinet lever. Escape pauses; F1 opens this window.");
+	ImGui::TextDisabled("With Free Play off, Start doubles as a coin insert at the coin screen.");
+	ImGui::TextDisabled("In the game's own menus, Punch confirms, Kick cancels and Back resets/shows controls.");
+
+	DrawStfBindingCapture();
+}
+
+void YAMPUserInterface::DrawControlsStFPlayer(int player)
+{
+	// Keeps the connection indicators and capture edge detection fresh even before the
+	// game loop's own per-frame poll has run (polling twice per frame is harmless).
+	StFInput::PollPads();
+
+	auto controllerLabel = [](int padIndex, char (&buf)[64]) -> const char* {
+		if (padIndex < 0)
+		{
+			return "None (keyboard only)";
+		}
+		sprintf_s(buf, "Controller %d%s", padIndex + 1,
+			StFInput::GetPadState(padIndex).connected ? "" : " (not connected)");
+		return buf;
+	};
+
+	char label[64];
+	if (ImGui::BeginCombo("Controller", controllerLabel(m_stfPadIndex[player], label)))
+	{
+		for (int padIndex = -1; padIndex < 4; padIndex++)
+		{
+			const bool isSelected = padIndex == m_stfPadIndex[player];
+			if (ImGui::Selectable(controllerLabel(padIndex, label), isSelected))
+			{
+				m_pageModified = true;
+				m_stfPadIndex[player] = padIndex;
+			}
+			if (isSelected)
+				ImGui::SetItemDefaultFocus();
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::NewLine();
+
+	if (ImGui::Button("Program All Inputs..."))
+	{
+		StartStfCapture(player, true, 0, 0);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Restore Defaults"))
+	{
+		m_pageModified = true;
+		m_stfKeyBinds[player] = StFInput::DEFAULT_KEY_BINDS[player];
+		m_stfPadBinds[player] = StFInput::DEFAULT_PAD_BINDS[player];
+		m_stfPadIndex[player] = player;
+	}
+
+	if (ImGui::BeginTable("##bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV))
+	{
+		ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("Keyboard", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableHeadersRow();
+
+		for (uint32_t action = 0; action < StFInput::Action_Count; action++)
+		{
+			ImGui::PushID(static_cast<int>(action));
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(StFInput::ActionName(action));
+
+			ImGui::TableNextColumn();
+			const std::string keyLabel = StFInput::KeyName(m_stfKeyBinds[player][action]);
+			if (ImGui::Button((keyLabel + "##key").c_str(), ImVec2(-FLT_MIN, 0.0f)))
+			{
+				StartStfCapture(player, false, action, 1);
+			}
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfKeyBinds[player][action] != 0)
+			{
+				m_pageModified = true;
+				m_stfKeyBinds[player][action] = 0;
 			}
 
-			ImGui::EndCombo();
+			ImGui::TableNextColumn();
+			const char* padLabel = StFInput::PadButtonName(m_stfPadBinds[player][action]);
+			char padButtonLabel[64];
+			sprintf_s(padButtonLabel, "%s##pad", padLabel);
+			if (ImGui::Button(padButtonLabel, ImVec2(-FLT_MIN, 0.0f)))
+			{
+				StartStfCapture(player, false, action, 2);
+			}
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfPadBinds[player][action] != StFInput::Pad_None)
+			{
+				m_pageModified = true;
+				m_stfPadBinds[player][action] = StFInput::Pad_None;
+			}
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+}
+
+void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action, uint32_t deviceMask)
+{
+	m_stfCapturePlayer = player;
+	m_stfCaptureQueue.clear();
+	m_stfCaptureStep = 0;
+	if (wizard)
+	{
+		// The basics, prompted one by one: up, down, left, right, punch, kick, guard,
+		// start, coin. Combos and Back stay on their per-row buttons.
+		for (uint32_t a = 0; a < StFInput::WIZARD_ACTION_COUNT; a++)
+		{
+			m_stfCaptureQueue.push_back({ a, 3 });
+		}
+	}
+	else
+	{
+		m_stfCaptureQueue.push_back({ action, deviceMask });
+	}
+	m_stfCaptureOpenPopup = true;
+
+	// Prime the edge detectors with the current state so already-held inputs are ignored.
+	m_stfCapturePrevKeys = gGeneral.GetPressedKeys();
+	StFInput::PollPads();
+	for (int i = 0; i < 4; i++)
+	{
+		m_stfCapturePrevPadButtons[i] = StFInput::GetPadState(i).buttons;
+	}
+}
+
+void YAMPUserInterface::AssignStfKey(int player, uint32_t action, uint32_t vk)
+{
+	m_pageModified = true;
+	// The keyboard is shared hardware: a key can only mean one thing, so steal it from
+	// wherever else it is bound (either player, any action).
+	for (auto& binds : m_stfKeyBinds)
+	{
+		for (uint32_t& bind : binds)
+		{
+			if (bind == vk)
+			{
+				bind = 0;
+			}
+		}
+	}
+	m_stfKeyBinds[player][action] = vk;
+}
+
+void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex)
+{
+	m_pageModified = true;
+	// Answering with a controller also claims that controller for this player - the
+	// wizard's "press a button to join" moment, like Lost Judgment's pad picking.
+	m_stfPadIndex[player] = padIndex;
+	// Steal the button only from players reading the same physical controller; a player
+	// on a different pad legitimately keeps identical bindings.
+	for (int p = 0; p < 2; p++)
+	{
+		if (m_stfPadIndex[p] != padIndex)
+		{
+			continue;
+		}
+		for (uint32_t& bind : m_stfPadBinds[p])
+		{
+			if (bind == button)
+			{
+				bind = StFInput::Pad_None;
+			}
+		}
+	}
+	m_stfPadBinds[player][action] = button;
+}
+
+void YAMPUserInterface::DrawStfBindingCapture()
+{
+	if (m_stfCaptureQueue.empty())
+	{
+		return;
+	}
+
+	if (m_stfCaptureOpenPopup)
+	{
+		ImGui::OpenPopup("Assign Input");
+		m_stfCaptureOpenPopup = false;
+	}
+
+	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	// NoNav keeps captured presses (Enter, Space, arrows...) from also activating the
+	// popup's own Skip/Cancel buttons through keyboard navigation.
+	if (!ImGui::BeginPopupModal("Assign Input", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav))
+	{
+		// Closed from outside (e.g. the page changed) - abandon the remaining prompts.
+		m_stfCaptureQueue.clear();
+		return;
+	}
+
+	const StfCapturePrompt& prompt = m_stfCaptureQueue[m_stfCaptureStep];
+	const char* deviceText = prompt.deviceMask == 1 ? "a key"
+		: prompt.deviceMask == 2 ? "a controller button"
+		: "a key or controller button";
+	ImGui::Text("Player %d", m_stfCapturePlayer + 1);
+	ImGui::Text("Press %s for:", deviceText);
+	ImGui::SameLine();
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", StFInput::ActionName(prompt.action));
+	if (m_stfCaptureQueue.size() > 1)
+	{
+		ImGui::TextDisabled("%zu of %zu", m_stfCaptureStep + 1, m_stfCaptureQueue.size());
+	}
+
+	StFInput::PollPads();
+	const auto& keys = gGeneral.GetPressedKeys();
+
+	bool advanced = false;
+	if (prompt.deviceMask & 1)
+	{
+		// VKs below 8 are mouse buttons; Escape is the pause menu, F1 the settings toggle.
+		for (uint32_t vk = 8; vk < 256 && !advanced; vk++)
+		{
+			if (vk == VK_ESCAPE || vk == VK_F1)
+			{
+				continue;
+			}
+			if (keys[vk] && !m_stfCapturePrevKeys[vk])
+			{
+				AssignStfKey(m_stfCapturePlayer, prompt.action, vk);
+				advanced = true;
+			}
+		}
+	}
+	if (!advanced && (prompt.deviceMask & 2))
+	{
+		for (int padIndex = 0; padIndex < 4 && !advanced; padIndex++)
+		{
+			const uint32_t pressed = StFInput::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
+			for (uint32_t button = 1; button < StFInput::Pad_Count && !advanced; button++)
+			{
+				if (pressed & (1u << button))
+				{
+					AssignStfPadButton(m_stfCapturePlayer, prompt.action, button, padIndex);
+					advanced = true;
+				}
+			}
 		}
 	}
 
 	ImGui::NewLine();
-	ImGui::LabelText("Movement", "Arrow Keys / WSAD / Left Stick / D-Pad");
-	ImGui::LabelText("Start / Insert Coin", "F / Start");
-	ImGui::LabelText("Back", "Tab / Back");
-	ImGui::NewLine();
-	ImGui::LabelText("Pause Menu", "Escape");
-	ImGui::LabelText("Open YAMP Settings", "F1");
-	ImGui::PopItemWidth();
+	if (ImGui::Button("Skip") && !advanced)
+	{
+		advanced = true; // keep the current binding, move on
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Cancel"))
+	{
+		m_stfCaptureQueue.clear();
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
 
-	ImGui::NewLine();
-	ImGui::TextDisabled("Keyboard controls Player 1 only; XInput gamepads 1 and 2 control Players 1 and 2.");
+	if (advanced && ++m_stfCaptureStep >= m_stfCaptureQueue.size())
+	{
+		m_stfCaptureQueue.clear();
+		ImGui::CloseCurrentPopup();
+	}
+
+	// Refresh the edge detectors for the next frame/prompt.
+	m_stfCapturePrevKeys = keys;
+	for (int i = 0; i < 4; i++)
+	{
+		m_stfCapturePrevPadButtons[i] = StFInput::GetPadState(i).buttons;
+	}
+	ImGui::EndPopup();
 }
 
 void YAMPUserInterface::DrawDebug()
@@ -702,6 +935,16 @@ void YAMPUserInterface::DrawDebug()
 			ImGui::SetTooltip("Bypasses rom/stf_rom.par and reads the ROM images directly from a rom/stf_rom directory.\n"
 				"All five files extracted from the archive (rom_code1.bin, rom_data.bin, rom_ep.bin, rom_pol.bin,\n"
 				"rom_tex.bin) must be present, otherwise the archive is used as usual. Requires a restart.");
+		}
+
+		if (ImGui::Checkbox("Set the game's debug flag", &m_stfGameDebugFlag))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Flips the game's own debug flag in emulated RAM (the dword at 0x508000, XORed with 0x24).\n"
+				"Re-applied automatically if the game rewrites that memory. Takes effect immediately after Apply.");
 		}
 	}
 }
@@ -904,15 +1147,20 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_stfCountry = m_stfCountry;
 	settings->m_stfFreeplay = m_stfFreeplay;
 	settings->m_stfVersusMode = m_stfVersusMode;
-	for (int i = 0; i < 8; i++)
+	// Bindings are re-read by the game loop every frame, so they apply live.
+	settings->m_stfKeyBinds = m_stfKeyBinds;
+	settings->m_stfPadBinds = m_stfPadBinds;
+	for (int player = 0; player < 2; player++)
 	{
-		settings->m_stfAssign[i] = m_stfAssign[i];
+		settings->m_stfPadIndex[player] = m_stfPadIndex[player];
 	}
 
 	settings->m_dontApplyPatches = m_dontApplyPatches;
 	settings->m_useD3DDebugLayer = m_useD3DDebugLayer;
 	// The debug-window overlay is read every frame, so it applies live (no restart warning).
 	settings->m_stfShowDebugFeatures = m_stfShowDebugFeatures;
+	// Enforced every frame while the board is booted, so it also applies live.
+	settings->m_stfGameDebugFlag = m_stfGameDebugFlag;
 	// Consumed once when module_start mounts the ROM archive, hence the restart warning above.
 	settings->m_stfLooseRomFiles = m_stfLooseRomFiles;
 

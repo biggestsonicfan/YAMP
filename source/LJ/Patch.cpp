@@ -579,6 +579,72 @@ namespace LJ
 #endif
 		}
 
+		// ---- RAM-executable i960 instruction fetch --------------------------
+		// The ROM's dw debug menu (enabled via the RAM 0x508000 debug flag) dispatches menu
+		// items by copying an i960 instruction pair into a trampoline at RAM 0x59F270 and
+		// `callx`-ing into it — legal on hardware, but the retail DLL's CPU core fetches
+		// instructions linearly from the program-ROM host buffer only (ctx->codeBase + IP),
+		// so a RAM IP reads past the 1MB ROM image and crashes the host. This reimplements
+		// the DLL's fetch/decode dispatcher byte-for-byte in behaviour, with one change:
+		// the host base is chosen per region, exactly like the DLL's own data accessors.
+		namespace RamExecFetch
+		{
+			// DLL globals by fixed RVA (same layout StfDebugWindows relies on): the i960
+			// context pointer, the 0x1000-entry opcode dispatch table the original indexes,
+			// and the work-RAM host base (the emulated address is added directly to it).
+			constexpr uintptr_t RVA_CPU_CTX_PTR = 0x58A960;
+			constexpr uintptr_t RVA_OPCODE_TABLE = 0x168630;
+			constexpr uintptr_t RVA_RAM_BASE_PTR = 0x8F7CC8;
+			// Work-RAM window the trampoline lives in (memory-map region 5).
+			constexpr uint32_t RAM_START = 0x500000;
+			constexpr uint32_t RAM_SIZE = 0x100000;
+
+			static uint8_t* dllBase = nullptr;
+
+			static void FetchExec()
+			{
+				uint8_t* const ctx = *reinterpret_cast<uint8_t* const*>(dllBase + RVA_CPU_CTX_PTR);
+				const uint32_t ip = *reinterpret_cast<const uint32_t*>(ctx + 8);
+				const uint8_t* instr;
+				if (ip - RAM_START < RAM_SIZE)
+				{
+					instr = *reinterpret_cast<uint8_t* const*>(dllBase + RVA_RAM_BASE_PTR) + ip;
+				}
+				else
+				{
+					instr = *reinterpret_cast<uint8_t* const*>(ctx) + ip;
+				}
+
+				// Dispatch-table index, exactly as the original computes it: REG formats
+				// (opcode 0x5x-0x7x) pack the sub-opcode from bits 7-10; the 0x8x-0xCx MEM
+				// group packs bits 10-13, with bit 12 selecting the wider mask.
+				const uint32_t word = *reinterpret_cast<const uint32_t*>(instr);
+				const uint32_t opcode = instr[3];
+				uint32_t index = opcode << 4;
+				const uint32_t group = opcode >> 4;
+				if (group >= 5 && group <= 7)
+				{
+					index |= (word >> 7) & 0xF;
+				}
+				else if (group >= 8 && group <= 0xC)
+				{
+					index |= (((word >> 12) & 1) != 0 ? 0xFu : 0x8u) & (word >> 10);
+				}
+
+				const auto handler = *reinterpret_cast<int32_t(* const*)(const void*)>(
+					dllBase + RVA_OPCODE_TABLE + static_cast<size_t>(index) * 8);
+				*reinterpret_cast<int32_t*>(ctx + 8) += handler(instr);
+			}
+		}
+
+		void InstallRamExecFetch(void* dll, const Imports& symbols)
+		{
+			RamExecFetch::dllBase = static_cast<uint8_t*>(dll);
+			Trampoline* t = Trampoline::MakeTrampoline(dll);
+			Memory::InjectHook(symbols.GetSymbol(ImportSymbol::I960_FETCH_EXEC),
+				t->Jump(&RamExecFetch::FetchExec), Memory::HookType::Jump);
+		}
+
 		static void assign_helper_enable_shared_from_this(...)
 		{
 		}

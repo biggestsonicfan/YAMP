@@ -74,6 +74,7 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_useD3DDebugLayer = GetPrivateProfileIntW(SECTION_NAME, L"UseDebugD3D", 0, iniPath.c_str()) != 0;
 		m_stfShowDebugFeatures = GetPrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", 0, iniPath.c_str()) != 0;
 		m_stfLooseRomFiles = GetPrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", 0, iniPath.c_str()) != 0;
+		m_stfGameDebugFlag = GetPrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", 0, iniPath.c_str()) != 0;
 	}
 
 	{
@@ -91,11 +92,23 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_stfCountry = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
 		m_stfFreeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str()) != 0;
 		m_stfVersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str()) != 0;
-		for (int i = 0; i < 8; i++)
+		for (int player = 0; player < 2; player++)
 		{
-			wchar_t key[16];
-			swprintf_s(key, L"Assign%d", i);
-			m_stfAssign[i] = GetPrivateProfileIntW(SECTION_NAME, key, m_stfAssign[i], iniPath.c_str());
+			wchar_t key[48];
+			swprintf_s(key, L"P%dController", player + 1);
+			int padIndex = static_cast<int>(GetPrivateProfileIntW(SECTION_NAME, key, m_stfPadIndex[player], iniPath.c_str()));
+			m_stfPadIndex[player] = (padIndex >= -1 && padIndex < 4) ? padIndex : -1;
+
+			for (uint32_t action = 0; action < StFInput::Action_Count; action++)
+			{
+				swprintf_s(key, L"P%dKey%hs", player + 1, StFInput::ActionIniName(action));
+				uint32_t vk = GetPrivateProfileIntW(SECTION_NAME, key, m_stfKeyBinds[player][action], iniPath.c_str());
+				m_stfKeyBinds[player][action] = vk < 256 ? vk : 0;
+
+				swprintf_s(key, L"P%dPad%hs", player + 1, StFInput::ActionIniName(action));
+				uint32_t button = GetPrivateProfileIntW(SECTION_NAME, key, m_stfPadBinds[player][action], iniPath.c_str());
+				m_stfPadBinds[player][action] = button < StFInput::Pad_Count ? button : StFInput::Pad_None;
+			}
 		}
 	}
 }
@@ -127,6 +140,7 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"UseDebugD3D", m_useD3DDebugLayer, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", m_stfShowDebugFeatures, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", m_stfLooseRomFiles, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", m_stfGameDebugFlag, iniPath.c_str());
 	}
 
 	{
@@ -144,11 +158,20 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str());
-		for (int i = 0; i < 8; i++)
+		for (int player = 0; player < 2; player++)
 		{
-			wchar_t key[16];
-			swprintf_s(key, L"Assign%d", i);
-			WritePrivateProfileIntW(SECTION_NAME, key, m_stfAssign[i], iniPath.c_str());
+			wchar_t key[48];
+			swprintf_s(key, L"P%dController", player + 1);
+			WritePrivateProfileIntW(SECTION_NAME, key, m_stfPadIndex[player], iniPath.c_str());
+
+			for (uint32_t action = 0; action < StFInput::Action_Count; action++)
+			{
+				swprintf_s(key, L"P%dKey%hs", player + 1, StFInput::ActionIniName(action));
+				WritePrivateProfileIntW(SECTION_NAME, key, m_stfKeyBinds[player][action], iniPath.c_str());
+
+				swprintf_s(key, L"P%dPad%hs", player + 1, StFInput::ActionIniName(action));
+				WritePrivateProfileIntW(SECTION_NAME, key, m_stfPadBinds[player][action], iniPath.c_str());
+			}
 		}
 	}
 }

@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 #include <unordered_map>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 
@@ -70,23 +71,34 @@ namespace
 	constexpr uintptr_t CTX_FRAME_PTR = 0x58;         // uint32: frame pointer (break-state only)
 	constexpr uintptr_t CTX_LIVE_FRAME_PTR = 0x5C;    // uint32: frame pointer of the running CPU
 	// Emulated memory map: 64 records x 0x70, each holding {read,write} pairs by access size.
-	// Slot +0x20 is the 32-bit read: void read(void* out, uint32_t addr). Unmapped regions
+	// Slot +0x20 is the 32-bit read: void read(void* out, uint32_t addr); slot +0x28 is its
+	// paired 32-bit write: void write(uint32_t addr, const void* src). Unmapped regions
 	// point at a bare `ret` stub, so an out-of-range address is inert rather than fatal.
 	constexpr uintptr_t RVA_MEMMAP_TBL = 0x172660;
 	constexpr size_t MEMMAP_RECORD_SIZE = 0x70;
 	constexpr size_t MEMMAP_READ32 = 0x20;
+	constexpr size_t MEMMAP_WRITE32 = 0x28;
 	constexpr size_t MEMMAP_RECORD_COUNT = 64;
-	// ROM symbol table: {const char* name; uint64_t addr}, sorted ascending by addr. The final
-	// entry has addr 0 (not part of the sorted run), so only the first 799 are searchable.
-	constexpr uintptr_t RVA_SYMBOL_TBL = 0x1742D8;
-	constexpr size_t SYMBOL_COUNT = 799;
+	// The game's own debug flag lives in emulated RAM: XORing this dword with the mask
+	// flips it. Surfaced as the "Set the game's debug flag" debug setting.
+	constexpr uint32_t DEBUG_FLAG_ADDRESS = 0x508000;
+	constexpr uint32_t DEBUG_FLAG_XOR = 0x24;
+	// ROM symbol table: 800 records of {uint64_t addr; const char* name}, sorted ascending by
+	// addr, starting at 0x1742D0. Earlier passes misread it as {name, addr} records starting
+	// 8 bytes later at 0x1742D8, which pairs every name with the NEXT function's address and
+	// then needs bogus "corrections". Ground truth for the record phase: the first record is
+	// {0xB0, "start_ip"}, and 0xB0 is exactly the start IP stored in the ROM's i960 initial
+	// memory image (boot word 3 of rom_code1.bin), while the misread pairing gives start_ip
+	// 0x5A8, which matches nothing.
+	constexpr uintptr_t RVA_SYMBOL_TBL = 0x1742D0;
+	constexpr size_t SYMBOL_COUNT = 800;
 	// The DLL's own walk masks the frame pointer to the i960's 64-byte frame alignment.
 	constexpr uint32_t I960_FRAME_ALIGN_MASK = 0xFFFFFFC0;
 
 	struct I960Symbol
 	{
-		const char* name;
 		uint64_t address;
+		const char* name;
 	};
 	static_assert(sizeof(I960Symbol) == 16, "symbol record is 16 bytes in the DLL");
 
@@ -149,6 +161,32 @@ namespace
 		__try
 		{
 			reinterpret_cast<void(*)(void*, uint32_t)>(reader)(&out, address);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// Writes 32 bits of emulated i960 memory through the same memory-map dispatch, using the
+	// read accessor's pair slot in the region record.
+	static bool WriteEmulated32(uint8_t* base, uint32_t address, uint32_t value) noexcept
+	{
+		const uint32_t index = address < 0x3000000 ? (address >> 20) : ((address >> 28) + 0x30);
+		if (index >= MEMMAP_RECORD_COUNT)
+		{
+			return false;
+		}
+		void* writer = *reinterpret_cast<void**>(
+			base + RVA_MEMMAP_TBL + index * MEMMAP_RECORD_SIZE + MEMMAP_WRITE32);
+		if (writer == nullptr)
+		{
+			return false;
+		}
+		__try
+		{
+			reinterpret_cast<void(*)(uint32_t, const void*)>(writer)(address, &value);
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
@@ -517,5 +555,61 @@ void LJ::StF::DrawDebugWindows()
 			}
 		}
 		ImGui::End();
+	}
+}
+
+void LJ::StF::UpdateGameDebugFlag()
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return;
+	}
+	const YAMPSettings* settings = gGeneral.GetSettings();
+	const bool enable = settings != nullptr && settings->m_stfGameDebugFlag;
+
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return;
+	}
+
+	// The flag's off-state bits are captured from RAM the first booted frame, before any
+	// write of ours; "set" then means those bits differ from that baseline. This keeps the
+	// XOR toggle idempotent without hardcoding what the ROM initializes the dword to.
+	static bool baselineKnown = false;
+	static uint32_t baselineBits = 0;
+	static bool applied = false;
+	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	{
+		baselineKnown = false;
+		applied = false;
+		return;
+	}
+
+	uint32_t value = 0;
+	if (!ReadEmulated32(base, DEBUG_FLAG_ADDRESS, value))
+	{
+		return;
+	}
+	if (!baselineKnown)
+	{
+		baselineKnown = true;
+		baselineBits = value & DEBUG_FLAG_XOR;
+	}
+
+	// Enforce every frame rather than toggling once: the ROM's own code initializes this
+	// RAM after boot and could rewrite it later, which would silently undo a one-shot XOR.
+	const bool flagSet = (value & DEBUG_FLAG_XOR) != baselineBits;
+	if (enable && !flagSet)
+	{
+		applied = WriteEmulated32(base, DEBUG_FLAG_ADDRESS, value ^ DEBUG_FLAG_XOR);
+	}
+	else if (!enable && flagSet && applied)
+	{
+		// Only undo a state this code set itself; leave the game's own writes alone.
+		if (WriteEmulated32(base, DEBUG_FLAG_ADDRESS, value ^ DEBUG_FLAG_XOR))
+		{
+			applied = false;
+		}
 	}
 }

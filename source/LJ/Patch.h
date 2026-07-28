@@ -17,6 +17,9 @@ namespace LJ
 		void ResetCbvSrvRingCursors(gs::context_t* context);
 		void ReinstateLogging(void* dll, const Imports& symbols);
 		void InjectTraps(const Imports& symbols);
+		// Replaces the DLL's i960 instruction fetch with a region-aware version so code in
+		// emulated work RAM (the ROM debug menu's trampoline at 0x59F270) can execute.
+		void InstallRamExecFetch(void* dll, const Imports& symbols);
 
 		void Patch_SysUtil(void* dll, const Imports& symbols);
 		void Patch_CsGame(void* dll, const Imports& symbols);
