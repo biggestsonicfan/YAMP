@@ -50,12 +50,16 @@ public:
 	IDXGISwapChain* GetSwapChain() const { return m_swapChain.get(); }
 
 	void BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend = false);
+	// Clear + bind the backbuffer without blitting a game frame — for frames that only draw
+	// ImGui (the game launcher). Call between BeginFrame and RenderImGui.
+	void ClearBackbuffer();
 	// Composite a DX12-native texture (StF's output RT) via 11on12 wrap -> D3D11 SRV -> BlitGameFrame.
 	void BlitDX12Texture(ID3D12Resource* tex);
 
-	// The GAME's native aspect ratio (default 16:9 for VF5FS/VF2). StF is a Model 2 arcade title:
-	// 496x384 internal upscaled to a 1024x768 display texture = 4:3, so it must be pillarboxed in
-	// a widescreen window instead of stretched. Recomputes the blit viewport immediately.
+	// The GAME's native aspect ratio (default 16:9 for VF5FS). The Model 2 arcade titles
+	// (StF/FV/VF2: 496x384 internal upscaled to a 1024x768 display texture = 4:3) must be
+	// pillarboxed in a widescreen window instead of stretched — their hosts apply the shared
+	// aspect setting via m2ftg::ApplyAspectSetting. Recomputes the blit viewport immediately.
 	void SetGameAspectRatio(float ar) { m_gameAspect = ar; CalculateViewport(); }
 	// When set, the game blit covers the whole window regardless of aspect ratio ("Fill Window").
 	void SetGameStretchToFill(bool fill) { m_fillViewport = fill; CalculateViewport(); }

@@ -2,7 +2,8 @@
 
 #include <filesystem>
 
-#include "StFInput.h"
+#include "m2ftg/M2Input.h"
+#include "m2ftg/LJ/HleHooks.h"
 
 class YAMPSettings
 {
@@ -38,13 +39,18 @@ public:
 	// is_vs_mode: LJ's 2P-quick-match boot (auto-credits both players, random stage).
 	// Off = authentic arcade boot (attract mode, single-player ladder).
 	bool m_stfVersusMode = false;
-	// Per-player input bindings (see StFInput.h): a keyboard key and/or an XInput button
+	// Per-player input bindings (see M2Input.h): a keyboard key and/or an XInput button
 	// per action, plus which XInput controller each player reads (-1 = keyboard only).
 	// The game loop re-reads these every frame, so they apply live. The module-facing
-	// execute_info.assign table is fixed (StFInput::MODULE_ASSIGN) - remapping is host-side.
-	StFInput::KeyBinds m_stfKeyBinds = StFInput::DEFAULT_KEY_BINDS;
-	StFInput::PadBinds m_stfPadBinds = StFInput::DEFAULT_PAD_BINDS;
+	// execute_info.assign table is fixed (M2Input::MODULE_ASSIGN) - remapping is host-side.
+	M2Input::KeyBinds m_stfKeyBinds = M2Input::DEFAULT_KEY_BINDS;
+	M2Input::PadBinds m_stfPadBinds = M2Input::DEFAULT_PAD_BINDS;
 	int32_t m_stfPadIndex[2] = { 0, 1 };
+
+	// Virtua Fighter 2 (YLAD m2ftg module) — the module's own VF2-only config switches
+	// (m2ftg_config_t is_vf20 / is_disable_pepsi), read once at module_start (restart to change).
+	bool m_vf2Version20 = false;
+	bool m_vf2DisablePepsi = false;
 
 	// Debug settings
 	bool m_dontApplyPatches = false;
@@ -59,6 +65,17 @@ public:
 	// Sets the game's own debug flag in emulated RAM (the dword at 0x508000, flipped by
 	// XOR with 0x24), enforced every frame while the board is booted. Applied live.
 	bool m_stfGameDebugFlag = false;
+	// Which of the module's 76 HLE ROM hooks to keep disabled (bit i = hook i, in the DLL's
+	// own table order - see m2ftg::HleHooks). A disabled hook has its original i960
+	// instruction restored in the ROM image, so the ROM's own code runs there instead, which
+	// is what makes a patched rom_code1.bin take effect. Enforced every frame; applied live.
+	uint64_t m_stfHleDisableMask[2] = { 0, 0 };
+	// Where each HLE hook should be installed, for program ROMs that are not Sonic the
+	// Fighters. Kept as the raw ini text because an entry may name an ELF symbol, which
+	// cannot be resolved until game.elf has been loaded - see HleHooks::ResolveRetarget for
+	// the accepted forms. Read from the ini's [HleRetarget] section and applied once, before
+	// module_start; never written back, so a hand-authored section survives Apply.
+	std::string m_stfHleRetarget[m2ftg::HleHooks::COUNT];
 
 	// Misc
 	uint32_t m_buildLastShowedDisclaimer = 0;

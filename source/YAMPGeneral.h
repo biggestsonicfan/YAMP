@@ -44,12 +44,15 @@ class YAMPGeneral
 {
 public:
 	// Which arcade module this process is hosting; drives the per-game UI panels.
+	// Launcher = no game selected yet (the no-argument game-select menu).
 	enum class GameId
 	{
 		VF5FS,
 		StF,
 		VF2,
 		FV,
+		MR,
+		Launcher,
 	};
 
 	const auto& GetDataPath() const { return m_userDataPath; }
@@ -58,19 +61,25 @@ public:
 	const auto& GetDLLName() const { return m_dllName; }
 	const auto GetDLLTimestamp() const { return m_dllTimestamp; }
 
-	template<typename... Args>
-	void SetDataPath(Args&&... args)
-	{
-		// TODO: Allow for portable mode
-		m_userDataPath = GetLocalAppDataPath();
-		(m_userDataPath.append(args), ...);
-	}
+	// Portable mode: user data (settings.ini + save files) lives next to YAMP.exe, shared by
+	// every game. The ini is per-game sectioned ([StF]/[VF2]/[VF5FS]) and the save files carry
+	// the game tag, so one folder holds them all. Resolved from the module path, NOT the CWD —
+	// games booted from the launcher run with their game folder as CWD.
+	void SetDataPath();
 	
 	void SetDLLName(std::string name) { m_dllName = std::move(name); }
 	void SetDLLTimestamp(uint32_t timestamp) { m_dllTimestamp = timestamp; }
 
 	GameId GetGameId() const { return m_gameId; }
 	void SetGameId(GameId id) { m_gameId = id; }
+
+	// Display names for the hosted arcade game and the parent game it was extracted from,
+	// driven by the GameId set in wWinMain before the window/UI ever read them.
+	const char* GetArcadeGameName() const;
+	const char* GetParentGameName() const;
+	// Short per-game abbreviation for log prefixes ("StF", "FV", "VF2", "VF5FS"), so logs from
+	// code paths shared between games (LJ m2ftg host, HostCdevice) name the game actually running.
+	const char* GetGameTag() const;
 
 	void SetKeyPressed(uint32_t key, bool pressed)
 	{
@@ -91,8 +100,6 @@ public:
 	}
 
 private:
-	std::filesystem::path GetLocalAppDataPath() const;
-
 	std::string m_dllName;
 	uint32_t m_dllTimestamp = 0;
 	GameId m_gameId = GameId::VF5FS;

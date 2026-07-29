@@ -13,6 +13,7 @@
 #include "AdxDecoder.h"
 #include "HcaDecoder.h"
 #include "icri.h"
+#include "../DebugLog.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -44,18 +45,6 @@ namespace cri::atom
 {
 	namespace
 	{
-		void Log(const char* fmt, ...)
-		{
-			char buf[512];
-			va_list args;
-			va_start(args, fmt);
-			std::vsnprintf(buf, sizeof(buf), fmt, args);
-			va_end(args);
-			char line[560];
-			std::snprintf(line, sizeof(line), "[cri] %s\n", buf);
-			OutputDebugStringA(line);
-		}
-
 		uint16_t Be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
 		uint32_t Be32(const uint8_t* p)
 		{
@@ -372,18 +361,18 @@ namespace cri::atom
 				initTried = true;
 				if (FAILED(XAudio2Create(&xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR)))
 				{
-					Log("XAudio2Create FAILED - audio disabled");
+					DebugLog("[cri] XAudio2Create FAILED - audio disabled\n");
 					xaudio = nullptr;
 					return false;
 				}
 				if (FAILED(xaudio->CreateMasteringVoice(&master)))
 				{
-					Log("CreateMasteringVoice FAILED - audio disabled");
+					DebugLog("[cri] CreateMasteringVoice FAILED - audio disabled\n");
 					xaudio->Release();
 					xaudio = nullptr;
 					return false;
 				}
-				Log("XAudio2 initialized");
+				DebugLog("[cri] XAudio2 initialized\n");
 				return true;
 			}
 		};
@@ -600,7 +589,7 @@ namespace cri::atom
 				if (!ResolveRef(t, refType, refIndex, waveIndex))
 				{
 					if (++unresolved <= 8)
-						Log("cue '%s': unresolved (ReferenceType %u)", name, refType);
+						DebugLog("[cri] cue '%s': unresolved (ReferenceType %u)\n", name, refType);
 					continue;
 				}
 
@@ -622,14 +611,14 @@ namespace cri::atom
 				acb.cues.emplace(name, w);
 			}
 			if (unresolved)
-				Log("%u cues unresolved", unresolved);
+				DebugLog("[cri] %u cues unresolved\n", unresolved);
 
 			// External .awb only matters when some cue streams.
 			if (streamedCues > 0)
 			{
 				acb.extAwbPath = FindExternalAwb(acb.data);
 				if (acb.extAwbPath.empty())
-					Log("WARNING: %u streamed cues but no matching external .awb found", streamedCues);
+					DebugLog("[cri] WARNING: %u streamed cues but no matching external .awb found\n", streamedCues);
 				else
 				{
 					std::ifstream f(acb.extAwbPath, std::ios::binary | std::ios::ate);
@@ -639,7 +628,7 @@ namespace cri::atom
 					f.read(reinterpret_cast<char*>(head.data()), head.size());
 					if (!acb.extToc.Parse(head.data(), head.size()))
 					{
-						Log("WARNING: external awb TOC parse failed: %ls", acb.extAwbPath.c_str());
+						DebugLog("[cri] WARNING: external awb TOC parse failed: %ls\n", acb.extAwbPath.c_str());
 						acb.extAwbPath.clear();
 					}
 				}
@@ -853,7 +842,7 @@ namespace cri::atom
 						index.emplace(std::move(key), it->path());
 					}
 				}
-				Log("stream-file index built: %zu files", index.size());
+				DebugLog("[cri] stream-file index built: %zu files\n", index.size());
 			}
 			std::wstring key = asGiven.filename().wstring();
 			for (auto& c : key)
@@ -934,7 +923,7 @@ namespace cri::atom
 				fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 				if (FAILED(e.xaudio->CreateSourceVoice(&p.voice, &fmt)))
 				{
-					Log("CreateSourceVoice FAILED (ch=%u rate=%u)", channels, rate);
+					DebugLog("[cri] CreateSourceVoice FAILED (ch=%u rate=%u)\n", channels, rate);
 					p.voice = nullptr;
 					return false;
 				}
@@ -986,7 +975,7 @@ namespace cri::atom
 			}
 			if (FAILED(p.voice->SubmitSourceBuffer(&buf)))
 			{
-				Log("SubmitSourceBuffer FAILED (%s)", label);
+				DebugLog("[cri] SubmitSourceBuffer FAILED (%s)\n", label);
 				p.status = 4;
 				return;
 			}
@@ -996,7 +985,7 @@ namespace cri::atom
 			if (!p.paused)
 				p.voice->Start(0);
 			p.status = 2;
-			Log("Start: %s (ch=%u rate=%u, %zu samples%s)", label,
+			DebugLog("[cri] Start: %s (ch=%u rate=%u, %zu samples%s)\n", label,
 				wave->channels, wave->rate, wave->pcm.size() / wave->channels,
 				loop ? ", looped" : "");
 		}
@@ -1031,7 +1020,7 @@ namespace cri::atom
 				Player& p = *job.player;
 				if (!ok)
 				{
-					Log("async decode FAILED (%s)", job.label.c_str());
+					DebugLog("[cri] async decode FAILED (%s)\n", job.label.c_str());
 					if (p.voice)
 						p.voice->Stop(0);
 					p.pendingTail = false;
@@ -1063,7 +1052,7 @@ namespace cri::atom
 					}
 					if (FAILED(p.voice->SubmitSourceBuffer(&buf)))
 					{
-						Log("tail SubmitSourceBuffer FAILED (%s)", job.label.c_str());
+						DebugLog("[cri] tail SubmitSourceBuffer FAILED (%s)\n", job.label.c_str());
 						p.status = 4;
 					}
 					else
@@ -1071,7 +1060,7 @@ namespace cri::atom
 						p.wave = wave; // keep waveChunk alive too until the head finishes playing
 						p.looping = buf.LoopCount != 0;
 						p.pendingTail = false;
-						Log("Start tail: %s (+%u samples%s)", job.label.c_str(),
+						DebugLog("[cri] Start tail: %s (+%u samples%s)\n", job.label.c_str(),
 							total - job.chunkSamples, p.looping ? ", looped" : "");
 					}
 					continue;
@@ -1144,13 +1133,13 @@ namespace cri::atom
 			static_cast<const uint8_t*>(data) + size);
 		if (!ParseAcb(*acb))
 		{
-			Log("LoadAcbData: parse FAILED (%d bytes)", size);
+			DebugLog("[cri] LoadAcbData: parse FAILED (%d bytes)\n", size);
 			return nullptr;
 		}
 		std::lock_guard<std::recursive_mutex> g(E().lock);
 		acb->serial = E().nextAcbSerial++;
 		E().registry.push_back(acb.get());
-		Log("LoadAcbData: %d bytes, %zu cues, memAwb=%zu entries, extAwb=%zu entries (%ls)",
+		DebugLog("[cri] LoadAcbData: %d bytes, %zu cues, memAwb=%zu entries, extAwb=%zu entries (%ls)\n",
 			size, acb->cues.size(), acb->memToc.ids.size(), acb->extToc.ids.size(),
 			acb->extAwbPath.empty() ? L"none" : acb->extAwbPath.filename().c_str());
 		return reinterpret_cast<CriAtomExAcbTag*>(acb.release());
@@ -1232,7 +1221,7 @@ namespace cri::atom
 		p->source = Player::Source::File;
 		p->filePath = path ? path : "";
 		p->dataBlob.clear();
-		Log("SetFile: '%s'", p->filePath.c_str());
+		DebugLog("[cri] SetFile: '%s'\n", p->filePath.c_str());
 	}
 
 	void PlayerSetData(CriAtomExPlayerTag* handle, const void* data, int size)
@@ -1284,7 +1273,7 @@ namespace cri::atom
 			linearVolume = 4.0f;
 		// TEMP diagnostics: log volume changes (not the steady per-frame repeats).
 		if (linearVolume != p->volume)
-			Log("SetVolume: player %p %.4f -> %.4f", (void*)p, p->volume, linearVolume);
+			DebugLog("[cri] SetVolume: player %p %.4f -> %.4f\n", (void*)p, p->volume, linearVolume);
 		p->volume = linearVolume;
 		if (p->voice)
 			p->voice->SetVolume(linearVolume);
@@ -1314,7 +1303,7 @@ namespace cri::atom
 			Acb* acb = FindCueAcb(p->acb, p->cueName.c_str(), ref);
 			if (!acb)
 			{
-				Log("Start: cue '%s' not found in any loaded ACB", p->cueName.c_str());
+				DebugLog("[cri] Start: cue '%s' not found in any loaded ACB\n", p->cueName.c_str());
 				p->status = 4;
 				return 0;
 			}
@@ -1325,7 +1314,7 @@ namespace cri::atom
 			label = "cue '" + p->cueName + "'";
 			if (!CacheGet(e, cacheKey) && !FetchHcaBytes(*acb, *ref, bytes))
 			{
-				Log("Start: cue '%s' (id %u, enc %u, %s) fetch FAILED", p->cueName.c_str(),
+				DebugLog("[cri] Start: cue '%s' (id %u, enc %u, %s) fetch FAILED\n", p->cueName.c_str(),
 					ref->id, ref->encodeType, ref->streaming ? "stream" : "memory");
 				p->status = 4;
 				return 0;
@@ -1352,7 +1341,7 @@ namespace cri::atom
 			}
 			if (cacheKey.empty() || (!CacheGet(e, cacheKey) && bytes.empty()))
 			{
-				Log("Start: file '%s' -> '%ls' load FAILED", p->filePath.c_str(),
+				DebugLog("[cri] Start: file '%s' -> '%ls' load FAILED\n", p->filePath.c_str(),
 					path.empty() ? L"(unresolved)" : path.c_str());
 				p->status = 4;
 				return 0;
@@ -1388,7 +1377,7 @@ namespace cri::atom
 			auto wave = std::make_shared<DecodedWave>();
 			if (!DecodeAuto(bytes, *wave))
 			{
-				Log("Start: %s decode FAILED", label.c_str());
+				DebugLog("[cri] Start: %s decode FAILED\n", label.c_str());
 				p->status = 4;
 				return 0;
 			}
@@ -1435,7 +1424,7 @@ namespace cri::atom
 						if (!p->paused)
 							p->voice->Start(0);
 						p->status = 2;
-						Log("Start: %s (chunked head %u samples, ch=%u rate=%u)",
+						DebugLog("[cri] Start: %s (chunked head %u samples, ch=%u rate=%u)\n",
 							job.label.c_str(), chunkSamples, chunk->channels, chunk->rate);
 						job.chunkSamples = chunkSamples;
 						job.bytes = std::move(bytes);
@@ -1481,7 +1470,7 @@ namespace cri::atom
 		Player* p = reinterpret_cast<Player*>(handle);
 		std::lock_guard<std::recursive_mutex> g(E().lock);
 		if (p->paused != (pause != 0))
-			Log("Pause: player %p -> %d", (void*)p, pause); // TEMP diagnostics
+			DebugLog("[cri] Pause: player %p -> %d\n", (void*)p, pause); // TEMP diagnostics
 		if (p->voice && p->status == 2)
 		{
 			if (pause)

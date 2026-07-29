@@ -6,7 +6,7 @@
 #include <string>
 #include <tuple>
 
-#include "StFInput.h"
+#include "m2ftg/M2Input.h"
 
 class YAMPUserInterface
 {
@@ -32,6 +32,8 @@ private:
 	void AssignStfKey(int player, uint32_t action, uint32_t vk);
 	void AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex);
 	void DrawDebug();
+	// StF only: per-hook control over the module's 76 HLE ROM patches (see m2ftg::HleHooks).
+	void DrawStfHleHooks();
 	void DrawAbout();
 	bool DrawSettingsConfirmation();
 
@@ -78,9 +80,13 @@ private:
 	uint32_t m_stfCountry = 0;
 	bool m_stfFreeplay = true;
 	bool m_stfVersusMode = false;
-	StFInput::KeyBinds m_stfKeyBinds = StFInput::DEFAULT_KEY_BINDS;
-	StFInput::PadBinds m_stfPadBinds = StFInput::DEFAULT_PAD_BINDS;
+	M2Input::KeyBinds m_stfKeyBinds = M2Input::DEFAULT_KEY_BINDS;
+	M2Input::PadBinds m_stfPadBinds = M2Input::DEFAULT_PAD_BINDS;
 	int32_t m_stfPadIndex[2] = { 0, 1 };
+
+	// Virtua Fighter 2 (see YAMPSettings for field semantics)
+	bool m_vf2Version20 = false;
+	bool m_vf2DisablePepsi = false;
 
 	// Debug settings
 	bool m_dontApplyPatches = false;
@@ -88,6 +94,7 @@ private:
 	bool m_stfShowDebugFeatures = false;
 	bool m_stfLooseRomFiles = false;
 	bool m_stfGameDebugFlag = false;
+	uint64_t m_stfHleDisableMask[2] = { 0, 0 };
 
 	// StF binding-capture state ("press a key for X"). The queue holds (action, device mask
 	// 1=keyboard 2=controller) prompts; non-empty = the capture popup is live. The prev

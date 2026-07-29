@@ -18,8 +18,15 @@ workspace "*"
 			["Resources"] = "source/**.rc"
 	}
 
-	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*", "source/Y6/*",
-			"source/imgui/*", "source/DX12/*", "source/LJ/*" }
+	-- 2026-07-28 restructure: source/Y6 -> source/vf5fs, source/LJ (+StF hosting) -> source/m2ftg
+	-- (which has LJ/ and YLAD/ subdirectories, hence the recursive globs), source/DX12 removed.
+	-- Utils gained .cpp files (DebugLog.cpp, Patterns.cpp) and is globbed as a directory now.
+	-- NB build/YAMP.vcxproj has been hand-maintained while this file was stale; before trusting a
+	-- regen, diff its file list against the vcxproj.
+	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*",
+			"source/imgui/*", "source/Utils/*",
+			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
+			"source/vf5fs/*" }
 
 	cppdialect "C++17"
 	staticruntime "on"

@@ -1,8 +1,10 @@
 #include "YAMPUserInterface.h"
 
 #include "YAMPGeneral.h"
-#include "LJ/StfDebugWindows.h"
-#include "LJ/m2ftg_host.h"
+#include "m2ftg/ElfRom.h"
+#include "m2ftg/LJ/DebugWindows.h"
+#include "m2ftg/LJ/HleHooks.h"
+#include "m2ftg/LJ/LJHost.h"
 
 #include "imgui/imgui.h"
 
@@ -12,6 +14,22 @@
 #include <algorithm>
 
 static const ImVec4 WARNING_COLOUR { 1.000f, 1.000f, 0.000f, 1.000f };
+
+// The three Lost Judgment m2ftg modules share one hosting path, one settings section and one
+// input layer, so they also share the Game/Controls panels.
+static bool IsLJm2ftgGame()
+{
+	const auto id = gGeneral.GetGameId();
+	return id == YAMPGeneral::GameId::StF
+		|| id == YAMPGeneral::GameId::FV
+		|| id == YAMPGeneral::GameId::MR;
+}
+
+// ...and YLAD's VF2 module speaks the same protocol, so it shares those panels too.
+static bool IsM2ftgGame()
+{
+	return IsLJm2ftgGame() || gGeneral.GetGameId() == YAMPGeneral::GameId::VF2;
+}
 
 // "Custom" ImGui wrappers
 namespace ImGuiCustom
@@ -43,14 +61,19 @@ namespace ImGuiCustom
 
 void YAMPUserInterface::Draw()
 {
-	if (gGeneral.GetSettings()->m_buildLastShowedDisclaimer < rsc_RevisionID)
+	// In the launcher no game is selected yet: the disclaimer names the parent game, so it
+	// stays with the per-game boots (each game's own settings file tracks it separately).
+	const bool launcherMode = gGeneral.GetGameId() == YAMPGeneral::GameId::Launcher;
+
+	if (!launcherMode && gGeneral.GetSettings()->m_buildLastShowedDisclaimer < rsc_RevisionID)
 	{
 		DrawDisclaimer();
 	}
 
 	// The game DLL's own debug windows are independent of the F1 settings window.
-	LJ::StF::DrawDebugWindows();
-	LJ::StF::UpdateGameDebugFlag();
+	m2ftg::DrawDebugWindows();
+	m2ftg::UpdateGameDebugFlag();
+	m2ftg::HleHooks::Update();
 
 	if (!ProcessF1Key())
 	{
@@ -97,11 +120,13 @@ void YAMPUserInterface::Draw()
 				return index;
 			};
 
+			// The launcher hosts no game, so only the Graphics + About pages apply there.
 			int index = 0;
-			game_id = settingsSection("Game", index++, m_pageModified);
+			game_id = controls_id = debug_id = -1;
+			if (!launcherMode) game_id = settingsSection("Game", index++, m_pageModified);
 			graphics_id = settingsSection("Graphics", index++, m_pageModified);
-			controls_id = settingsSection("Controls", index++, m_pageModified);
-			debug_id = settingsSection("Debug", index++, m_pageModified);
+			if (!launcherMode) controls_id = settingsSection("Controls", index++, m_pageModified);
+			if (!launcherMode) debug_id = settingsSection("Debug", index++, m_pageModified);
 			about_id = settingsSection("About", index++, m_pageModified);
 
 			if (DrawSettingsConfirmation())
@@ -115,11 +140,10 @@ void YAMPUserInterface::Draw()
 		ImGui::SameLine();
 
 		ImGui::BeginGroup();
-		// About is informational; Controls is read-only except for the LJ m2ftg games (StF/FV),
-		// whose button assignments are editable and go through the same Apply/Cancel flow as
-		// the other pages.
-		const bool controlsEditable = gGeneral.GetGameId() == YAMPGeneral::GameId::StF
-			|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
+		// About is informational; Controls is read-only except for the LJ m2ftg games
+		// (StF/FV/MR), whose button assignments are editable and go through the same
+		// Apply/Cancel flow as the other pages.
+		const bool controlsEditable = IsLJm2ftgGame();
 		bool drawButtons = selectedTab != about_id && (selectedTab != controls_id || controlsEditable);
 
 		float rightPanelHeight = 0.0f;
@@ -228,14 +252,20 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 		m_stfPadIndex[player] = settings->m_stfPadIndex[player];
 	}
 
+	m_vf2Version20 = settings->m_vf2Version20;
+	m_vf2DisablePepsi = settings->m_vf2DisablePepsi;
+
 	m_dontApplyPatches = settings->m_dontApplyPatches;
 	m_useD3DDebugLayer = settings->m_useD3DDebugLayer;
 	m_stfShowDebugFeatures = settings->m_stfShowDebugFeatures;
 	m_stfLooseRomFiles = settings->m_stfLooseRomFiles;
 	m_stfGameDebugFlag = settings->m_stfGameDebugFlag;
+	m_stfHleDisableMask[0] = settings->m_stfHleDisableMask[0];
+	m_stfHleDisableMask[1] = settings->m_stfHleDisableMask[1];
 
 	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session
-	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag)
+	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag ||
+		m_stfHleDisableMask[0] != 0 || m_stfHleDisableMask[1] != 0)
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -350,8 +380,9 @@ void YAMPUserInterface::DrawGraphics()
 // TODO: This will have to be subclassed once more games are added
 void YAMPUserInterface::DrawGame()
 {
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF
-		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
+	// All the m2ftg-family arcade modules (StF/FV/MR from LJ, VF2 from YLAD) share the same
+	// hosting protocol and dip switches, so they share the settings panel too.
+	if (IsM2ftgGame())
 	{
 		DrawGameStF();
 		return;
@@ -439,7 +470,7 @@ void YAMPUserInterface::DrawGameStF()
 		if (ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip("%s is a native 4:3 arcade game.\nApplies immediately.",
-				gGeneral.GetGameId() == YAMPGeneral::GameId::FV ? "Fighting Vipers" : "Sonic the Fighters");
+				gGeneral.GetArcadeGameName());
 		}
 	}
 
@@ -449,8 +480,16 @@ void YAMPUserInterface::DrawGameStF()
 	}
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("Lost Judgment's own CRT effect (scanlines + aperture grille),\n"
-			"an exact port of the shader LJ draws this game with.\nApplies immediately.");
+		if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+		{
+			ImGui::SetTooltip("Lost Judgment's CRT effect (scanlines + aperture grille), an exact port\n"
+				"of the shader LJ draws its Model 2 arcade minigames with.\nApplies immediately.");
+		}
+		else
+		{
+			ImGui::SetTooltip("Lost Judgment's own CRT effect (scanlines + aperture grille),\n"
+				"an exact port of the shader LJ draws this game with.\nApplies immediately.");
+		}
 	}
 
 	ImGui::NewLine();
@@ -509,14 +548,14 @@ void YAMPUserInterface::DrawGameStF()
 		}
 		if (ImGui::IsItemHovered())
 		{
-			if (gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
-			{
-				ImGui::SetTooltip("Region the arcade board boots as.\nRequires a restart.");
-			}
-			else
+			if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
 			{
 				ImGui::SetTooltip("Region the arcade board boots as. USA runs the game as\n"
 					"Sonic Championship, its western release.\nRequires a restart.");
+			}
+			else
+			{
+				ImGui::SetTooltip("Region the arcade board boots as.\nRequires a restart.");
 			}
 		}
 	}
@@ -538,15 +577,39 @@ void YAMPUserInterface::DrawGameStF()
 	if (ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("Boots straight into a credited 2-player versus match, the way\n"
-			"Lost Judgment's minigame runs. Unchecked: authentic arcade boot\n"
-			"(attract mode, single-player ladder).\nRequires a restart.");
+			"%s's minigame runs. Unchecked: authentic arcade boot\n"
+			"(attract mode, single-player ladder).\nRequires a restart.",
+			gGeneral.GetParentGameName());
+	}
+
+	// The VF2 module's own extra config switches (m2ftg_config_t is_vf20 / is_disable_pepsi;
+	// no readers in the StF/FV DLLs).
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+	{
+		if (ImGui::Checkbox("Version 2.0", &m_vf2Version20))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The module's own revision switch: boots the original Virtua Fighter 2.0\n"
+				"instead of the 2.1 revision.\nRequires a restart.");
+		}
+
+		if (ImGui::Checkbox("Disable Pepsi logos", &m_vf2DisablePepsi))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The module's own switch for removing the game's Pepsi product placement.\nRequires a restart.");
+		}
 	}
 }
 
 void YAMPUserInterface::DrawControls()
 {
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF
-		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV)
+	if (IsM2ftgGame())
 	{
 		DrawControlsStF();
 		return;
@@ -611,7 +674,7 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 {
 	// Keeps the connection indicators and capture edge detection fresh even before the
 	// game loop's own per-frame poll has run (polling twice per frame is harmless).
-	StFInput::PollPads();
+	M2Input::PollPads();
 
 	auto controllerLabel = [](int padIndex, char (&buf)[64]) -> const char* {
 		if (padIndex < 0)
@@ -619,7 +682,7 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 			return "None (keyboard only)";
 		}
 		sprintf_s(buf, "Controller %d%s", padIndex + 1,
-			StFInput::GetPadState(padIndex).connected ? "" : " (not connected)");
+			M2Input::GetPadState(padIndex).connected ? "" : " (not connected)");
 		return buf;
 	};
 
@@ -649,8 +712,8 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 	if (ImGui::Button("Restore Defaults"))
 	{
 		m_pageModified = true;
-		m_stfKeyBinds[player] = StFInput::DEFAULT_KEY_BINDS[player];
-		m_stfPadBinds[player] = StFInput::DEFAULT_PAD_BINDS[player];
+		m_stfKeyBinds[player] = M2Input::DEFAULT_KEY_BINDS[player];
+		m_stfPadBinds[player] = M2Input::DEFAULT_PAD_BINDS[player];
 		m_stfPadIndex[player] = player;
 	}
 
@@ -661,16 +724,16 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableHeadersRow();
 
-		for (uint32_t action = 0; action < StFInput::Action_Count; action++)
+		for (uint32_t action = 0; action < M2Input::Action_Count; action++)
 		{
 			ImGui::PushID(static_cast<int>(action));
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted(StFInput::ActionName(action));
+			ImGui::TextUnformatted(M2Input::ActionName(action));
 
 			ImGui::TableNextColumn();
-			const std::string keyLabel = StFInput::KeyName(m_stfKeyBinds[player][action]);
+			const std::string keyLabel = M2Input::KeyName(m_stfKeyBinds[player][action]);
 			if (ImGui::Button((keyLabel + "##key").c_str(), ImVec2(-FLT_MIN, 0.0f)))
 			{
 				StartStfCapture(player, false, action, 1);
@@ -682,17 +745,17 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 			}
 
 			ImGui::TableNextColumn();
-			const char* padLabel = StFInput::PadButtonName(m_stfPadBinds[player][action]);
+			const char* padLabel = M2Input::PadButtonName(m_stfPadBinds[player][action]);
 			char padButtonLabel[64];
 			sprintf_s(padButtonLabel, "%s##pad", padLabel);
 			if (ImGui::Button(padButtonLabel, ImVec2(-FLT_MIN, 0.0f)))
 			{
 				StartStfCapture(player, false, action, 2);
 			}
-			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfPadBinds[player][action] != StFInput::Pad_None)
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfPadBinds[player][action] != M2Input::Pad_None)
 			{
 				m_pageModified = true;
-				m_stfPadBinds[player][action] = StFInput::Pad_None;
+				m_stfPadBinds[player][action] = M2Input::Pad_None;
 			}
 			ImGui::PopID();
 		}
@@ -709,7 +772,7 @@ void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action
 	{
 		// The basics, prompted one by one: up, down, left, right, punch, kick, guard,
 		// start, coin. Combos and Back stay on their per-row buttons.
-		for (uint32_t a = 0; a < StFInput::WIZARD_ACTION_COUNT; a++)
+		for (uint32_t a = 0; a < M2Input::WIZARD_ACTION_COUNT; a++)
 		{
 			m_stfCaptureQueue.push_back({ a, 3 });
 		}
@@ -722,10 +785,10 @@ void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action
 
 	// Prime the edge detectors with the current state so already-held inputs are ignored.
 	m_stfCapturePrevKeys = gGeneral.GetPressedKeys();
-	StFInput::PollPads();
+	M2Input::PollPads();
 	for (int i = 0; i < 4; i++)
 	{
-		m_stfCapturePrevPadButtons[i] = StFInput::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = M2Input::GetPadState(i).buttons;
 	}
 }
 
@@ -765,7 +828,7 @@ void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t
 		{
 			if (bind == button)
 			{
-				bind = StFInput::Pad_None;
+				bind = M2Input::Pad_None;
 			}
 		}
 	}
@@ -802,13 +865,13 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	ImGui::Text("Player %d", m_stfCapturePlayer + 1);
 	ImGui::Text("Press %s for:", deviceText);
 	ImGui::SameLine();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", StFInput::ActionName(prompt.action));
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", M2Input::ActionName(prompt.action));
 	if (m_stfCaptureQueue.size() > 1)
 	{
 		ImGui::TextDisabled("%zu of %zu", m_stfCaptureStep + 1, m_stfCaptureQueue.size());
 	}
 
-	StFInput::PollPads();
+	M2Input::PollPads();
 	const auto& keys = gGeneral.GetPressedKeys();
 
 	bool advanced = false;
@@ -832,8 +895,8 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	{
 		for (int padIndex = 0; padIndex < 4 && !advanced; padIndex++)
 		{
-			const uint32_t pressed = StFInput::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
-			for (uint32_t button = 1; button < StFInput::Pad_Count && !advanced; button++)
+			const uint32_t pressed = M2Input::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
+			for (uint32_t button = 1; button < M2Input::Pad_Count && !advanced; button++)
 			{
 				if (pressed & (1u << button))
 				{
@@ -868,7 +931,7 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	m_stfCapturePrevKeys = keys;
 	for (int i = 0; i < 4; i++)
 	{
-		m_stfCapturePrevPadButtons[i] = StFInput::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = M2Input::GetPadState(i).buttons;
 	}
 	ImGui::EndPopup();
 }
@@ -930,7 +993,7 @@ void YAMPUserInterface::DrawDebug()
 	// StF-specific DLL data/addresses; the loose-ROM bypass is generic across the LJ m2ftg
 	// games (archive name and image list come from the GameDesc table).
 	const bool isStf = gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
-	const bool isLJm2ftg = isStf || gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
+	const bool isLJm2ftg = IsLJm2ftgGame();
 
 	if (isStf)
 	{
@@ -954,7 +1017,7 @@ void YAMPUserInterface::DrawDebug()
 		}
 		if (ImGui::IsItemHovered())
 		{
-			const auto& game = LJ::StF::CurrentGame();
+			const auto& game = m2ftg::CurrentGame();
 			ImGui::SetTooltip("Bypasses rom/%s and reads the ROM images directly from the matching rom subdirectory.\n"
 				"Every image extracted from the archive (rom_code1.bin, rom_data.bin, the EP/POL/TEX ROMs)\n"
 				"must be present, otherwise the archive is used as usual. Requires a restart.",
@@ -973,6 +1036,334 @@ void YAMPUserInterface::DrawDebug()
 			ImGui::SetTooltip("Flips the game's own debug flag in emulated RAM (the dword at 0x508000, XORed with 0x24).\n"
 				"Re-applied automatically if the game rewrites that memory. Takes effect immediately after Apply.");
 		}
+
+		DrawStfHleHooks();
+	}
+}
+
+void YAMPUserInterface::DrawStfHleHooks()
+{
+	namespace Hle = m2ftg::HleHooks;
+
+	if (!ImGui::CollapsingHeader("HLE ROM hooks"))
+	{
+		return;
+	}
+
+	ImGui::PushTextWrapPos();
+	ImGui::TextUnformatted("At board start-up the game DLL overwrites 76 individual i960 instructions in the program ROM "
+		"with traps that run native code instead. Disabling a hook restores the ROM's original instruction, so the ROM's "
+		"own code runs there again - which is what a patched rom_code1.bin needs in order to take effect. Applied live.");
+	ImGui::Spacing();
+	ImGui::TextUnformatted("A wholly different program ROM - homebrew rather than a patch - needs more than that: every "
+		"offset below is a Sonic the Fighters address, so the installer corrupts 76 unrelated instructions before the "
+		"CPU runs any of them, which is too early to repair here. For that, the settings.ini [HleRetarget] section moves "
+		"or drops each hook before the installer runs. See the 'At' column.");
+	ImGui::PopTextWrapPos();
+	ImGui::Spacing();
+
+	auto setMask = [this](unsigned kinds)
+	{
+		Hle::MaskForKinds(m_stfHleDisableMask, kinds);
+		m_pageModified = true;
+	};
+
+	if (ImGui::Button("Disable none"))
+	{
+		setMask(0);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Disable game-behaviour hooks"))
+	{
+		setMask(Hle::MODDING_KINDS);
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Disables every hook that stops the ROM's own code from running (Content and Removed),\n"
+			"while leaving the emulator's own plumbing and host integration alone. This is the preset\n"
+			"to use when modding the ROM.");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Disable all"))
+	{
+		ImGui::OpenPopup("Disable Core hooks?");
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Includes the Core hooks the emulator depends on (frame yield, vsync wait, self-test bypass).\n"
+			"The game will hang. Provided for investigation only - restart YAMP to recover.");
+	}
+
+	if (ImGui::BeginPopupModal("Disable Core hooks?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+		ImGui::TextColored(WARNING_COLOUR, "This disables the Core hooks the emulator itself depends on - the frame "
+			"yield, the vsync wait and the board self-test bypass. The emulated board will hang, and because the "
+			"settings UI is drawn from the same loop, it will take this window with it.");
+		ImGui::Spacing();
+		ImGui::TextUnformatted("Core hooks are never written to settings.ini, so restarting YAMP always recovers.");
+		ImGui::PopTextWrapPos();
+		ImGui::Spacing();
+		if (ImGui::Button("Disable all anyway"))
+		{
+			setMask(Hle::ALL_KINDS);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel"))
+		{
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+
+	size_t disabledCount = 0;
+	for (size_t i = 0; i < Hle::COUNT; i++)
+	{
+		disabledCount += Hle::MaskTest(m_stfHleDisableMask, i) ? 1 : 0;
+	}
+	ImGui::Text("%zu of %zu hooks disabled", disabledCount, Hle::COUNT);
+	ImGui::TextColored(WARNING_COLOUR, "Core hooks are session-only: they apply live but are never saved, so a restart always boots.");
+	ImGui::Spacing();
+
+	// Where the installer actually put each trap, which is only the same as the table above when
+	// no [HleRetarget] entry moved it. Read live so it also shows a hand-edited ini taking effect.
+	// Invocation counters. The rate is the useful number - "once per frame" is the shape a
+	// correctly placed render/vsync hook should have - so hold a one-second baseline and show
+	// hits/sec next to the running total.
+	static uint32_t s_rateBaseline[Hle::COUNT] = {};
+	static float s_ratePerSecond[Hle::COUNT] = {};
+	static double s_lastRateSample = 0.0;
+	{
+		const double now = ImGui::GetTime();
+		if (s_lastRateSample == 0.0)
+		{
+			s_lastRateSample = now;
+		}
+		else if (now - s_lastRateSample >= 1.0)
+		{
+			const float elapsed = static_cast<float>(now - s_lastRateSample);
+			for (size_t i = 0; i < Hle::COUNT; i++)
+			{
+				const uint32_t total = Hle::HitCount(i);
+				s_ratePerSecond[i] = static_cast<float>(total - s_rateBaseline[i]) / elapsed;
+				s_rateBaseline[i] = total;
+			}
+			s_lastRateSample = now;
+		}
+	}
+
+	uint32_t installed[Hle::COUNT];
+	const bool haveInstalled = Hle::GetInstalledOffsets(installed);
+	if (haveInstalled)
+	{
+		size_t retargeted = 0;
+		size_t suppressed = 0;
+		for (size_t i = 0; i < Hle::COUNT; i++)
+		{
+			if (installed[i] >= 0x200000)
+			{
+				suppressed++;
+			}
+			else if (installed[i] != Hle::Get(i).romOffset)
+			{
+				retargeted++;
+			}
+		}
+		// ---- homebrew health checks ----------------------------------------------------------
+		// Every hook misplacement found so far failed SILENTLY: hook 1 on no site is a black
+		// screen with every counter healthy, hook 2 on an init-only site is a 98% emulated spin
+		// at 2 fps with no error anywhere. The hit counters already measure both, so say it out
+		// loud rather than leaving it to be bisected. Only while an ELF ROM is loaded - stock StF
+		// legitimately leaves most of these alone.
+		if (m2ftg::ElfRom::IsLoaded())
+		{
+			const bool yieldInstalled = installed[2] < 0x200000;
+			if (Hle::HitCount(1) == 0)
+			{
+				ImGui::TextColored(WARNING_COLOUR,
+					"HOOK 1 HAS NEVER FIRED - the composite is disabled, so the screen stays black.");
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("It is installed but its ROM site is never reached. Move it to an address the\n"
+						"program executes once during start-up (the ROM can declare one as\n"
+						"__yamp_hook_composite_enable).");
+				}
+			}
+			if (yieldInstalled && s_ratePerSecond[2] > 0.0f && s_ratePerSecond[2] < 10.0f)
+			{
+				ImGui::TextColored(WARNING_COLOUR,
+					"HOOK 2 IS FIRING AT ONLY %.1f/sec - the frame yield is not on a per-frame path.",
+					s_ratePerSecond[2]);
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("The board spends its time spinning instead of handing frames back to the host.\n"
+						"Expect a very low frame rate and high CPU. Move the yield to a site reached every\n"
+						"frame (the ROM can declare one as __yamp_hook_frame_yield).");
+				}
+			}
+			if (yieldInstalled && Hle::HitCount(2) == 0)
+			{
+				ImGui::TextColored(WARNING_COLOUR,
+					"HOOK 2 HAS NEVER FIRED - no frame yield; the board will spin.");
+			}
+			if (Hle::UsedConvention())
+			{
+				ImGui::TextDisabled("Hook sites declared by the ROM (__yamp_hook_* symbols in game.elf).");
+			}
+		}
+
+		// Hook 1 is the composite enable: without it the display target is bound and cleared every
+		// frame but never drawn into, so the screen is black while every other counter looks
+		// healthy. That failure is invisible from the outside and cost a long debugging session -
+		// say it plainly rather than leaving it to the per-hook tooltip.
+		if (installed[1] >= 0x200000)
+		{
+			ImGui::TextColored(WARNING_COLOUR,
+				"HOOK 1 IS NOT INSTALLED - the screen will stay black no matter what the ROM draws.");
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Hook 1 sets the module's composite-enable flag. Everything else can be working\n"
+					"(geometry submitted, passes bound, draws recorded) and nothing will reach the display.\n"
+					"For a non-StF ROM give it any address executed once at start-up: [HleRetarget] Hook1=<symbol>.");
+			}
+			ImGui::Spacing();
+		}
+
+		if (retargeted != 0 || suppressed != 0)
+		{
+			ImGui::TextColored(WARNING_COLOUR, "[HleRetarget]: %zu hook(s) moved, %zu never installed.",
+				retargeted, suppressed);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("The settings.ini [HleRetarget] section changed which ROM addresses the module's\n"
+					"hook installer patches. Rows below show the address actually used.");
+			}
+			ImGui::Spacing();
+		}
+	}
+
+
+	if (ImGui::Button("Reset hit counts"))
+	{
+		Hle::ResetHitCounts();
+		for (size_t i = 0; i < Hle::COUNT; i++)
+		{
+			s_rateBaseline[i] = 0;
+			s_ratePerSecond[i] = 0.0f;
+		}
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Hits are counted in the i960 instruction fetch, so they show whether a hook's trap is\n"
+			"actually reached - not just installed. A per-frame hook should sit near the frame rate.");
+	}
+	ImGui::Spacing();
+
+	if (ImGui::BeginTable("hle_hooks", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit))
+	{
+		ImGui::TableSetupColumn("Off");
+		ImGui::TableSetupColumn("#");
+		ImGui::TableSetupColumn("Kind");
+		ImGui::TableSetupColumn("At");
+		ImGui::TableSetupColumn("Hits");
+		ImGui::TableSetupColumn("/sec");
+		ImGui::TableSetupColumn("ROM site", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableHeadersRow();
+
+		for (size_t i = 0; i < Hle::COUNT; i++)
+		{
+			const Hle::Info& info = Hle::Get(i);
+			ImGui::TableNextRow();
+			ImGui::PushID(static_cast<int>(i));
+
+			ImGui::TableNextColumn();
+			bool disabled = Hle::MaskTest(m_stfHleDisableMask, i);
+			if (ImGui::Checkbox("##off", &disabled))
+			{
+				Hle::MaskSet(m_stfHleDisableMask, i, disabled);
+				m_pageModified = true;
+			}
+
+			ImGui::TableNextColumn();
+			ImGui::Text("%zu", i);
+
+			ImGui::TableNextColumn();
+			if (info.kind == Hle::Kind::Core)
+			{
+				ImGui::TextColored(WARNING_COLOUR, "%s", Hle::KindName(info.kind));
+			}
+			else
+			{
+				ImGui::TextUnformatted(Hle::KindName(info.kind));
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", Hle::KindDescription(info.kind));
+			}
+
+			ImGui::TableNextColumn();
+			if (!haveInstalled)
+			{
+				ImGui::Text("%06X", info.romOffset);
+			}
+			else if (installed[i] >= 0x200000)
+			{
+				ImGui::TextColored(WARNING_COLOUR, "%s", "-");
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("Suppressed by [HleRetarget]: the installer skipped this hook, so the\n"
+						"ROM word at 0x%06X was never overwritten.", info.romOffset);
+				}
+			}
+			else if (installed[i] != info.romOffset)
+			{
+				ImGui::TextColored(WARNING_COLOUR, "%06X", installed[i]);
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("Retargeted by [HleRetarget]: installed at 0x%06X instead of Sonic the\n"
+						"Fighters' own 0x%06X.", installed[i], info.romOffset);
+				}
+			}
+			else
+			{
+				ImGui::Text("%06X", installed[i]);
+			}
+
+			ImGui::TableNextColumn();
+			const uint32_t hits = Hle::HitCount(i);
+			if (hits == 0)
+			{
+				ImGui::TextDisabled("-");
+			}
+			else
+			{
+				ImGui::Text("%u", hits);
+			}
+
+			ImGui::TableNextColumn();
+			if (s_ratePerSecond[i] <= 0.0f)
+			{
+				ImGui::TextDisabled("-");
+			}
+			else
+			{
+				ImGui::Text("%.1f", s_ratePerSecond[i]);
+			}
+
+			ImGui::TableNextColumn();
+			ImGui::Text("%s", info.site);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("ROM 0x%06X, native handler DLL+0x%X\n%s\n\n%s",
+					info.romOffset, info.handlerRva,
+					info.replacesInstruction ? "The original instruction never runs." : "The original instruction still runs after the handler.",
+					info.note);
+			}
+
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
 	}
 }
 
@@ -1001,27 +1392,8 @@ void YAMPUserInterface::DrawAbout()
 	ImGui::Separator();
 	ImGui::TextUnformatted("GAME INFORMATION:");
 
-	const char* arcadeName;
-	const char* baseGameName;
-	switch (gGeneral.GetGameId())
-	{
-	case YAMPGeneral::GameId::StF:
-		arcadeName = "Sonic the Fighters";
-		baseGameName = "Lost Judgment";
-		break;
-	case YAMPGeneral::GameId::FV:
-		arcadeName = "Fighting Vipers";
-		baseGameName = "Lost Judgment";
-		break;
-	case YAMPGeneral::GameId::VF2:
-		arcadeName = "Virtua Fighter 2";
-		baseGameName = "Yakuza: Like a Dragon";
-		break;
-	default:
-		arcadeName = "Virtua Fighter 5: Final Showdown";
-		baseGameName = "Yakuza 6";
-		break;
-	}
+	const char* arcadeName = gGeneral.GetArcadeGameName();
+	const char* baseGameName = gGeneral.GetParentGameName();
 	ImGui::Text("Current arcade: %s", arcadeName);
 	ImGui::Text("Base game: %s", baseGameName);
 	ImGui::Text("DLL name: %s", gGeneral.GetDLLName().c_str());
@@ -1042,8 +1414,8 @@ void YAMPUserInterface::DrawAbout()
 	ImGui::Separator();
 	ImGui::TextUnformatted("ACKNOWLEDGEMENTS:");
 	ImGui::TextColored(WARNING_COLOUR, "Yakuza Arcade Machines Player does not redistribute ANY copyrighted files. "
-			"You must own an original Steam copy of Yakuza 6: The Song of Life to play games via YAMP. "
-			"Pirated game copies WILL NOT receive any support.");
+			"You must own an original Steam copy of %s to play this game via YAMP. "
+			"Pirated game copies WILL NOT receive any support.", baseGameName);
 
 	ImGui::NewLine();
 	ImGui::Text("All rights to %s belong to SEGA.", arcadeName);
@@ -1107,11 +1479,11 @@ void YAMPUserInterface::DrawDisclaimer()
 		ImGui::Separator();
 
 		ImGui::TextColored(WARNING_COLOUR, "DISCLAIMER: Yakuza Arcade Machines Player does not redistribute ANY copyrighted files.\n"
-			"You must own an original Steam copy of Yakuza 6: The Song of Life to play games via YAMP.\n"
-			"Pirated game copies WILL NOT receive any support.");
+			"You must own an original Steam copy of %s to play this game via YAMP.\n"
+			"Pirated game copies WILL NOT receive any support.", gGeneral.GetParentGameName());
 
 		ImGui::NewLine();
-		ImGui::TextUnformatted("All rights to Virtua Fighter 5: Final Showdown belong to SEGA.");
+		ImGui::Text("All rights to %s belong to SEGA.", gGeneral.GetArcadeGameName());
 		ImGui::Separator();
 		ImGui::TextUnformatted("Press "); ImGui::SameLine(0, 0); ImGui::TextColored(WARNING_COLOUR, "F1"); ImGui::SameLine(0, 0); ImGui::TextUnformatted(" to open settings.");
 	}
@@ -1158,6 +1530,8 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_stfCountry != m_stfCountry ||
 		settings->m_stfFreeplay != m_stfFreeplay ||
 		settings->m_stfVersusMode != m_stfVersusMode ||
+		settings->m_vf2Version20 != m_vf2Version20 ||
+		settings->m_vf2DisablePepsi != m_vf2DisablePepsi ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
 		settings->m_useD3DDebugLayer != m_useD3DDebugLayer ||
 		settings->m_stfLooseRomFiles != m_stfLooseRomFiles;
@@ -1186,12 +1560,19 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_stfPadIndex[player] = m_stfPadIndex[player];
 	}
 
+	// Consumed once by module_start (config.is_vf20 / is_disable_pepsi), hence the restart warning.
+	settings->m_vf2Version20 = m_vf2Version20;
+	settings->m_vf2DisablePepsi = m_vf2DisablePepsi;
+
 	settings->m_dontApplyPatches = m_dontApplyPatches;
 	settings->m_useD3DDebugLayer = m_useD3DDebugLayer;
 	// The debug-window overlay is read every frame, so it applies live (no restart warning).
 	settings->m_stfShowDebugFeatures = m_stfShowDebugFeatures;
 	// Enforced every frame while the board is booted, so it also applies live.
 	settings->m_stfGameDebugFlag = m_stfGameDebugFlag;
+	// Ditto: m2ftg::HleHooks::Update() reconciles the ROM image against this mask every frame.
+	settings->m_stfHleDisableMask[0] = m_stfHleDisableMask[0];
+	settings->m_stfHleDisableMask[1] = m_stfHleDisableMask[1];
 	// Consumed once when module_start mounts the ROM archive, hence the restart warning above.
 	settings->m_stfLooseRomFiles = m_stfLooseRomFiles;
 

@@ -1,8 +1,9 @@
 #include "YAMPGeneral.h"
 
-#include <ShlObj.h>
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+
 #include <filesystem>
-#include "wil/resource.h"
 
 YAMPGeneral gGeneral;
 
@@ -13,14 +14,50 @@ void YAMPGeneral::LoadSettings()
 	m_settings->LoadSettings(GetDataPath());
 }
 
-std::filesystem::path YAMPGeneral::GetLocalAppDataPath() const
+const char* YAMPGeneral::GetArcadeGameName() const
 {
-	std::filesystem::path result;
-
-	wil::unique_cotaskmem_string str;
-	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, nullptr, str.addressof())))
+	switch (m_gameId)
 	{
-		result.assign(str.get());
+	case GameId::StF: return "Sonic the Fighters";
+	case GameId::FV: return "Fighting Vipers";
+	case GameId::MR: return "Motor Raid";
+	case GameId::VF2: return "Virtua Fighter 2";
+	case GameId::Launcher: return "Yakuza Arcade Machines Player";
+	default: return "Virtua Fighter 5: Final Showdown";
 	}
-	return result;
+}
+
+const char* YAMPGeneral::GetGameTag() const
+{
+	switch (m_gameId)
+	{
+	case GameId::StF: return "StF";
+	case GameId::FV: return "FV";
+	case GameId::MR: return "MR";
+	case GameId::VF2: return "VF2";
+	case GameId::Launcher: return "YAMP";
+	default: return "VF5FS";
+	}
+}
+
+const char* YAMPGeneral::GetParentGameName() const
+{
+	switch (m_gameId)
+	{
+	case GameId::StF:
+	case GameId::FV:
+	case GameId::MR: return "Lost Judgment";
+	case GameId::VF2: return "Yakuza: Like a Dragon";
+	case GameId::Launcher: return "the supported Yakuza games";
+	default: return "Yakuza 6: The Song of Life";
+	}
+}
+
+void YAMPGeneral::SetDataPath()
+{
+	wchar_t exePath[MAX_PATH];
+	if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) != 0)
+	{
+		m_userDataPath = std::filesystem::path(exePath).parent_path();
+	}
 }

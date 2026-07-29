@@ -1,9 +1,10 @@
-﻿// Main.cpp
+// Main.cpp
 #include "YAMPGeneral.h"
 #include "RenderWindow.h"
-#include "Y6/VF5FS.h"
-#include "Y6/VF2.h"
-#include "LJ/StF.h"
+#include "GameLauncher.h"
+#include "vf5fs/VF5FS.h"
+#include "m2ftg/YLAD/VF2.h"
+#include "m2ftg/LJ/LJHost.h"
 #include "imgui/imgui.h"
 
 #ifdef _DEBUG
@@ -16,9 +17,6 @@
 // CreatePipelineState STILL returned E_INVALIDARG. So the runtime version is NOT the cause: the
 // subobject stream is genuinely malformed (type tags are 0). Reverted; the DLL's stream builder is
 // the thing to fix.
-
-// If you still keep the DX12 example fallback around:
-namespace DX12 { namespace Example { void Run(RenderWindow& window); } }
 
 #ifdef _DEBUG
 // The pxd engine's trap/log path formats with exotic and often mismatched varargs (e.g. a
@@ -63,24 +61,38 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-    // Toggle which game to run: StF by default, "-fv" runs Fighting Vipers (LJ, same m2ftg
-    // path as StF), "-vf5fs" runs VF5FS (Y6), "-vf2" runs VF2 (YLAD).
-    const bool runVF2 = wcsstr(GetCommandLineW(), L"-vf2") != nullptr;
-    const bool runFV = !runVF2 && wcsstr(GetCommandLineW(), L"-fv") != nullptr;
-    const bool runStF = !runVF2 && wcsstr(GetCommandLineW(), L"-vf5fs") == nullptr;
+    // Game-select arguments: "-stf" runs Sonic the Fighters (LJ), "-fv" runs Fighting Vipers
+    // and "-mr" runs Motor Raid (both LJ, same m2ftg path as StF), "-vf5fs" runs VF5FS (Y6),
+    // "-vf2" runs VF2 (YLAD). With no game argument, show the launcher menu instead — it
+    // discovers which games are present (next to YAMP.exe and in the Steam installs of the
+    // parent games) and boots the chosen one as a child process with these arguments and the
+    // game folder as its CWD.
+    const wchar_t* cmdLine = GetCommandLineW();
+    const bool runVF2 = wcsstr(cmdLine, L"-vf2") != nullptr;
+    const bool runFV = !runVF2 && wcsstr(cmdLine, L"-fv") != nullptr;
+    const bool runMR = !runVF2 && !runFV && wcsstr(cmdLine, L"-mr") != nullptr;
+    const bool runVF5FS = !runVF2 && !runFV && !runMR && wcsstr(cmdLine, L"-vf5fs") != nullptr;
+    const bool runStF = !runVF2 && !runVF5FS;
+
+    const bool anyGameArg = runVF2 || runFV || runMR || runVF5FS || wcsstr(cmdLine, L"-stf") != nullptr;
+    if (!anyGameArg) {
+        Launcher::Run(hInstance, nShowCmd);
+        ImGui::DestroyContext();
+        return 0;
+    }
 
     if (runVF2) {
         // --- VF2 path (YLAD m2ftg module, DX11)
         gGeneral.SetGameId(YAMPGeneral::GameId::VF2);
-        HMODULE dll = Y6::VF2::LoadDLL();
+        HMODULE dll = m2ftg::VF2::LoadDLL();
         if (!dll) {
             ImGui::DestroyContext();
             return 0;
         }
 
-        Y6::VF2::PreInitialize();
+        m2ftg::VF2::PreInitialize();
         RenderWindow window(hInstance, dll, nShowCmd);
-        Y6::VF2::Run(window);
+        m2ftg::VF2::Run(window);
         ImGui::DestroyContext();
         return 0;
     }
@@ -89,14 +101,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         gGeneral.SetGameId(YAMPGeneral::GameId::VF5FS);
         HMODULE dll = Y6::VF5FS::LoadDLL();
         if (!dll) {
-            // Keep your existing DX12 fallback if VF5FS DLL missing
-            gGeneral.SetDLLName("DX12 Fallback");
-            gGeneral.SetDLLTimestamp(0);
-            gGeneral.SetDataPath(u8"Sega", u8"Virtua Fighter 5 Final Showdown");
-            gGeneral.LoadSettings();
-
-            RenderWindow window(hInstance, hInstance, nShowCmd);
-            DX12::Example::Run(window);
+            // LoadDLL already told the user what is missing; nothing to run without it.
             ImGui::DestroyContext();
             return 0;
         }
@@ -108,32 +113,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         return 0;
     }
     else {
-        // --- LJ m2ftg path: StF by default, FV with "-fv" (DX12 game DLL if present;
-        // otherwise DX12 fallback). Both games share the whole hosting path; the per-game
-        // differences live in LJ::StF::GameDesc (StF.cpp).
-        gGeneral.SetGameId(runFV ? YAMPGeneral::GameId::FV : YAMPGeneral::GameId::StF);
-        HMODULE stfDll = LJ::StF::LoadDLL();  // stf-pxd-w64-d3d12_retail.dll / fv-pxd-w64-d3d12_retail.dll
+        // --- LJ m2ftg path: StF by default, FV with "-fv", Motor Raid with "-mr". All three
+        // games share the whole hosting path; the per-game differences live in
+        // m2ftg::GameDesc (m2ftg/LJ/LJHost.h).
+        gGeneral.SetGameId(runFV ? YAMPGeneral::GameId::FV
+            : runMR ? YAMPGeneral::GameId::MR
+            : YAMPGeneral::GameId::StF);
+        HMODULE stfDll = m2ftg::LoadDLL();  // stf- / fv- / mr-pxd-w64-d3d12_retail.dll
 
         // Always seed settings so UI has something to read
-        gGeneral.SetDLLName(runFV ? "Fighting Vipers" : "Sonic the Fighters");
+        gGeneral.SetDLLName(gGeneral.GetArcadeGameName());
         gGeneral.SetDLLTimestamp(0);
-        if (runFV)
-            gGeneral.SetDataPath(u8"Sega", u8"Fighting Vipers");
-        else
-            gGeneral.SetDataPath(u8"Sega", u8"Sonic The Fighters");
+        gGeneral.SetDataPath();
         gGeneral.LoadSettings();
 
         if (!stfDll) {
-            // Fallback: pure DX12 spinning-cube + ImGui on 11on12
-            RenderWindow window(hInstance, hInstance, nShowCmd);
-            LJ::StF::DX12::Run(window);
+            // LoadDLL already told the user what is missing; nothing to run without it.
             ImGui::DestroyContext();
             return 0;
         }
 
         // DLL is present: wire the window to the module and run the real game
         RenderWindow window(hInstance, stfDll, nShowCmd);
-        LJ::StF::Run(window);
+        m2ftg::Run(window);
         ImGui::DestroyContext();
         return 0;
     }

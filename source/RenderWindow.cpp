@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "YAMPGeneral.h"
+#include "DebugLog.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3d12.lib")
@@ -25,26 +26,14 @@
 
 static constexpr DXGI_FORMAT OUTPUT_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 
-// D3D12 debug-layer message sink: appends every validation message to d3d12_debug.log in the CWD,
-// flushing per line so the message emitted right before a driver crash is on disk. Registered via
-// ID3D12InfoQueue1::RegisterMessageCallback when the debug layer is enabled.
-// Shared d3d12_debug.log handle so both the validation callback AND the DRED dump land in one file
-// (DRED matters most when the debug layer is off / the process is dying — route it to disk, not just
-// the debugger). Opened "w" by whoever writes first; subsequent writers append to the same handle.
-static FILE* g_d3d12LogFile = nullptr;
-static void D3D12LogWrite(const char* s)
-{
-	if (!g_d3d12LogFile) fopen_s(&g_d3d12LogFile, "d3d12_debug.log", "w");
-	if (g_d3d12LogFile) { fputs(s, g_d3d12LogFile); fflush(g_d3d12LogFile); }
-	OutputDebugStringA(s);
-}
-
+// D3D12 debug-layer message sink: every validation message goes through DebugLogFile
+// (DebugLog.h — debugger + d3d12_debug.log, flushed per line so the message emitted right
+// before a driver crash is on disk). Registered via ID3D12InfoQueue1::RegisterMessageCallback
+// when the debug layer is enabled. Debug builds only; compiles away in Release.
 static void CALLBACK D3D12DebugMessageCallback(D3D12_MESSAGE_CATEGORY category, D3D12_MESSAGE_SEVERITY severity,
 	D3D12_MESSAGE_ID id, LPCSTR description, void* /*context*/)
 {
-	char line[1024];
-	_snprintf_s(line, _TRUNCATE, "[sev=%d cat=%d id=%d] %s\n", severity, category, id, description ? description : "(null)");
-	D3D12LogWrite(line);
+	DebugLogFile("[sev=%d cat=%d id=%d] %s\n", severity, category, id, description ? description : "(null)");
 }
 
 // ---- CreatePipelineState capture hook -------------------------------------------------------------
@@ -95,10 +84,9 @@ static void DumpDRED(ID3D12Device* dev)
 	wil::com_ptr<ID3D12DeviceRemovedExtendedData> dred;
 	if (FAILED(dev->QueryInterface(IID_PPV_ARGS(dred.put()))) || !dred)
 	{
-		D3D12LogWrite("[DRED] no ID3D12DeviceRemovedExtendedData interface\n");
+		DebugLogFile("[DRED] no ID3D12DeviceRemovedExtendedData interface\n");
 		return;
 	}
-	char b[320];
 	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
 	if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc)))
 	{
@@ -107,48 +95,42 @@ static void DumpDRED(ID3D12Device* dev)
 			node && nodeN < 8; node = node->pNext, ++nodeN)
 		{
 			const UINT last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
-			_snprintf_s(b, _TRUNCATE, "[DRED] cmdlist='%ls' queue='%ls' count=%u lastCompleted=%u\n",
+			DebugLogFile("[DRED] cmdlist='%ls' queue='%ls' count=%u lastCompleted=%u\n",
 				node->pCommandListDebugNameW ? node->pCommandListDebugNameW : L"?",
 				node->pCommandQueueDebugNameW ? node->pCommandQueueDebugNameW : L"?",
 				node->BreadcrumbCount, last);
-			D3D12LogWrite(b);
 			// Print the ops straddling the last completed one — that's where the GPU died.
 			const UINT lo = last > 3 ? last - 3 : 0;
 			const UINT hi = (last + 4 < node->BreadcrumbCount) ? last + 4 : node->BreadcrumbCount;
 			for (UINT i = lo; i < hi; ++i)
 			{
-				_snprintf_s(b, _TRUNCATE, "[DRED]   op[%u]=%d%s\n", i,
+				DebugLogFile("[DRED]   op[%u]=%d%s\n", i,
 					static_cast<int>(node->pCommandHistory[i]), i == last ? "  <== last GPU-completed" : "");
-				D3D12LogWrite(b);
 			}
 		}
 	}
 	D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
 	if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)))
 	{
-		_snprintf_s(b, _TRUNCATE, "[DRED] PageFaultVA=0x%llX\n", static_cast<unsigned long long>(pf.PageFaultVA));
-		D3D12LogWrite(b);
+		DebugLogFile("[DRED] PageFaultVA=0x%llX\n", static_cast<unsigned long long>(pf.PageFaultVA));
 		for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadExistingAllocationNode; a; a = a->pNext)
 		{
-			_snprintf_s(b, _TRUNCATE, "[DRED]   EXISTING alloc '%ls' type=%d\n",
+			DebugLogFile("[DRED]   EXISTING alloc '%ls' type=%d\n",
 				a->ObjectNameW ? a->ObjectNameW : L"?", a->AllocationType);
-			D3D12LogWrite(b);
 		}
 		for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadRecentFreedAllocationNode; a; a = a->pNext)
 		{
-			_snprintf_s(b, _TRUNCATE, "[DRED]   RECENTLY-FREED alloc '%ls' type=%d  <== USE-AFTER-FREE?\n",
+			DebugLogFile("[DRED]   RECENTLY-FREED alloc '%ls' type=%d  <== USE-AFTER-FREE?\n",
 				a->ObjectNameW ? a->ObjectNameW : L"?", a->AllocationType);
-			D3D12LogWrite(b);
 		}
 	}
-	D3D12LogWrite("[DRED] ---- end ----\n");
+	DebugLogFile("[DRED] ---- end ----\n");
 }
 
 // Callable from HostCdevice's frame-submit path: dump DRED (last GPU op + page-fault resource) on a
-// detected device-removal, and append an arbitrary line to d3d12_debug.log so the diagnosis survives
-// even when nothing is attached to read OutputDebugString.
+// detected device-removal so the diagnosis survives even when nothing is attached to read
+// OutputDebugString (DebugLogFile routes it to d3d12_debug.log).
 void DumpDredNow() { DumpDRED(g_dredDevice); }
-void D3D12LogLine(const char* s) { if (s) D3D12LogWrite(s); }
 
 // Catch the d3d12 STATUS_BREAKPOINT wherever it fires; if the device is actually removed, dump DRED
 // once, then let the exception propagate (process still terminates, but we have the fault report).
@@ -162,10 +144,8 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 		if (s_seen < 16 && code != 0xE06D7363 && code != 0x406D1388)
 		{
 			++s_seen;
-			char b[128];
-			_snprintf_s(b, _TRUNCATE, "[DRED] VEH exception code=0x%08lX at %p\n",
+			DebugLogFile("[DRED] VEH exception code=0x%08lX at %p\n",
 				static_cast<unsigned long>(code), ep->ExceptionRecord->ExceptionAddress);
-			D3D12LogLine(b);
 		}
 		// The crash is a CPU access violation the D3D12 log can't otherwise see. Dump WHERE: the faulting
 		// instruction (RIP), the bad pointer + read/write, and any return addresses on the stack that land
@@ -190,15 +170,13 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 					char full[MAX_PATH]; if (GetModuleFileNameA(hm, full, MAX_PATH))
 					{ const char* s = strrchr(full, '\\'); lstrcpynA(mod, s ? s + 1 : full, MAX_PATH); }
 				}
-				char b[288];
-				_snprintf_s(b, _TRUNCATE,
+				DebugLogFile(
 					"[crash] AV #%d %s addr=0x%llX rip=0x%llX (%s +0x%llX) rsp=0x%llX\n",
 					s_av, info[0] ? "WRITE" : "READ",
 					static_cast<unsigned long long>(info[1]),
 					static_cast<unsigned long long>(rip), mod,
 					static_cast<unsigned long long>(rip - modBase),
 					static_cast<unsigned long long>(ep->ContextRecord->Rsp));
-				D3D12LogLine(b);
 				// Scan the stack for return addresses in ANY loaded module -> a mini call chain.
 				const ULONG_PTR* sp = reinterpret_cast<const ULONG_PTR*>(ep->ContextRecord->Rsp);
 				int found = 0;
@@ -214,10 +192,8 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 						char full[MAX_PATH] = "?", nm[64] = "?";
 						if (GetModuleFileNameA(hmv, full, MAX_PATH)) { const char* s = strrchr(full, '\\'); lstrcpynA(nm, s ? s + 1 : full, 64); }
 						const ULONG_PTR vb = reinterpret_cast<ULONG_PTR>(hmv);
-						char sb[96];
-						_snprintf_s(sb, _TRUNCATE, "[crash]   stack[%d] -> %s+0x%llX\n", i, nm,
+						DebugLogFile("[crash]   stack[%d] -> %s+0x%llX\n", i, nm,
 							static_cast<unsigned long long>(v - vb));
-						D3D12LogLine(sb);
 						++found;
 					}
 				}
@@ -236,11 +212,9 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 				if (drr != S_OK)
 				{
 					s_dumped = true;
-					char b[112];
-					_snprintf_s(b, _TRUNCATE, "[DRED] exception 0x%08lX at %p; deviceRemovedReason=0x%08lX\n",
+					DebugLog("[DRED] exception 0x%08lX at %p; deviceRemovedReason=0x%08lX\n",
 						static_cast<unsigned long>(code), ep->ExceptionRecord->ExceptionAddress,
 						static_cast<unsigned long>(drr));
-					OutputDebugStringA(b);
 					DumpDRED(g_dredDevice);
 				}
 			}
@@ -255,13 +229,11 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 typedef HRESULT(WINAPI* D3DReflect_t)(LPCVOID, SIZE_T, REFIID, void**);
 static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
 {
-	if (!bc || !len) { char b[64]; _snprintf_s(b, _TRUNCATE, "[reflect] %s: no bytecode\n", stage); OutputDebugStringA(b); return; }
+	if (!bc || !len) { DebugLog("[reflect] %s: no bytecode\n", stage); return; }
 	{
 		const uint8_t* m = static_cast<const uint8_t*>(bc);
-		char b[96];
 		// DXBC magic "DXBC"; then scan the chunk FourCCs so we know if it's DXIL (DXIL/STAT) vs DXBC (RDEF).
-		_snprintf_s(b, _TRUNCATE, "[reflect] %s magic=%c%c%c%c chunks:", stage, m[0], m[1], m[2], m[3]);
-		OutputDebugStringA(b);
+		DebugLog("[reflect] %s magic=%c%c%c%c chunks:", stage, m[0], m[1], m[2], m[3]);
 		if (m[0] == 'D' && m[1] == 'X' && m[2] == 'B' && m[3] == 'C' && len > 0x20)
 		{
 			const uint32_t nchunks = *reinterpret_cast<const uint32_t*>(m + 0x1C);
@@ -270,11 +242,10 @@ static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
 			{
 				if (offs[i] + 4 > len) break;
 				const char* fc = reinterpret_cast<const char*>(m + offs[i]);
-				_snprintf_s(b, _TRUNCATE, "  %c%c%c%c", fc[0], fc[1], fc[2], fc[3]);
-				OutputDebugStringA(b);
+				DebugLog("  %c%c%c%c", fc[0], fc[1], fc[2], fc[3]);
 			}
 		}
-		OutputDebugStringA("\n");
+		DebugLog("\n");
 	}
 	// DXIL: parse the PSV0 (Pipeline State Validation) chunk for the resource bindings.
 	const uint8_t* m = static_cast<const uint8_t*>(bc);
@@ -287,13 +258,11 @@ static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
 		const char* fc = reinterpret_cast<const char*>(m + offs[i]);
 		if (fc[0] == 'P' && fc[1] == 'S' && fc[2] == 'V' && fc[3] == '0') { psv = m + offs[i] + 8; break; }
 	}
-	if (!psv) { char b[48]; _snprintf_s(b, _TRUNCATE, "[reflect] %s: no PSV0\n", stage); OutputDebugStringA(b); return; }
+	if (!psv) { DebugLog("[reflect] %s: no PSV0\n", stage); return; }
 	const uint8_t* p = psv;
 	const uint32_t riSize = *reinterpret_cast<const uint32_t*>(p); p += 4 + riSize;   // skip PSVRuntimeInfo
 	const uint32_t resCount = *reinterpret_cast<const uint32_t*>(p); p += 4;
-	char b[128];
-	_snprintf_s(b, _TRUNCATE, "[reflect] %s: PSV0 resources=%u\n", stage, resCount);
-	OutputDebugStringA(b);
+	DebugLog("[reflect] %s: PSV0 resources=%u\n", stage, resCount);
 	if (resCount)
 	{
 		const uint32_t biSize = *reinterpret_cast<const uint32_t*>(p); p += 4;
@@ -303,9 +272,8 @@ static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
 			const uint32_t resType = ri[0], space = ri[1], lo = ri[2], hi = ri[3];
 			const char* tn = resType == 1 ? "SAMPLER" : resType == 2 ? "CBV"
 				: (resType >= 3 && resType <= 5) ? "SRV" : (resType >= 6) ? "UAV" : "?";
-			_snprintf_s(b, _TRUNCATE, "[reflect]   %s %s(rt%u) space=%u reg=%u..%u\n",
+			DebugLog("[reflect]   %s %s(rt%u) space=%u reg=%u..%u\n",
 				stage, tn, resType, space, lo, hi);
-			OutputDebugStringA(b);
 		}
 	}
 }
@@ -313,11 +281,17 @@ static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
 static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 	ID3D12Device2* self, const D3D12_PIPELINE_STATE_STREAM_DESC* pDesc, REFIID riid, void** ppPSO)
 {
+	// Diagnostic stream dump — Debug builds only. In Release psoLog is statically null, so every
+	// `if (psoLog...)` block below is dead code the optimizer strips (no file, no strings).
+#ifdef _DEBUG
 	static FILE* psoLog = nullptr;
 	if (psoLog == nullptr)
 	{
 		fopen_s(&psoLog, "pso_stream.log", "w");
 	}
+#else
+	FILE* const psoLog = nullptr;
+#endif
 	// Dump the stream BEFORE forwarding, so it is on disk even if the call faults.
 	if (psoLog != nullptr && pDesc != nullptr)
 	{
@@ -427,9 +401,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 				const size_t vsLen = *reinterpret_cast<size_t*>(s + 0x020);
 				const void* psBc = *reinterpret_cast<void**>(s + 0x030);
 				const size_t psLen = *reinterpret_cast<size_t*>(s + 0x038);
-				char b[128];
-				_snprintf_s(b, _TRUNCATE, "[reflect] VS bc=%p len=%zu | PS bc=%p len=%zu\n", vsBc, vsLen, psBc, psLen);
-				OutputDebugStringA(b);
+				DebugLog("[reflect] VS bc=%p len=%zu | PS bc=%p len=%zu\n", vsBc, vsLen, psBc, psLen);
 				ReflectShaderBindings(vsBc, vsLen, "VS");
 				ReflectShaderBindings(psBc, psLen, "PS");
 			}
@@ -630,8 +602,13 @@ static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 		else if (d->Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER && !g_dllRingSamplerHeap)
 			g_dllRingSamplerHeap = heap;
 	}
+	// Heap-creation trace — Debug builds only (see psoLog note in HookedCreatePipelineState).
+#ifdef _DEBUG
 	static FILE* f = nullptr;
 	if (f == nullptr) fopen_s(&f, "heaps.log", "w");
+#else
+	FILE* const f = nullptr;
+#endif
 	if (f != nullptr && d != nullptr)
 	{
 		void* h = ppv ? *ppv : nullptr;
@@ -748,7 +725,8 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
         RECT clientArea { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
 		AdjustWindowRect(&clientArea, style, FALSE);
 
-		wil::unique_hwnd window(CreateWindowExW(0, L"YAKUZA_VF5FS", L"Virtua Fighter 5: Final Showdown", style, CW_USEDEFAULT, CW_USEDEFAULT,
+		const std::wstring windowTitle = UTF8ToWchar(gGeneral.GetArcadeGameName());
+		wil::unique_hwnd window(CreateWindowExW(0, L"YAKUZA_VF5FS", windowTitle.c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT,
 			clientArea.right - clientArea.left, clientArea.bottom - clientArea.top, nullptr, nullptr, instance, nullptr));
 		THROW_LAST_ERROR_IF_NULL(window);
 
@@ -788,7 +766,7 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 			{
 				dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
 				dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-				OutputDebugStringA("[DRED] enabled auto-breadcrumbs + page-fault reporting\n");
+				DebugLog("[DRED] enabled auto-breadcrumbs + page-fault reporting\n");
 			}
 		}
 
@@ -1043,13 +1021,19 @@ bool RenderWindow::EnsureCrtResources()
 		m_crtTex.reset();
 		m_crtRTV.reset();
 		m_crtSRV.reset();
-		char b[512];
-		_snprintf_s(b, _TRUNCATE, "[crt] shader setup failed hr=0x%08lX: %s\n", static_cast<unsigned long>(hr),
+		DebugLog("[crt] shader setup failed hr=0x%08lX: %s\n", static_cast<unsigned long>(hr),
 			errors ? static_cast<const char*>(errors->GetBufferPointer()) : "(no compiler output)");
-		OutputDebugStringA(b);
 		return false;
 	}
 	return true;
+}
+
+void RenderWindow::ClearBackbuffer()
+{
+	const FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	ID3D11RenderTargetView* rtv = m_backBufferRTV.get();
+	m_deviceContext->OMSetRenderTargets(1, &rtv, nullptr);
+	m_deviceContext->ClearRenderTargetView(rtv, clearColor);
 }
 
 void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend)
@@ -1231,10 +1215,10 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 		const bool readable = (rs & kShaderRead) != 0;
 		if (readable && d.Width == 496 && d.Height == 384) { rt2d = raw; st2d = rs; }
 	}
-	{ static int s_srcLog = 0; if (s_srcLog < 12) { ++s_srcLog; char b[192];
-		_snprintf_s(b, _TRUNCATE, "[blit] src: texRaw=%p resolveDst=%p rt2d=%p (texRaw==resolveDst:%d)\n",
+	{ static int s_srcLog = 0; if (s_srcLog < 12) { ++s_srcLog;
+		DebugLogFile("[blit] src: texRaw=%p resolveDst=%p rt2d=%p (texRaw==resolveDst:%d)\n",
 			static_cast<void*>(texRaw), static_cast<void*>(GetStfResolveDst()),
-			static_cast<void*>(rt2d), texRaw == GetStfResolveDst() ? 1 : 0); D3D12LogLine(b); } }
+			static_cast<void*>(rt2d), texRaw == GetStfResolveDst() ? 1 : 0); } }
 	if (!rt3d && !rt2d) return; // nothing shader-readable yet — skip (don't composite the black display_tex)
 
 	// Per-layer 11on12 wrap + SRV cache (two live layers, headroom for RT churn).
@@ -1249,7 +1233,7 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 	auto blitLayer = [&](ID3D12Resource* srcRt, D3D12_RESOURCE_STATES srcState, bool alphaBlend)
 	{
 		ID3D12Resource* tex = nullptr;
-		if (!SafeAcquireResource(srcRt, &tex)) { D3D12LogLine("[blit] skip: src not a live resource\n"); return; }
+		if (!SafeAcquireResource(srcRt, &tex)) { DebugLogFile("[blit] skip: src not a live resource\n"); return; }
 		struct RelGuard { ID3D12Resource* r; ~RelGuard() { if (r) r->Release(); } } relGuard{ tex };
 
 		LayerCache* c = nullptr;
@@ -1263,10 +1247,8 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 			flags.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 			HRESULT hrw = m_d3d11on12->CreateWrappedResource(
 				tex, &flags, srcState, srcState, IID_PPV_ARGS(c->wrapped.put()));
-			char b[160];
-			_snprintf_s(b, _TRUNCATE, "[blit] CreateWrappedResource hr=0x%08lX wrapped=%p tex=%p\n",
+			DebugLogFile("[blit] CreateWrappedResource hr=0x%08lX wrapped=%p tex=%p\n",
 				static_cast<unsigned long>(hrw), static_cast<void*>(c->wrapped.get()), static_cast<void*>(tex));
-			D3D12LogLine(b);
 		}
 		if (!c->wrapped) { c->tex = nullptr; return; }
 
@@ -1317,14 +1299,12 @@ void RenderWindow::RenderImGui()
 		{
 			const ImDrawData* dd = ImGui::GetDrawData();
 			const ImGuiIO& io = ImGui::GetIO();
-			char b[224];
-			_snprintf_s(b, _TRUNCATE,
+			DebugLog(
 				"[imgui-canary] valid=%d cmdLists=%d vtx=%d idx=%d display=%.0fx%.0f rtv=%p ctx=%p\n",
 				dd ? dd->Valid : -1, dd ? dd->CmdListsCount : -1,
 				dd ? dd->TotalVtxCount : -1, dd ? dd->TotalIdxCount : -1,
 				io.DisplaySize.x, io.DisplaySize.y,
 				static_cast<void*>(m_backBufferRTV.get()), static_cast<void*>(m_deviceContext.get()));
-			OutputDebugStringA(b);
 			s_n++;
 		}
 	}
@@ -1787,11 +1767,7 @@ void RenderWindow::ResizeOn12(UINT w, UINT h)
 	THROW_IF_FAILED(m_bbBarrierList->Close());
 
 	const HRESULT hr = m_swapChain->ResizeBuffers(kBufferCount, w, h, OUTPUT_FORMAT, 0);
-	{
-		char b[128];
-		_snprintf_s(b, _TRUNCATE, "[resize] ResizeBuffers %ux%u hr=0x%08lX\n", w, h, static_cast<unsigned long>(hr));
-		D3D12LogWrite(b);
-	}
+	DebugLogFile("[resize] ResizeBuffers %ux%u hr=0x%08lX\n", w, h, static_cast<unsigned long>(hr));
 	THROW_IF_FAILED(hr);
 	CreateWrappedBackbuffers();
 }
@@ -1856,15 +1832,13 @@ void RenderWindow::BeginFrame()
 				sc3->GetDesc(&sd);
 				ID3D12Resource* live = nullptr;
 				const HRESULT gb = sc3->GetBuffer(idx, IID_PPV_ARGS(&live));
-				char b[256];
-				_snprintf_s(b, _TRUNCATE,
+				DebugLog(
 					"[bb-canary] idx=%u desc=%ux%u count=%u live=%p tracked=%p SAME=%d wrapped=%p gb=0x%08lX\n",
 					idx, sd.BufferDesc.Width, sd.BufferDesc.Height, sd.BufferCount,
 					static_cast<void*>(live), static_cast<void*>(m_backbuffers[idx].get()),
 					(live == m_backbuffers[idx].get()) ? 1 : 0,
 					static_cast<void*>(m_wrappedBackbuffers[idx].get()),
 					static_cast<unsigned long>(gb));
-				OutputDebugStringA(b);
 				if (live) live->Release();
 				s_chk++;
 			}
