@@ -134,10 +134,17 @@ private:
 	wil::com_ptr<ID3D12Device>        m_d3d12Device;
 	wil::com_ptr<ID3D12CommandQueue>  m_cmdQueue;
 	wil::com_ptr<ID3D11On12Device>    m_d3d11on12;
+	// GetCurrentBackBufferIndex lives on IDXGISwapChain3; queried once at creation rather than
+	// re-QI'd (and released) twice per frame from BeginFrame/EndFrame.
+	wil::com_ptr<IDXGISwapChain3>     m_swapChain3;
 
 	static constexpr UINT kBufferCount = 2;
 	wil::com_ptr<ID3D12Resource> m_backbuffers[kBufferCount];
 	wil::com_ptr<ID3D11Resource> m_wrappedBackbuffers[kBufferCount];
+	// One RTV per wrapped backbuffer, built with the wrappers. The views outlive an
+	// Acquire/Release cycle, so BeginFrame just selects one instead of creating a fresh RTV
+	// (and releasing last frame's) on every single frame.
+	wil::com_ptr<ID3D11RenderTargetView> m_backBufferRTVs[kBufferCount];
 
 	std::atomic<uint64_t> m_pendingResize { 0 }; // packed (w << 32) | h, see RequestResize
 	wil::com_ptr<ID3D12Fence> m_resizeFence;

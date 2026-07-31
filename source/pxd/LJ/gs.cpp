@@ -129,215 +129,41 @@ namespace pxd
 
 		namespace sbgl {
 
+			// The pxd generation this file models is DX12-native: RenderWindow always creates a
+			// D3D12 device (it drives the swapchain and hands the modules an 11-on-12 D3D11 device
+			// purely for YAMP's own composite/overlay), so there is no DX11 branch to take here.
+			// The engine reads m_pD3DDeviceContext and m_DXGIAdapterDesc out of this object, so both
+			// are still filled — the context deliberately null, since DX12 has no immediate context.
 			void cdevice::initialize(const RenderWindow& renderWindow)
 			{
-				// --- DirectX 12 conditional path (native DX12)
-				if (auto* d3d12 = renderWindow.GetD3D12Device())
+				m_pD3DDeviceContext = nullptr;
+
+				m_DXGIAdapterDesc = {};
+				wil::com_ptr<IDXGIFactory6> factory;
+				if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
 				{
-					DebugLog("[sbgl::cdevice] Initializing using native DirectX 12 device.\n");
-
-					// Create a dummy DX11 context replacement if necessary
-					m_pD3DDeviceContext = nullptr; // DX12 has no immediate context
-
-					// Local factory; no RenderWindow dependency
-					m_DXGIAdapterDesc = {};
-					wil::com_ptr<IDXGIFactory6> factory;
-					if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
-					{
-						wil::com_ptr<IDXGIAdapter1> adapter;
-						if (SUCCEEDED(factory->EnumAdapters1(0, adapter.addressof())))
-							adapter->GetDesc1(&m_DXGIAdapterDesc);
-					}
-
-
-					// Initialize swap chain via DX12 path
-					m_swap_chain.initialize(renderWindow);
-
-					// Initialize DX12-specific pipeline state or queues if you need them
-					// (store queue for later submissions, etc.)
-					// Example:
-					// ID3D12CommandQueue* queue = renderWindow.GetD3D12CommandQueue();
-
-					// Since no D3D11 device/context exist here, skip private data setup
-					return; // skip the DX11 initialize logic entirely
+					wil::com_ptr<IDXGIAdapter1> adapter;
+					if (SUCCEEDED(factory->EnumAdapters1(0, adapter.addressof())))
+						adapter->GetDesc1(&m_DXGIAdapterDesc);
 				}
-				else {
-					m_swap_chain.initialize(renderWindow);
-					m_pD3DDeviceContext = renderWindow.GetD3D11DeviceContext();
 
-					std::fill(std::begin(m_p_border_color), std::end(m_p_border_color), _mm_set1_ps(std::numeric_limits<float>::quiet_NaN()));
-					m_p_border_color[0] = _mm_setzero_ps();
-					m_p_border_color[1] = _mm_set_ps(0.0f, 0.0f, 0.0f, 1.0f);
-					m_p_border_color[2] = _mm_set1_ps(1.0f);
-
-					// TODO: YLAD presents an empty frame here... Yakuza 6 doesn't seem to
-					// The game sets private data, then renders a frame, then resets private data
-					// For now, just do it directly
-					m_context_desc.reset(nullptr, 0.0f, 0, 0);
-					void* dataPtr = &m_context_desc;
-					m_pD3DDeviceContext->SetPrivateData(ccontext_native::GUID_ContextPrivateData, sizeof(dataPtr), &dataPtr);
-				}
+				m_swap_chain.initialize(renderWindow);
 			}
 
+			// DX12-native generation (see cdevice::initialize): the modules render through their own
+			// D3D12 device and never read this object's DX11 RTV/DSV fields, so the only thing the
+			// engine needs from here is the swapchain pointer — the present path reaches it as
+			// sm_context->sbgl_device.m_swap_chain.m_pDXGISwapChain. RenderWindow owns the swapchain
+			// for the process lifetime, so this is a borrowed raw pointer.
+			//
+			// This used to build an RTV heap + per-backbuffer RTVs and a DSV heap + a full-window
+			// committed depth buffer here. Every one of those went into a local wil::com_ptr and was
+			// released again on return (the original note admitted as much: "we don't store RTV/DSV
+			// heaps or resources"), so it allocated and freed a depth target every boot to no effect.
 			HRESULT cswap_chain_common::initialize(const RenderWindow& window)
 			{
-				// --- DirectX 12 conditional path (native DX12)
-			// --- DirectX 12 conditional path (native DX12; skip DX11 below if this runs)
-				if (ID3D12Device* d3d12 = window.GetD3D12Device())
-				{
-					DebugLog("[sbgl::cswap_chain_common] DX12 path: building RTV/DSV.\n");
-
-					HRESULT hr = S_OK;
-
-					// Validate swapchain and upcast to IDXGISwapChain3
-					wil::com_ptr<IDXGISwapChain> scBase(window.GetSwapChain());
-					if (!scBase)
-						return E_POINTER;
-
-					// Store the swapchain so the present path can reach it via
-					// sm_context->sbgl_device.m_swap_chain.m_pDXGISwapChain->Present(1,0). The DX11
-					// branch below sets this; the DX12 branch only used the swapchain locally for
-					// RTV/DSV setup, leaving m_pDXGISwapChain null -> Present on a null ptr AVs.
-					// RenderWindow owns the swapchain for the process lifetime (borrowed raw ptr).
-					m_pDXGISwapChain = window.GetSwapChain();
-
-					wil::com_ptr<IDXGISwapChain3> sc3 = scBase.try_query<IDXGISwapChain3>();
-					if (!sc3)
-						return E_NOINTERFACE;
-
-					// Buffer count (RenderWindow uses 2)
-					const UINT kBufferCount = 2;
-
-					// ------------------------------
-					// RTV HEAP (DX12 requires a heap)
-					// ------------------------------
-					D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
-					rtvHeapDesc.NumDescriptors = kBufferCount;
-					rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-					rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
-					wil::com_ptr<ID3D12DescriptorHeap> rtvHeap;
-					hr = d3d12->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&rtvHeap));
-					if (FAILED(hr)) return hr;
-
-					const UINT rtvInc = d3d12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-					D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
-
-					// Create RTVs for all backbuffers
-					for (UINT i = 0; i < kBufferCount; ++i)
-					{
-						wil::com_ptr<ID3D12Resource> backBuffer;
-						hr = sc3->GetBuffer(i, IID_PPV_ARGS(&backBuffer));
-						if (FAILED(hr)) return hr;
-
-						D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
-						rtvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; // matches RenderWindow output format
-						rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-
-						d3d12->CreateRenderTargetView(backBuffer.get(), &rtvDesc, rtvHandle);
-						rtvHandle.ptr += rtvInc; // advance handle
-					}
-
-					// --------------------------------
-					// DSV (depth buffer + DSV heap)
-					// --------------------------------
-					D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc{};
-					dsvHeapDesc.NumDescriptors = 1;
-					dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-					dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
-					wil::com_ptr<ID3D12DescriptorHeap> dsvHeap;
-					hr = d3d12->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&dsvHeap));
-					if (FAILED(hr)) return hr;
-
-					D3D12_RESOURCE_DESC depthDesc{};
-					depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-					depthDesc.Alignment = 0;
-					depthDesc.Width = window.GetWidth();
-					depthDesc.Height = window.GetHeight();
-					depthDesc.DepthOrArraySize = 1;
-					depthDesc.MipLevels = 1;
-					depthDesc.Format = DXGI_FORMAT_D32_FLOAT; // depth only
-					depthDesc.SampleDesc.Count = 1;
-					depthDesc.SampleDesc.Quality = 0;
-					depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-					depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-					D3D12_CLEAR_VALUE clearValue{};
-					clearValue.Format = DXGI_FORMAT_D32_FLOAT;
-					clearValue.DepthStencil.Depth = 1.0f;
-					clearValue.DepthStencil.Stencil = 0;
-
-					D3D12_HEAP_PROPERTIES heapProps{};
-					heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-					heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-					heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-					heapProps.CreationNodeMask = 1;
-					heapProps.VisibleNodeMask = 1;
-
-					wil::com_ptr<ID3D12Resource> depthBuffer;
-					hr = d3d12->CreateCommittedResource(
-						&heapProps,
-						D3D12_HEAP_FLAG_NONE,
-						&depthDesc,
-						D3D12_RESOURCE_STATE_DEPTH_WRITE,
-						&clearValue,
-						IID_PPV_ARGS(&depthBuffer)
-					);
-					if (FAILED(hr)) return hr;
-
-					D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-					dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
-					dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-					dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
-
-					d3d12->CreateDepthStencilView(depthBuffer.get(), &dsvDesc, dsvHeap->GetCPUDescriptorHandleForHeapStart());
-
-					// NOTE: We don't store RTV/DSV heaps or resources in cswap_chain_common because
-					// you asked for minimal edits. If you need them later, add fields to the class.
-					return S_OK; // all good; skip DX11 path
-				}
-				else {
-					// TODO: Validate
-					constexpr sbgl_format_t depth_format = SBGL_FORMAT_D32_F_S8X24_U;
-
-					ID3D11Device* device = window.GetD3D11Device();
-
-					m_pDXGISwapChain = window.GetSwapChain();
-
-					wil::com_ptr<ID3D11Texture2D> swapChainBuffer;
-					HRESULT hr = m_pDXGISwapChain->GetBuffer(0, IID_PPV_ARGS(swapChainBuffer.addressof()));
-					if (SUCCEEDED(hr))
-					{
-						hr = device->CreateRenderTargetView(swapChainBuffer.get(), nullptr, &m_pD3DRenderTargetView);
-						if (SUCCEEDED(hr))
-						{
-							D3D11_TEXTURE2D_DESC dsDesc;
-							dsDesc.Width = window.GetWidth();
-							dsDesc.Height = window.GetHeight();
-							dsDesc.MipLevels = 1;
-							dsDesc.ArraySize = 1;
-							dsDesc.Format = static_cast<DXGI_FORMAT>((depth_format >> 7) & 0x7F);
-							dsDesc.SampleDesc.Count = 1;
-							dsDesc.SampleDesc.Quality = 0;
-							dsDesc.Usage = D3D11_USAGE_DEFAULT;
-							dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-							dsDesc.CPUAccessFlags = 0;
-							dsDesc.MiscFlags = 0;
-							hr = device->CreateTexture2D(&dsDesc, nullptr, &m_pD3DDepthStencilBuffer);
-							if (SUCCEEDED(hr))
-							{
-								D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc;
-								dsvDesc.Format = static_cast<DXGI_FORMAT>(depth_format & 0x7F);
-								dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-								dsvDesc.Flags = 0;
-								dsvDesc.Texture2D.MipSlice = 0;
-								hr = device->CreateDepthStencilView(m_pD3DDepthStencilBuffer, &dsvDesc, &m_pD3DDepthStencilView);
-							}
-						}
-					}
-					return hr;
-				}
+				m_pDXGISwapChain = window.GetSwapChain();
+				return m_pDXGISwapChain != nullptr ? S_OK : E_POINTER;
 			}
 
 			void ccontext_native::desc_st::reset(ID3D11RenderTargetView* pDepthStencilView, float depth_clear_value, unsigned int width, unsigned int height)
@@ -349,7 +175,7 @@ namespace pxd
 				}
 				m_num_slots = 0;
 				m_width = width;
-				m_height = 0;
+				m_height = height;
 				m_depth_clear_value = depth_clear_value;
 			}
 
@@ -385,7 +211,9 @@ namespace pxd
 
 		void cgs_shader_uniform::initialize()
 		{
-			m_clip_far = 0.0f;
+			// (was m_clip_far twice — m_clip_near was left holding whatever the uninitialized
+			// `new cgs_shader_uniform` allocation contained, 0xCD fill under the debug CRT.)
+			m_clip_near = 0.0f;
 			m_clip_far = 1.0f;
 			m_data.m_data_material_modify.saturation = 1.0f;
 			m_data.m_data_material_modify.palette0 = -1;

@@ -145,7 +145,7 @@ namespace vf5fs
 				}
 				m_num_slots = 0;
 				m_width = width;
-				m_height = 0;
+				m_height = height;
 				m_depth_clear_value = depth_clear_value;
 			}
 
@@ -174,7 +174,9 @@ namespace vf5fs
 
 		void cgs_shader_uniform::initialize()
 		{
-			m_clip_far = 0.0f;
+			// (was m_clip_far twice — m_clip_near was left holding whatever the uninitialized
+			// `new cgs_shader_uniform` allocation contained, 0xCD fill under the debug CRT.)
+			m_clip_near = 0.0f;
 			m_clip_far = 1.0f;
 			m_data.m_data_material_modify.saturation = 1.0f;
 			m_data.m_data_material_modify.palette0 = -1;

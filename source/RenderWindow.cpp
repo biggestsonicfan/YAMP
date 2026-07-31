@@ -835,6 +835,8 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 			m_cmdQueue.get(), window.get(), &scd, nullptr, nullptr, &sc1));
 
 		m_swapChain = std::move(sc1);
+		// BeginFrame/EndFrame need GetCurrentBackBufferIndex every frame; resolve the interface once.
+		m_swapChain3 = m_swapChain.query<IDXGISwapChain3>();
         }
 
         // --- ImGui init (DX11 backend)
@@ -1628,18 +1630,20 @@ void RenderWindow::CalculateViewport()
 	m_requiresClear = m_viewport.TopLeftX != 0 || m_viewport.TopLeftY != 0;
 }
 
-// Defined in HostCdevice.cpp: register a resource for per-transition barrier logging (diagnostic).
+// Defined in HostCdevice.cpp: the module's barrier corrector must never rewrite transitions on the
+// swapchain backbuffers (those are driven by 11on12 + TransitionBackbufferToRenderTarget).
 void RegisterWatchResourceNow(ID3D12Resource* r);
 
 void RenderWindow::CreateWrappedBackbuffers()
 {
 	// clean previous
 	for (UINT i = 0; i < kBufferCount; ++i) {
+		m_backBufferRTVs[i].reset();
 		m_wrappedBackbuffers[i].reset();
 		m_backbuffers[i].reset();
 	}
 
-	// fetch 12 backbuffers and wrap for 11
+	// fetch 12 backbuffers, wrap for 11, and build the RTV each frame will select
 	for (UINT i = 0; i < kBufferCount; ++i) {
 		THROW_IF_FAILED(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_backbuffers[i])));
 
@@ -1653,23 +1657,24 @@ void RenderWindow::CreateWrappedBackbuffers()
 			D3D12_RESOURCE_STATE_PRESENT,         // after DX11 work
 			IID_PPV_ARGS(&m_wrappedBackbuffers[i])));
 
-		// Watch these backbuffers in the ResourceBarrier hook so we can see the exact Acquire/Release
-		// transition sequence (they persistently show COMMON at draw -> id=527/538 -> black present).
+		THROW_IF_FAILED(m_device->CreateRenderTargetView(
+			m_wrappedBackbuffers[i].get(), nullptr, m_backBufferRTVs[i].put()));
+
+		// Exclude them from the module barrier corrector (see RegisterWatchResourceNow above).
 		RegisterWatchResourceNow(m_backbuffers[i].get());
 	}
 
-	// Make an RTV for the current buffer (0 for boot; we�ll update each frame)
-	wil::com_ptr<ID3D11Resource> res = m_wrappedBackbuffers[0];
-	THROW_IF_FAILED(m_device->CreateRenderTargetView(res.get(), nullptr, &m_backBufferRTV));
+	m_backBufferRTV = m_backBufferRTVs[0]; // boot value; BeginFrame selects the live one
 }
 
 void RenderWindow::ResizeOn12(UINT w, UINT h)
 {
-	// ResizeBuffers fails on ANY outstanding backbuffer reference: drop the RTV + the 11on12
+	// ResizeBuffers fails on ANY outstanding backbuffer reference: drop the RTVs + the 11on12
 	// wrappers + our ID3D12Resource refs, flush whatever the D3D11 context still holds deferred,
 	// and wait for the D3D12 queue to finish with the old buffers before resizing.
 	m_backBufferRTV.reset();
 	for (UINT i = 0; i < kBufferCount; ++i) {
+		m_backBufferRTVs[i].reset();
 		m_wrappedBackbuffers[i].reset();
 		m_backbuffers[i].reset();
 	}
@@ -1743,29 +1748,26 @@ void RenderWindow::BeginFrame()
 	// Between frames and before any wrapped-resource Acquire: safe point to follow a window resize.
 	ApplyPendingResize();
 
-	if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>()) {
-		const UINT idx = sc3->GetCurrentBackBufferIndex();
+	if (!m_swapChain3) return;
+	const UINT idx = m_swapChain3->GetCurrentBackBufferIndex();
 
-		// Put the backbuffer into RENDER_TARGET BEFORE handing it to 11on12 (which won't do it itself).
-		TransitionBackbufferToRenderTarget(idx);
-		ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
-		m_d3d11on12->AcquireWrappedResources(res, 1);
-		THROW_IF_FAILED(m_device->CreateRenderTargetView(res[0], nullptr, m_backBufferRTV.put()));
-	}
+	// Put the backbuffer into RENDER_TARGET BEFORE handing it to 11on12 (which won't do it itself).
+	TransitionBackbufferToRenderTarget(idx);
+	ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
+	m_d3d11on12->AcquireWrappedResources(res, 1);
+	m_backBufferRTV = m_backBufferRTVs[idx];
 }
 
 void RenderWindow::EndFrame()
 {
-	// Prefer non-throwing try_query and early return.
-	if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>()) {
-		const UINT idx = sc3->GetCurrentBackBufferIndex();
+	if (!m_swapChain3) return;
+	const UINT idx = m_swapChain3->GetCurrentBackBufferIndex();
 
-		ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
+	ID3D11Resource* const res[] = { m_wrappedBackbuffers[idx].get() };
 
-		// Pair with AcquireWrappedResources from BeginFrame
-		m_d3d11on12->ReleaseWrappedResources(res, 1);
+	// Pair with AcquireWrappedResources from BeginFrame
+	m_d3d11on12->ReleaseWrappedResources(res, 1);
 
-		// Often not strictly required each frame, but OK if you need it.
-		m_deviceContext->Flush();
-	}
+	// Hand the recorded D3D11 work to the D3D12 queue before the caller Presents.
+	m_deviceContext->Flush();
 }
