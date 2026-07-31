@@ -6,7 +6,7 @@
 #include <string>
 #include <tuple>
 
-#include "m2ftg/M2Input.h"
+#include "input/Input.h"
 
 class YAMPUserInterface
 {
@@ -72,17 +72,18 @@ private:
 	bool m_arcadeMode = false;
 	bool m_circleConfirm = false;
 	uint32_t m_language = 1;
+	int m_volumePercent = 100;
 
 	// Sonic the Fighters (see YAMPSettings for field semantics)
-	uint32_t m_stfAspect = 0;
-	bool m_stfCrtFilter = false;
-	uint32_t m_stfDifficulty = 1;
-	uint32_t m_stfCountry = 0;
-	bool m_stfFreeplay = true;
-	bool m_stfVersusMode = false;
-	M2Input::KeyBinds m_stfKeyBinds = M2Input::DEFAULT_KEY_BINDS;
-	M2Input::PadBinds m_stfPadBinds = M2Input::DEFAULT_PAD_BINDS;
-	int32_t m_stfPadIndex[2] = { 0, 1 };
+	uint32_t m_m2Aspect = 0;
+	bool m_m2CrtFilter = false;
+	uint32_t m_m2Difficulty = 1;
+	uint32_t m_m2Country = 0;
+	bool m_m2Freeplay = true;
+	bool m_m2VersusMode = false;
+	Input::KeyBinds m_m2KeyBinds = Input::DEFAULT_KEY_BINDS;
+	Input::PadBinds m_m2PadBinds = Input::DEFAULT_PAD_BINDS;
+	int32_t m_m2PadIndex[2] = { 0, 1 };
 
 	// Virtua Fighter 2 (see YAMPSettings for field semantics)
 	bool m_vf2Version20 = false;

@@ -1,9 +1,11 @@
 // GameLauncher.cpp
 // The no-argument boot menu: discovers every arcade module YAMP can host and lets the user
 // pick one. Discovery checks the folders the per-game LoadDLL implementations already accept
-// (next to YAMP.exe / the documented subfolder) plus the parent games' own Steam installs —
-// every library from the registry SteamPath + steamapps/libraryfolders.vdf, scanning all of
-// steamapps/common so renamed install folders still match by DLL layout.
+// (next to YAMP.exe / the documented subfolder) plus every game install root Verify::
+// GameInstallRoots() knows about: each Steam library's steamapps/common/* (from the registry
+// SteamPath + steamapps/libraryfolders.vdf, so renamed install folders still match by DLL
+// layout), every GOG game from the registry, and — for installs no store knows about — each
+// folder sitting beside YAMP.exe.
 //
 // "Play" relaunches YAMP.exe as a child process with the game's command-line switch and the
 // working directory set to the discovered game folder, so the per-game boot paths (which
@@ -12,14 +14,13 @@
 #include "GameLauncher.h"
 
 #include "YAMPGeneral.h"
+#include "GameVerify.h"
 #include "RenderWindow.h"
 #include "DebugLog.h"
 #include "imgui/imgui.h"
 
 #include <filesystem>
-#include <fstream>
 #include <iterator>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,32 @@ namespace Launcher
 			{ L"vf5fs\\vf5fs-pxd-w64-Retail Steam.dll", L"." },
 			{ L"media\\vf5fs-pxd-w64-Retail Steam.dll", L"media" },
 		};
+		// Lost Judgment's VF5FS: a DX12 build of the same game, in runtime/media/vf5fs next to
+		// vf5fs_data.par + vf5fs_media, so the boot CWD is that folder itself.
+		constexpr DllCandidate VF5FS_LJ_CANDIDATES[] = {
+			{ L"vf5fs-pxd-w64-d3d12_retail.dll", L"." },
+			{ L"vf5fs\\vf5fs-pxd-w64-d3d12_retail.dll", L"vf5fs" },
+			{ L"runtime\\media\\vf5fs\\vf5fs-pxd-w64-d3d12_retail.dll", L"runtime\\media\\vf5fs" },
+		};
+
+		// Yakuza: Like a Dragon's own VF5FS, in runtime/media/vf5fs/ next to vf5fs_media/.
+		constexpr DllCandidate VF5FS_YLAD_CANDIDATES[] = {
+			{ L"vf5fs-pxd-w64-retail.dll", L"." },
+			{ L"vf5fs\\vf5fs-pxd-w64-retail.dll", L"vf5fs" },
+			{ L"runtime\\media\\vf5fs\\vf5fs-pxd-w64-retail.dll", L"runtime\\media\\vf5fs" },
+		};
+
+		// Yakuza Kiwami 2 (GOG) keeps both its modules in <install>/m2ftg/ next to rom/ and w64/.
+		constexpr DllCandidate VF2_K2_CANDIDATES[] = {
+			{ L"vf2-pxd-w64-gog_retail.dll", L"." },
+			{ L"m2ftg\\vf2-pxd-w64-gog_retail.dll", L"m2ftg" },
+		};
+
+		// ...and "omg" = Operation Moon Gate, i.e. Virtual On, is the other one.
+		constexpr DllCandidate VON_K2_CANDIDATES[] = {
+			{ L"omg-pxd-w64-gog_retail.dll", L"." },
+			{ L"m2ftg\\omg-pxd-w64-gog_retail.dll", L"m2ftg" },
+		};
 
 		constexpr GameInfo GAMES[] = {
 			{ YAMPGeneral::GameId::StF, "Sonic the Fighters", "Lost Judgment", L"-stf",
@@ -85,6 +112,14 @@ namespace Launcher
 				VF2_CANDIDATES, std::size(VF2_CANDIDATES) },
 			{ YAMPGeneral::GameId::VF5FS, "Virtua Fighter 5: Final Showdown", "Yakuza 6: The Song of Life", L"-vf5fs",
 				VF5FS_CANDIDATES, std::size(VF5FS_CANDIDATES) },
+			{ YAMPGeneral::GameId::VF5FS_LJ, "Virtua Fighter 5: Final Showdown", "Lost Judgment", L"-vf5fs-lj",
+				VF5FS_LJ_CANDIDATES, std::size(VF5FS_LJ_CANDIDATES) },
+			{ YAMPGeneral::GameId::VF2_K2, "Virtua Fighter 2", "Yakuza Kiwami 2", L"-vf2-k2",
+				VF2_K2_CANDIDATES, std::size(VF2_K2_CANDIDATES) },
+			{ YAMPGeneral::GameId::VON_K2, "Virtual On", "Yakuza Kiwami 2", L"-von-k2",
+				VON_K2_CANDIDATES, std::size(VON_K2_CANDIDATES) },
+			{ YAMPGeneral::GameId::VF5FS_YLAD, "Virtua Fighter 5: Final Showdown", "Yakuza: Like a Dragon",
+				L"-vf5fs-ylad", VF5FS_YLAD_CANDIDATES, std::size(VF5FS_YLAD_CANDIDATES) },
 		};
 
 		struct SearchRoot
@@ -101,74 +136,14 @@ namespace Launcher
 			fs::path bootDir;
 			std::string dllPathUtf8;
 			std::string sourceLabel;
+			// Filled in for every found module: the DLL's checksum verdict and whether the
+			// parent game is installed. A blocking verdict here is the same one the game's own
+			// boot path would hit, so the launcher shows it up front and refuses to Play.
+			Verify::ModuleResult module;
+			Verify::ParentResult parent;
+
+			bool CanPlay() const { return found && !module.Blocks() && !parent.Blocks(); }
 		};
-
-		// Steam base install + any secondary library folders from libraryfolders.vdf.
-		std::vector<fs::path> SteamLibraryRoots()
-		{
-			std::vector<fs::path> bases;
-			auto add = [&bases](const fs::path& raw) {
-				std::error_code ec;
-				fs::path p = fs::weakly_canonical(raw, ec);
-				if (ec || p.empty()) p = raw;
-				if (!fs::is_directory(p, ec) || ec) return;
-				for (const fs::path& existing : bases)
-				{
-					if (existing == p) return;
-				}
-				bases.push_back(std::move(p));
-			};
-
-			wchar_t steamPath[512];
-			DWORD steamPathSize = sizeof(steamPath);
-			if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath",
-				RRF_RT_REG_SZ, nullptr, steamPath, &steamPathSize) == ERROR_SUCCESS)
-			{
-				add(steamPath);
-			}
-			add(L"C:\\Program Files (x86)\\Steam");
-			add(L"C:\\Program Files\\Steam");
-
-			// Secondary libraries: every "path" value in each base's libraryfolders.vdf.
-			const size_t primaryCount = bases.size();
-			for (size_t i = 0; i < primaryCount; i++)
-			{
-				std::ifstream vdf(bases[i] / L"steamapps" / L"libraryfolders.vdf");
-				if (!vdf) continue;
-				std::stringstream buffer;
-				buffer << vdf.rdbuf();
-				const std::string text = buffer.str();
-
-				size_t pos = 0;
-				while ((pos = text.find("\"path\"", pos)) != std::string::npos)
-				{
-					pos += 6;
-					const size_t open = text.find('"', pos);
-					if (open == std::string::npos) break;
-					const size_t close = text.find('"', open + 1);
-					if (close == std::string::npos) break;
-
-					std::string value = text.substr(open + 1, close - open - 1);
-					std::string unescaped;
-					unescaped.reserve(value.size());
-					for (size_t j = 0; j < value.size(); j++)
-					{
-						if (value[j] == '\\' && j + 1 < value.size() && value[j + 1] == '\\')
-						{
-							unescaped += '\\';
-							j++;
-						}
-						else
-						{
-							unescaped += value[j];
-						}
-					}
-					add(fs::u8path(unescaped));
-					pos = close + 1;
-				}
-			}
-			return bases;
-		}
 
 		std::vector<SearchRoot> CollectSearchRoots()
 		{
@@ -200,17 +175,17 @@ namespace Launcher
 				}
 			}
 
-			// Every install under each Steam library's steamapps/common: matching by DLL
-			// layout instead of by folder name keeps renamed installs discoverable.
-			for (const fs::path& lib : SteamLibraryRoots())
+			// Every installed game on the system, from every store YAMP knows (Steam libraries
+			// and GOG). Matching by DLL layout rather than by folder name keeps renamed installs
+			// discoverable, and the label already says which store it came from.
+			for (Verify::InstallRoot& install : Verify::GameInstallRoots())
 			{
-				std::error_code ec;
-				for (const fs::directory_entry& entry : fs::directory_iterator(lib / L"steamapps" / L"common", ec))
-				{
-					std::error_code entryEc;
-					if (!entry.is_directory(entryEc) || entryEc) continue;
-					addRoot(entry.path(), "Steam: " + WcharToUTF8(entry.path().filename().wstring()));
-				}
+				addRoot(install.path, std::move(install.label));
+			}
+			DebugLog("[launcher] %zu search roots\n", roots.size());
+			for (const SearchRoot& root : roots)
+			{
+				DebugLog("[launcher]   root: %s\n", root.label.c_str());
 			}
 			return roots;
 		}
@@ -241,8 +216,16 @@ namespace Launcher
 					}
 					if (result.found) break;
 				}
-				DebugLog("[launcher] %s: %s\n", info.name,
-					result.found ? result.dllPathUtf8.c_str() : "not found");
+				if (result.found)
+				{
+					// A few megabytes per module — cheap enough to hash every scan, so the
+					// table always reflects what is on disk right now.
+					result.module = Verify::CheckModule(info.id, result.dllPath);
+					result.parent = Verify::CheckParentGame(info.id, result.dllPath.parent_path());
+				}
+				DebugLog("[launcher] %s: %s (module %s, parent %s)\n", info.name,
+					result.found ? result.dllPathUtf8.c_str() : "not found",
+					Verify::Describe(result.module.status), Verify::Describe(result.parent.status));
 				games.push_back(std::move(result));
 			}
 			return games;
@@ -283,20 +266,24 @@ namespace Launcher
 				ImGuiWindowFlags_NoBringToFrontOnFocus))
 			{
 				ImGui::Text("Yakuza Arcade Machines Player");
-				ImGui::TextDisabled("Select an arcade game. Games are located automatically, next to "
-					"YAMP.exe and in your Steam installs of the parent games.");
+				ImGui::TextDisabled("Select an arcade game. Games are located automatically: next to "
+					"YAMP.exe, in any folder beside it, and in your Steam and GOG installs of the "
+					"parent games.");
 				ImGui::Separator();
 
-				// Reserve room for the details block + buttons below the table.
-				const float footerHeight = 4.0f * ImGui::GetTextLineHeightWithSpacing()
+				// Reserve room for the details block (path, source, checksum verdict, parent
+				// game verdict — the wrapped ones can take two lines) + buttons below the table.
+				const float footerHeight = 7.0f * ImGui::GetTextLineHeightWithSpacing()
 					+ ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2.0f;
 				if (ImGui::BeginTable("##games", 3,
 					ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
 					{ 0.0f, -footerHeight }))
 				{
-					ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch, 0.45f);
-					ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch, 0.40f);
-					ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.15f);
+					// Status carries the longest strings now ("Lost Judgment not found",
+					// "Unrecognised build"), so it gets a share to match.
+					ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch, 0.40f);
+					ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch, 0.32f);
+					ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.28f);
 					ImGui::TableSetupScrollFreeze(0, 1);
 					ImGui::TableHeadersRow();
 
@@ -310,7 +297,7 @@ namespace Launcher
 							ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
 						{
 							selected = i;
-							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && game.found)
+							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && game.CanPlay())
 							{
 								playRequested = true;
 							}
@@ -321,13 +308,30 @@ namespace Launcher
 						ImGui::TextUnformatted(game.info->parent);
 
 						ImGui::TableSetColumnIndex(2);
-						if (game.found)
+						if (!game.found)
 						{
-							ImGui::TextColored({ 0.3f, 0.9f, 0.3f, 1.0f }, "Found");
+							ImGui::TextDisabled("Not found");
+						}
+						else if (game.module.Blocks())
+						{
+							ImGui::TextColored({ 0.95f, 0.35f, 0.35f, 1.0f }, "%s",
+								Verify::Describe(game.module.status));
+						}
+						else if (game.parent.Blocks())
+						{
+							// Name the parent game: "not found" on its own reads as if the
+							// arcade module were missing, which is the one thing that IS present.
+							ImGui::TextColored({ 0.95f, 0.35f, 0.35f, 1.0f }, "%s not found",
+								game.info->parent);
+						}
+						else if (game.module.status == Verify::ModuleStatus::Verified)
+						{
+							ImGui::TextColored({ 0.3f, 0.9f, 0.3f, 1.0f }, "Verified");
 						}
 						else
 						{
-							ImGui::TextDisabled("Not found");
+							// No checksum table for this game yet — found, but unverified.
+							ImGui::TextColored({ 0.9f, 0.8f, 0.35f, 1.0f }, "Found");
 						}
 					}
 					ImGui::EndTable();
@@ -336,15 +340,56 @@ namespace Launcher
 				if (selected >= 0 && selected < static_cast<int>(games.size()))
 				{
 					const FoundGame& game = games[selected];
-					if (game.found)
-					{
-						ImGui::TextWrapped("Module: %s", game.dllPathUtf8.c_str());
-						ImGui::TextDisabled("Located: %s", game.sourceLabel.c_str());
-					}
-					else
+					if (!game.found)
 					{
 						ImGui::TextWrapped("%s was not found. Install %s on Steam, or place the game "
 							"files next to YAMP.exe.", game.info->name, game.info->parent);
+					}
+					else
+					{
+						const ImVec4 BAD { 0.95f, 0.35f, 0.35f, 1.0f };
+						ImGui::TextWrapped("Module: %s", game.dllPathUtf8.c_str());
+						ImGui::TextDisabled("Located: %s", game.sourceLabel.c_str());
+
+						switch (game.module.status)
+						{
+						case Verify::ModuleStatus::Verified:
+							// Short form here; the full digest is in the About panel and the log.
+							ImGui::TextDisabled("Checksum %.16s... matches %s",
+								game.module.sha256.c_str(), game.module.buildLabel);
+							break;
+						case Verify::ModuleStatus::OutdatedBuild:
+							ImGui::TextColored(BAD, "This module is from an older version of %s. "
+								"Update the game through Steam.", game.info->parent);
+							break;
+						case Verify::ModuleStatus::Unreadable:
+							ImGui::TextColored(BAD, "The module file could not be read.");
+							break;
+						case Verify::ModuleStatus::UnknownBuild:
+							ImGui::TextColored(BAD, "Checksum mismatch - this is not a build of %s "
+								"that YAMP supports. Restore the original DLL from your own copy of "
+								"the game.", game.info->name);
+							break;
+						default:
+							ImGui::TextDisabled("Checksum: no reference for this game yet.");
+							break;
+						}
+
+						switch (game.parent.status)
+						{
+						case Verify::ParentStatus::Verified:
+							ImGui::TextDisabled("%s: %s", game.info->parent, game.parent.buildLabel);
+							break;
+						case Verify::ParentStatus::UnknownBuild:
+							ImGui::TextDisabled("%s: found, unrecognised version.", game.info->parent);
+							break;
+						case Verify::ParentStatus::NotFound:
+							ImGui::TextColored(BAD, "No installation of %s was found. You must own "
+								"it to play its arcade games.", game.info->parent);
+							break;
+						default:
+							break;
+						}
 					}
 				}
 
@@ -352,7 +397,7 @@ namespace Launcher
 				// The vendored ImGui predates BeginDisabled/EndDisabled; mirror ButtonToggleable's
 				// dimming (YAMPUserInterface.cpp) for the disabled Play button.
 				const bool canPlay = selected >= 0 && selected < static_cast<int>(games.size())
-					&& games[selected].found;
+					&& games[selected].CanPlay();
 				if (!canPlay)
 				{
 					ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
@@ -372,7 +417,7 @@ namespace Launcher
 				}
 				ImGui::SameLine();
 				ImGui::TextDisabled("F1 - settings. Games can also be booted directly with "
-					"-stf / -fv / -vf2 / -vf5fs.");
+					"-stf / -fv / -mr / -vf2 / -vf2-k2 / -von-k2 / -vf5fs / -vf5fs-lj / -vf5fs-ylad.");
 			}
 			ImGui::End();
 		}
@@ -394,13 +439,19 @@ namespace Launcher
 		RenderWindow window(instance, instance, cmdShow);
 		IDXGISwapChain* swapChain = window.GetSwapChain();
 
+		// Start on the first game that can actually be played, falling back to the first one
+		// that is merely present so a failed check is what the user sees first.
 		int selected = 0;
 		for (size_t i = 0; i < games.size(); i++)
 		{
-			if (games[i].found)
+			if (games[i].CanPlay())
 			{
 				selected = static_cast<int>(i);
 				break;
+			}
+			if (games[i].found && !games[selected].found)
+			{
+				selected = static_cast<int>(i);
 			}
 		}
 
@@ -422,7 +473,7 @@ namespace Launcher
 			{
 				games = DiscoverGames();
 			}
-			else if (playRequested && games[selected].found && BootGame(games[selected]))
+			else if (playRequested && games[selected].CanPlay() && BootGame(games[selected]))
 			{
 				booted = true;
 				break;

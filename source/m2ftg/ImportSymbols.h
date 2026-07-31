@@ -1,5 +1,12 @@
 #pragma once
 
+// The symbols YAMP resolves out of an m2ftg module DLL (stf/fv/mr from Lost Judgment, vf2 from
+// Yakuza: Like a Dragon — the four share one pattern table, in LJ/ImportSymbols.cpp). The enum and
+// BuildSymbolMap are per-DLL-family and so live here rather than in the shared pxd layer; only the
+// container is shared (pxd::ImportsT, see ../pxd/Imports.h).
+
+#include "../pxd/Imports.h"
+
 namespace m2ftg
 {
 		enum class ImportSymbol
@@ -54,6 +61,8 @@ namespace m2ftg
 			I960_FETCH_EXEC,
 		};
 
-		class Imports BuildSymbolMap(void* dll);
+		using Imports = pxd::ImportsT<ImportSymbol>;
+
+		Imports BuildSymbolMap(void* dll);
 	}
 

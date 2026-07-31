@@ -1,18 +1,19 @@
 #pragma once
 
 #include "../../RenderWindow.h"
-#include "../sl.h"
-#include "gs.h"
+#include "../../pxd/LJ/sl.h"
+#include "../../pxd/LJ/gs.h"
+#include "../../pxd/LJ/PatchGs.h"
 
-#include "../Imports.h"
+#include "../ImportSymbols.h" // m2ftg::Imports (pxd::ImportsT + this family's symbol enum)
 
 namespace m2ftg
 {
-		// (PatchSl lives in ../sl.h — shared with the YLAD VF2 host.)
-		void PatchGs(gs::context_t* context, const RenderWindow& window);
-		// Reset the CBV/SRV descriptor-copy ring cursors each frame (they are per-frame transient; without
-		// this they grow past the heap and CopyDescriptors AVs — id=646). Call at the start of each frame.
-		void ResetCbvSrvRingCursors(gs::context_t* context);
+	// The pxd platform layer this host is built on (source/pxd): sl/gs/cgs_device_context,
+	// the host cdevice, Imports/ImportSymbol. Shared with the LJ VF5FS host.
+	using namespace pxd;
+		// (PatchSl lives in ../../pxd/LJ/sl.h and PatchGs/ResetCbvSrvRingCursors in
+		// ../../pxd/LJ/PatchGs.h — both shared with every other LJ-era host.)
 		void ReinstateLogging(void* dll, const Imports& symbols);
 		void InjectTraps(const Imports& symbols);
 		// Replaces the DLL's i960 instruction fetch with a region-aware version so code in

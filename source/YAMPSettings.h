@@ -2,7 +2,7 @@
 
 #include <filesystem>
 
-#include "m2ftg/M2Input.h"
+#include "input/Input.h"
 #include "m2ftg/LJ/HleHooks.h"
 
 class YAMPSettings
@@ -24,28 +24,34 @@ public:
 	bool m_arcadeMode = false;
 	bool m_circleConfirm = false;
 	uint32_t m_language = 1; // English
+	// Master volume, 0..100 %. Applied through each module's OWN volume mechanism rather than
+	// by scaling samples host-side, so the game's mixer does the attenuation it was built to do:
+	// the m2ftg/Y6 protocols take a float at execute_info+0x1C, the LJ VF5FS module a 0..20 byte
+	// at +0x663. 100 is each module's native full scale — what every host passed before this
+	// setting existed, so the default changes nothing.
+	uint32_t m_volumePercent = 100;
 
 	// Sonic the Fighters (m2ftg module)
 	// Aspect: 0 = 4:3 (original), 1 = 16:9 (stretched), 2 = fill window. Applied live.
-	uint32_t m_stfAspect = 0;
+	uint32_t m_m2Aspect = 0;
 	// Lost Judgment's own CRT shader (exact port), applied in the host blit. Applied live.
-	bool m_stfCrtFilter = false;
+	bool m_m2CrtFilter = false;
 	// m2ftg_config_t dip switches, read once at module_start (restart to change).
-	uint32_t m_stfDifficulty = 1; // 0..3, 1 = arcade default
+	uint32_t m_m2Difficulty = 1; // 0..3, 1 = arcade default
 	// Region the board boots as: 0 = Japan, 1 = USA ("Sonic Championship"), 2 = Export.
 	// Seeds the game-assignments country byte (SRAM 0x1D03352 / RAM 0x59C352).
-	uint32_t m_stfCountry = 0;
-	bool m_stfFreeplay = true;
+	uint32_t m_m2Country = 0;
+	bool m_m2Freeplay = true;
 	// is_vs_mode: LJ's 2P-quick-match boot (auto-credits both players, random stage).
 	// Off = authentic arcade boot (attract mode, single-player ladder).
-	bool m_stfVersusMode = false;
-	// Per-player input bindings (see M2Input.h): a keyboard key and/or an XInput button
+	bool m_m2VersusMode = false;
+	// Per-player input bindings (see Input.h): a keyboard key and/or an XInput button
 	// per action, plus which XInput controller each player reads (-1 = keyboard only).
 	// The game loop re-reads these every frame, so they apply live. The module-facing
-	// execute_info.assign table is fixed (M2Input::MODULE_ASSIGN) - remapping is host-side.
-	M2Input::KeyBinds m_stfKeyBinds = M2Input::DEFAULT_KEY_BINDS;
-	M2Input::PadBinds m_stfPadBinds = M2Input::DEFAULT_PAD_BINDS;
-	int32_t m_stfPadIndex[2] = { 0, 1 };
+	// execute_info.assign table is fixed (Input::MODULE_ASSIGN) - remapping is host-side.
+	Input::KeyBinds m_m2KeyBinds = Input::DEFAULT_KEY_BINDS;
+	Input::PadBinds m_m2PadBinds = Input::DEFAULT_PAD_BINDS;
+	int32_t m_m2PadIndex[2] = { 0, 1 };
 
 	// Virtua Fighter 2 (YLAD m2ftg module) — the module's own VF2-only config switches
 	// (m2ftg_config_t is_vf20 / is_disable_pepsi), read once at module_start (restart to change).

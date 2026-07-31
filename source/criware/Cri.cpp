@@ -1,5 +1,7 @@
 #include "Cri.h"
+#include "../DebugLog.h"
 #include "AtomEngine.h"
+
 
 // icri implementation. The CriAtomEx cue-playback surface (players, ACBs, ExecuteMain,
 // alloc) is backed by the clean-room AtomEngine (ACB/@UTF + AFS2 + validated HCA decoder +

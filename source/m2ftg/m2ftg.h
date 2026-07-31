@@ -8,9 +8,19 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace m2ftg
+// The per-pad block below is the shared LJ-era pad layout (pxd::lj_pad_t).
+#include "../pxd/LJ/sl.h"
+
+// The device context handed to the module belongs to the shared pxd platform layer
+// (source/pxd/LJ/gs.h), not to m2ftg — only the pointer is part of this protocol.
+namespace pxd
 {
         class cgs_device_context;
+}
+
+namespace m2ftg
+{
+        using pxd::cgs_device_context;
 
         // module_start copies 0x100C bytes from params+0x38 into its config global (DAT_1801ed490).
         // Field names from YLAD's symbolized scene ctor (config.kind/difficulty/country/
@@ -50,30 +60,10 @@ namespace m2ftg
         static_assert(offsetof(m2ftg_config_t, is_freeplay) == 0x09);
         static_assert(offsetof(m2ftg_config_t, settings) == 0x0C);
 
-        // Per-pad input block the m2ftg host copies into execute_info each frame (LJ FUN_1426bd820
-        // copies 0x190 bytes per pad from the engine pad object). The first 0xE0 bytes are the same
-        // pxd sl pad layout as csl_pad (now/push/pull/prev, 4 float axes, button_frame[32],
-        // buttons[32], prev_buttons[32], port/user/connected); the LJ variant is just longer.
-        // Button bits use the same sl::BUTTON numbering (START = bit 8 = 0x100).
-        struct m2ftg_pad_t
-        {
-            unsigned int m_now;
-            unsigned int m_push;
-            unsigned int m_pull;
-            unsigned int m_prev;
-            float m_x1;
-            float m_y1;
-            float m_x2;
-            float m_y2;
-            int m_button_frame[32];
-            uint8_t m_buttons[32];
-            uint8_t m_prev_buttons[32];
-            unsigned int m_port;
-            int m_user_id;
-            bool m_is_connected;
-            bool m_is_remote;
-            std::byte tail[0x190 - 0xEA];
-        };
+        // Per-pad input block the m2ftg host copies into execute_info each frame. Nothing about it
+        // is m2ftg-specific — it is the LJ-era pad layout, shared with the VF5FS-LJ host, so the
+        // definition (and the reasoning behind it) lives in ../pxd/LJ/sl.h.
+        using m2ftg_pad_t = pxd::lj_pad_t;
         static_assert(sizeof(m2ftg_pad_t) == 0x190);
         static_assert(offsetof(m2ftg_pad_t, m_buttons) == 0xA0);
         static_assert(offsetof(m2ftg_pad_t, m_port) == 0xE0);

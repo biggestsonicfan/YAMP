@@ -3,7 +3,7 @@
 #include "../../YAMPGeneral.h"
 #include "../../YAMPSettings.h"
 #include "../../DebugLog.h"
-#include "../ElfRom.h"
+#include "../ELF/ElfRom.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>

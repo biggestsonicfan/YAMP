@@ -1,12 +1,12 @@
-#include "file_access.h"
+#include "../pxd/LJ/file_access.h"
 
 #include <string_view>
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
-#include "ElfRom.h"
+#include "ELF/ElfRom.h"
 #include "LJ/LJHost.h" // GameDesc / CurrentGame()
 
-namespace m2ftg
+namespace pxd
 {
 		// ---- ELF program-ROM override -------------------------------------------------
 		// When game.elf is present, the module still opens rom_code1.bin exactly as it always
@@ -24,11 +24,11 @@ namespace m2ftg
 			// rom_code_tw.bin for Motor Raid) and an ELF override is loaded for it.
 			static bool IsProgramRom(const char* path)
 			{
-				if (!ElfRom::IsLoaded() || path == nullptr)
+				if (!m2ftg::ElfRom::IsLoaded() || path == nullptr)
 				{
 					return false;
 				}
-				const GameDesc& game = CurrentGame();
+				const m2ftg::GameDesc& game = m2ftg::CurrentGame();
 				if (game.rom_file_count == 0)
 				{
 					return false;
@@ -47,7 +47,7 @@ namespace m2ftg
 
 			static int64_t Read(sl::file_handle_internal_t* internalHandle, void* buffer, unsigned int size)
 			{
-				const uint32_t imageSize = ElfRom::ImageSize();
+				const uint32_t imageSize = m2ftg::ElfRom::ImageSize();
 				const uint64_t pos = internalHandle->m_file_pointer;
 				if (pos >= imageSize)
 				{
@@ -55,7 +55,7 @@ namespace m2ftg
 				}
 				const uint64_t available = imageSize - pos;
 				const unsigned int count = size < available ? size : static_cast<unsigned int>(available);
-				memcpy(buffer, ElfRom::Image() + pos, count);
+				memcpy(buffer, m2ftg::ElfRom::Image() + pos, count);
 				internalHandle->m_file_pointer += count;
 				return count;
 			}
@@ -89,7 +89,7 @@ namespace m2ftg
 				return false;
 			}
 
-			const GameDesc& game = CurrentGame();
+			const m2ftg::GameDesc& game = m2ftg::CurrentGame();
 			const std::string_view pathView(path);
 			const std::string_view archiveName(game.rom_archive_name);
 			if (pathView.size() < archiveName.size() ||
@@ -105,7 +105,7 @@ namespace m2ftg
 			{
 				const std::wstring romPath = directory + L'/' + game.rom_files[i];
 				// game.elf stands in for the program ROM, so the .bin need not exist at all.
-				if (i == 0 && ElfRom::IsLoaded())
+				if (i == 0 && m2ftg::ElfRom::IsLoaded())
 				{
 					continue;
 				}
@@ -136,7 +136,7 @@ namespace m2ftg
 					internalHandle->m_h_native = reinterpret_cast<decltype(internalHandle->m_h_native)>(RomOverride::MEMORY_BACKED);
 					internalHandle->m_file_pointer = 0;
 					DebugLog("[file] open '%s' -> served from '%ls' (h=%u)\n", path,
-						ElfRom::LoadedPath(), handle.h.m_handle);
+						m2ftg::ElfRom::LoadedPath(), handle.h.m_handle);
 					return true;
 				}
 				return false;
@@ -261,7 +261,7 @@ namespace m2ftg
 			const sl::file_handle_internal_t* internalHandle = sl::file_handle_instance(handle);
 			if (RomOverride::IsMemoryBacked(internalHandle))
 			{
-				return ElfRom::ImageSize();
+				return m2ftg::ElfRom::ImageSize();
 			}
 			if (internalHandle != nullptr)
 			{
@@ -482,13 +482,14 @@ namespace m2ftg
 
 		csl_archive* csl_archive::create_instance(sl::handle_t handle)
 		{
-			sl::archive_lock_wlock(&sl::sm_context->sync_archive_condvar);
+			uint32_t* const lock = sl::sync_archive_condvar();
+			sl::archive_lock_wlock(lock);
 			csl_archive* archive = sl::handle_instance<csl_archive>(handle, 6);
 			if (archive != nullptr)
 			{
 				archive->add_ref();
 			}
-			sl::archive_lock_wunlock(&sl::sm_context->sync_archive_condvar);
+			sl::archive_lock_wunlock(lock);
 			return archive;
 		}
 	}

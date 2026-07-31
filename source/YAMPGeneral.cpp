@@ -21,7 +21,9 @@ const char* YAMPGeneral::GetArcadeGameName() const
 	case GameId::StF: return "Sonic the Fighters";
 	case GameId::FV: return "Fighting Vipers";
 	case GameId::MR: return "Motor Raid";
-	case GameId::VF2: return "Virtua Fighter 2";
+	case GameId::VF2:
+	case GameId::VF2_K2: return "Virtua Fighter 2";
+	case GameId::VON_K2: return "Virtual On";
 	case GameId::Launcher: return "Yakuza Arcade Machines Player";
 	default: return "Virtua Fighter 5: Final Showdown";
 	}
@@ -35,8 +37,26 @@ const char* YAMPGeneral::GetGameTag() const
 	case GameId::FV: return "FV";
 	case GameId::MR: return "MR";
 	case GameId::VF2: return "VF2";
+	case GameId::VF2_K2: return "VF2-K2";
+	case GameId::VON_K2: return "VON-K2";
+	case GameId::VF5FS_LJ: return "VF5FS-LJ";
+	case GameId::VF5FS_YLAD: return "VF5FS-YLAD";
 	case GameId::Launcher: return "YAMP";
 	default: return "VF5FS";
+	}
+}
+
+bool YAMPGeneral::IsModel2ArcadeGame() const
+{
+	switch (m_gameId)
+	{
+	case GameId::StF:
+	case GameId::FV:
+	case GameId::MR:
+	case GameId::VF2:
+	case GameId::VF2_K2:
+	case GameId::VON_K2: return true;
+	default: return false;
 	}
 }
 
@@ -46,8 +66,12 @@ const char* YAMPGeneral::GetParentGameName() const
 	{
 	case GameId::StF:
 	case GameId::FV:
-	case GameId::MR: return "Lost Judgment";
-	case GameId::VF2: return "Yakuza: Like a Dragon";
+	case GameId::MR:
+	case GameId::VF5FS_LJ: return "Lost Judgment";
+	case GameId::VF2:
+	case GameId::VF5FS_YLAD: return "Yakuza: Like a Dragon";
+	case GameId::VF2_K2:
+	case GameId::VON_K2: return "Yakuza Kiwami 2";
 	case GameId::Launcher: return "the supported Yakuza games";
 	default: return "Yakuza 6: The Song of Life";
 	}

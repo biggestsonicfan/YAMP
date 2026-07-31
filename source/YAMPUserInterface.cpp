@@ -1,7 +1,8 @@
 #include "YAMPUserInterface.h"
 
 #include "YAMPGeneral.h"
-#include "m2ftg/ElfRom.h"
+#include "GameVerify.h"
+#include "m2ftg/ELF/ElfRom.h"
 #include "m2ftg/LJ/DebugWindows.h"
 #include "m2ftg/LJ/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
@@ -25,10 +26,27 @@ static bool IsLJm2ftgGame()
 		|| id == YAMPGeneral::GameId::MR;
 }
 
-// ...and YLAD's VF2 module speaks the same protocol, so it shares those panels too.
+// ...as do the Yakuza Kiwami 2 modules, which share the K2 host the same way. Kiwami 2 ships two
+// (Virtua Fighter 2 and Virtua On), so this is deliberately a per-PARENT-GAME test rather than a
+// per-game one — the second module needs nothing here beyond its GameId.
+static bool IsKiwami2Game()
+{
+	return gGeneral.GetGameId() == YAMPGeneral::GameId::VF2_K2;
+}
+
 static bool IsM2ftgGame()
 {
-	return IsLJm2ftgGame() || gGeneral.GetGameId() == YAMPGeneral::GameId::VF2;
+	return IsLJm2ftgGame() || IsKiwami2Game()
+		|| gGeneral.GetGameId() == YAMPGeneral::GameId::VF2;
+}
+
+// The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
+// test above because m2ftg_config_t's is_vf20 / is_disable_pepsi are VF2's own switches — they
+// mean nothing to Virtua On, StF, FV or MR.
+static bool IsVF2Module()
+{
+	const auto id = gGeneral.GetGameId();
+	return id == YAMPGeneral::GameId::VF2 || id == YAMPGeneral::GameId::VF2_K2;
 }
 
 // "Custom" ImGui wrappers
@@ -140,10 +158,9 @@ void YAMPUserInterface::Draw()
 		ImGui::SameLine();
 
 		ImGui::BeginGroup();
-		// About is informational; Controls is read-only except for the LJ m2ftg games
-		// (StF/FV/MR), whose button assignments are editable and go through the same
-		// Apply/Cancel flow as the other pages.
-		const bool controlsEditable = IsLJm2ftgGame();
+		// About is informational; every hosted game's Controls page is now the editable
+		// binding editor (see DrawControls), so it needs the Apply/Cancel flow too.
+		const bool controlsEditable = gGeneral.GetGameId() != YAMPGeneral::GameId::Launcher;
 		bool drawButtons = selectedTab != about_id && (selectedTab != controls_id || controlsEditable);
 
 		float rightPanelHeight = 0.0f;
@@ -238,18 +255,19 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_arcadeMode = settings->m_arcadeMode;
 	m_circleConfirm = settings->m_circleConfirm;
 	m_language = settings->m_language;
+	m_volumePercent = static_cast<int>(settings->m_volumePercent);
 
-	m_stfAspect = settings->m_stfAspect;
-	m_stfCrtFilter = settings->m_stfCrtFilter;
-	m_stfDifficulty = settings->m_stfDifficulty;
-	m_stfCountry = settings->m_stfCountry;
-	m_stfFreeplay = settings->m_stfFreeplay;
-	m_stfVersusMode = settings->m_stfVersusMode;
-	m_stfKeyBinds = settings->m_stfKeyBinds;
-	m_stfPadBinds = settings->m_stfPadBinds;
+	m_m2Aspect = settings->m_m2Aspect;
+	m_m2CrtFilter = settings->m_m2CrtFilter;
+	m_m2Difficulty = settings->m_m2Difficulty;
+	m_m2Country = settings->m_m2Country;
+	m_m2Freeplay = settings->m_m2Freeplay;
+	m_m2VersusMode = settings->m_m2VersusMode;
+	m_m2KeyBinds = settings->m_m2KeyBinds;
+	m_m2PadBinds = settings->m_m2PadBinds;
 	for (int player = 0; player < 2; player++)
 	{
-		m_stfPadIndex[player] = settings->m_stfPadIndex[player];
+		m_m2PadIndex[player] = settings->m_m2PadIndex[player];
 	}
 
 	m_vf2Version20 = settings->m_vf2Version20;
@@ -380,6 +398,19 @@ void YAMPUserInterface::DrawGraphics()
 // TODO: This will have to be subclassed once more games are added
 void YAMPUserInterface::DrawGame()
 {
+	// Master volume. Every host converts this to whatever its own module's volume mechanism
+	// wants, so the game's mixer attenuates rather than YAMP scaling samples afterwards. Drawn
+	// before the dispatch below so it appears for every game, not just the VF5FS panel.
+	if (ImGui::SliderInt("Volume", &m_volumePercent, 0, 100, "%d%%"))
+	{
+		m_pageModified = true;
+	}
+
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Master volume. 100%% is the module's own full scale.");
+	}
+
 	// All the m2ftg-family arcade modules (StF/FV/MR from LJ, VF2 from YLAD) share the same
 	// hosting protocol and dip switches, so they share the settings panel too.
 	if (IsM2ftgGame())
@@ -441,25 +472,26 @@ void YAMPUserInterface::DrawGame()
 	{
 		ImGui::SetTooltip("When unchecked, the game runs in console mode.");
 	}
+
 }
 
 void YAMPUserInterface::DrawGameStF()
 {
 	{
 		const char* labels[] = { "4:3 (Original)", "16:9 (Stretched)", "Fill Window" };
-		if (m_stfAspect >= std::size(labels))
+		if (m_m2Aspect >= std::size(labels))
 		{
-			m_stfAspect = 0;
+			m_m2Aspect = 0;
 		}
-		if (ImGui::BeginCombo("Aspect ratio", labels[m_stfAspect]))
+		if (ImGui::BeginCombo("Aspect ratio", labels[m_m2Aspect]))
 		{
 			for (uint32_t index = 0; index < std::size(labels); index++)
 			{
-				const bool isSelected = index == m_stfAspect;
+				const bool isSelected = index == m_m2Aspect;
 				if (ImGui::Selectable(labels[index], isSelected))
 				{
 					m_pageModified = true;
-					m_stfAspect = index;
+					m_m2Aspect = index;
 				}
 				if (isSelected)
 					ImGui::SetItemDefaultFocus();
@@ -474,13 +506,13 @@ void YAMPUserInterface::DrawGameStF()
 		}
 	}
 
-	if (ImGui::Checkbox("CRT filter", &m_stfCrtFilter))
+	if (ImGui::Checkbox("CRT filter", &m_m2CrtFilter))
 	{
 		m_pageModified = true;
 	}
 	if (ImGui::IsItemHovered())
 	{
-		if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+		if (IsVF2Module())
 		{
 			ImGui::SetTooltip("Lost Judgment's CRT effect (scanlines + aperture grille), an exact port\n"
 				"of the shader LJ draws its Model 2 arcade minigames with.\nApplies immediately.");
@@ -498,19 +530,19 @@ void YAMPUserInterface::DrawGameStF()
 
 	{
 		const char* labels[] = { "Easy", "Normal", "Hard", "Hardest" };
-		if (m_stfDifficulty >= std::size(labels))
+		if (m_m2Difficulty >= std::size(labels))
 		{
-			m_stfDifficulty = 1;
+			m_m2Difficulty = 1;
 		}
-		if (ImGui::BeginCombo("Difficulty", labels[m_stfDifficulty]))
+		if (ImGui::BeginCombo("Difficulty", labels[m_m2Difficulty]))
 		{
 			for (uint32_t index = 0; index < std::size(labels); index++)
 			{
-				const bool isSelected = index == m_stfDifficulty;
+				const bool isSelected = index == m_m2Difficulty;
 				if (ImGui::Selectable(labels[index], isSelected))
 				{
 					m_pageModified = true;
-					m_stfDifficulty = index;
+					m_m2Difficulty = index;
 				}
 				if (isSelected)
 					ImGui::SetItemDefaultFocus();
@@ -526,19 +558,19 @@ void YAMPUserInterface::DrawGameStF()
 
 	{
 		const char* labels[] = { "Japan", "USA", "Export" };
-		if (m_stfCountry >= std::size(labels))
+		if (m_m2Country >= std::size(labels))
 		{
-			m_stfCountry = 0;
+			m_m2Country = 0;
 		}
-		if (ImGui::BeginCombo("Region", labels[m_stfCountry]))
+		if (ImGui::BeginCombo("Region", labels[m_m2Country]))
 		{
 			for (uint32_t index = 0; index < std::size(labels); index++)
 			{
-				const bool isSelected = index == m_stfCountry;
+				const bool isSelected = index == m_m2Country;
 				if (ImGui::Selectable(labels[index], isSelected))
 				{
 					m_pageModified = true;
-					m_stfCountry = index;
+					m_m2Country = index;
 				}
 				if (isSelected)
 					ImGui::SetItemDefaultFocus();
@@ -560,7 +592,7 @@ void YAMPUserInterface::DrawGameStF()
 		}
 	}
 
-	if (ImGui::Checkbox("Free Play", &m_stfFreeplay))
+	if (ImGui::Checkbox("Free Play", &m_m2Freeplay))
 	{
 		m_pageModified = true;
 	}
@@ -570,7 +602,7 @@ void YAMPUserInterface::DrawGameStF()
 			"press Start (F key) on the coin screen to insert a coin.\nRequires a restart.");
 	}
 
-	if (ImGui::Checkbox("Versus Mode", &m_stfVersusMode))
+	if (ImGui::Checkbox("Versus Mode", &m_m2VersusMode))
 	{
 		m_pageModified = true;
 	}
@@ -584,7 +616,7 @@ void YAMPUserInterface::DrawGameStF()
 
 	// The VF2 module's own extra config switches (m2ftg_config_t is_vf20 / is_disable_pepsi;
 	// no readers in the StF/FV DLLs).
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+	if (IsVF2Module())
 	{
 		if (ImGui::Checkbox("Version 2.0", &m_vf2Version20))
 		{
@@ -609,33 +641,16 @@ void YAMPUserInterface::DrawGameStF()
 
 void YAMPUserInterface::DrawControls()
 {
-	if (IsM2ftgGame())
-	{
-		DrawControlsStF();
-		return;
-	}
-
-	ImGui::PushItemWidth(ImGui::CalcItemWidth() / 2.0f);
-
-	// TODO: Make these controls customizable
-	ImGui::LabelText("Movement", "Arrow Keys / WSAD");
-	ImGui::LabelText("P", "K");
-	ImGui::LabelText("K", "L");
-	ImGui::LabelText("G", "J");
-	ImGui::LabelText("P + G", "M");
-	ImGui::LabelText("P + K + G", "I");
-	ImGui::LabelText("P + K", "U");
-	ImGui::LabelText("K + G", "O");
-	ImGui::NewLine();
-	ImGui::LabelText("Confirm", "Enter");
-	ImGui::LabelText("Back", "Escape");
-	ImGui::LabelText("Start Game, Select Subcostume, Skip", "F");
-	ImGui::LabelText("View Controls, Reset", "Tab");
-
-	ImGui::NewLine();
-	ImGui::LabelText("Open YAMP Settings", "F1");
-
-	ImGui::PopItemWidth();
+	// EVERY hosted game — the m2ftg titles AND all three VF5FS builds — fills its pads through
+	// csl_pad::set_state (source/input/Pad.cpp), which reads nothing but the Input bindings.
+	// So the real, editable bindings are the correct page for all of them.
+	//
+	// This used to fall through to a hardcoded list ("P = K, K = L, G = J, Movement = Arrow Keys /
+	// WSAD", with a "TODO: Make these controls customizable"). That list predated the VF5FS hosts
+	// moving onto Input and had become actively wrong: it told the player to press keys that are
+	// not bound to anything, while the actual bindings were the shared ones (Punch = Z, Kick = X,
+	// Guard = C, Start = 1 by default). It looked exactly like input being broken.
+	DrawControlsStF();
 }
 
 void YAMPUserInterface::DrawControlsStF()
@@ -664,7 +679,11 @@ void YAMPUserInterface::DrawControlsStF()
 
 	ImGui::NewLine();
 	ImGui::TextDisabled("The left stick always steers, like the cabinet lever. Escape pauses; F1 opens this window.");
-	ImGui::TextDisabled("With Free Play off, Start doubles as a coin insert at the coin screen.");
+	// The coin/start dance is the m2ftg hosts' arcade behaviour; the VF5FS hosts do not implement it.
+	if (IsM2ftgGame())
+	{
+		ImGui::TextDisabled("With Free Play off, Start doubles as a coin insert at the coin screen.");
+	}
 	ImGui::TextDisabled("In the game's own menus, Punch confirms, Kick cancels and Back resets/shows controls.");
 
 	DrawStfBindingCapture();
@@ -674,7 +693,7 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 {
 	// Keeps the connection indicators and capture edge detection fresh even before the
 	// game loop's own per-frame poll has run (polling twice per frame is harmless).
-	M2Input::PollPads();
+	Input::PollPads();
 
 	auto controllerLabel = [](int padIndex, char (&buf)[64]) -> const char* {
 		if (padIndex < 0)
@@ -682,20 +701,20 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 			return "None (keyboard only)";
 		}
 		sprintf_s(buf, "Controller %d%s", padIndex + 1,
-			M2Input::GetPadState(padIndex).connected ? "" : " (not connected)");
+			Input::GetPadState(padIndex).connected ? "" : " (not connected)");
 		return buf;
 	};
 
 	char label[64];
-	if (ImGui::BeginCombo("Controller", controllerLabel(m_stfPadIndex[player], label)))
+	if (ImGui::BeginCombo("Controller", controllerLabel(m_m2PadIndex[player], label)))
 	{
 		for (int padIndex = -1; padIndex < 4; padIndex++)
 		{
-			const bool isSelected = padIndex == m_stfPadIndex[player];
+			const bool isSelected = padIndex == m_m2PadIndex[player];
 			if (ImGui::Selectable(controllerLabel(padIndex, label), isSelected))
 			{
 				m_pageModified = true;
-				m_stfPadIndex[player] = padIndex;
+				m_m2PadIndex[player] = padIndex;
 			}
 			if (isSelected)
 				ImGui::SetItemDefaultFocus();
@@ -712,9 +731,9 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 	if (ImGui::Button("Restore Defaults"))
 	{
 		m_pageModified = true;
-		m_stfKeyBinds[player] = M2Input::DEFAULT_KEY_BINDS[player];
-		m_stfPadBinds[player] = M2Input::DEFAULT_PAD_BINDS[player];
-		m_stfPadIndex[player] = player;
+		m_m2KeyBinds[player] = Input::DEFAULT_KEY_BINDS[player];
+		m_m2PadBinds[player] = Input::DEFAULT_PAD_BINDS[player];
+		m_m2PadIndex[player] = player;
 	}
 
 	if (ImGui::BeginTable("##bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV))
@@ -724,38 +743,38 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableHeadersRow();
 
-		for (uint32_t action = 0; action < M2Input::Action_Count; action++)
+		for (uint32_t action = 0; action < Input::Action_Count; action++)
 		{
 			ImGui::PushID(static_cast<int>(action));
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted(M2Input::ActionName(action));
+			ImGui::TextUnformatted(Input::ActionName(action));
 
 			ImGui::TableNextColumn();
-			const std::string keyLabel = M2Input::KeyName(m_stfKeyBinds[player][action]);
+			const std::string keyLabel = Input::KeyName(m_m2KeyBinds[player][action]);
 			if (ImGui::Button((keyLabel + "##key").c_str(), ImVec2(-FLT_MIN, 0.0f)))
 			{
 				StartStfCapture(player, false, action, 1);
 			}
-			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfKeyBinds[player][action] != 0)
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_m2KeyBinds[player][action] != 0)
 			{
 				m_pageModified = true;
-				m_stfKeyBinds[player][action] = 0;
+				m_m2KeyBinds[player][action] = 0;
 			}
 
 			ImGui::TableNextColumn();
-			const char* padLabel = M2Input::PadButtonName(m_stfPadBinds[player][action]);
+			const char* padLabel = Input::PadButtonName(m_m2PadBinds[player][action]);
 			char padButtonLabel[64];
 			sprintf_s(padButtonLabel, "%s##pad", padLabel);
 			if (ImGui::Button(padButtonLabel, ImVec2(-FLT_MIN, 0.0f)))
 			{
 				StartStfCapture(player, false, action, 2);
 			}
-			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_stfPadBinds[player][action] != M2Input::Pad_None)
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && m_m2PadBinds[player][action] != Input::Pad_None)
 			{
 				m_pageModified = true;
-				m_stfPadBinds[player][action] = M2Input::Pad_None;
+				m_m2PadBinds[player][action] = Input::Pad_None;
 			}
 			ImGui::PopID();
 		}
@@ -772,7 +791,7 @@ void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action
 	{
 		// The basics, prompted one by one: up, down, left, right, punch, kick, guard,
 		// start, coin. Combos and Back stay on their per-row buttons.
-		for (uint32_t a = 0; a < M2Input::WIZARD_ACTION_COUNT; a++)
+		for (uint32_t a = 0; a < Input::WIZARD_ACTION_COUNT; a++)
 		{
 			m_stfCaptureQueue.push_back({ a, 3 });
 		}
@@ -785,10 +804,10 @@ void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action
 
 	// Prime the edge detectors with the current state so already-held inputs are ignored.
 	m_stfCapturePrevKeys = gGeneral.GetPressedKeys();
-	M2Input::PollPads();
+	Input::PollPads();
 	for (int i = 0; i < 4; i++)
 	{
-		m_stfCapturePrevPadButtons[i] = M2Input::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = Input::GetPadState(i).buttons;
 	}
 }
 
@@ -797,7 +816,7 @@ void YAMPUserInterface::AssignStfKey(int player, uint32_t action, uint32_t vk)
 	m_pageModified = true;
 	// The keyboard is shared hardware: a key can only mean one thing, so steal it from
 	// wherever else it is bound (either player, any action).
-	for (auto& binds : m_stfKeyBinds)
+	for (auto& binds : m_m2KeyBinds)
 	{
 		for (uint32_t& bind : binds)
 		{
@@ -807,7 +826,7 @@ void YAMPUserInterface::AssignStfKey(int player, uint32_t action, uint32_t vk)
 			}
 		}
 	}
-	m_stfKeyBinds[player][action] = vk;
+	m_m2KeyBinds[player][action] = vk;
 }
 
 void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex)
@@ -815,24 +834,24 @@ void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t
 	m_pageModified = true;
 	// Answering with a controller also claims that controller for this player - the
 	// wizard's "press a button to join" moment, like Lost Judgment's pad picking.
-	m_stfPadIndex[player] = padIndex;
+	m_m2PadIndex[player] = padIndex;
 	// Steal the button only from players reading the same physical controller; a player
 	// on a different pad legitimately keeps identical bindings.
 	for (int p = 0; p < 2; p++)
 	{
-		if (m_stfPadIndex[p] != padIndex)
+		if (m_m2PadIndex[p] != padIndex)
 		{
 			continue;
 		}
-		for (uint32_t& bind : m_stfPadBinds[p])
+		for (uint32_t& bind : m_m2PadBinds[p])
 		{
 			if (bind == button)
 			{
-				bind = M2Input::Pad_None;
+				bind = Input::Pad_None;
 			}
 		}
 	}
-	m_stfPadBinds[player][action] = button;
+	m_m2PadBinds[player][action] = button;
 }
 
 void YAMPUserInterface::DrawStfBindingCapture()
@@ -865,13 +884,13 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	ImGui::Text("Player %d", m_stfCapturePlayer + 1);
 	ImGui::Text("Press %s for:", deviceText);
 	ImGui::SameLine();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", M2Input::ActionName(prompt.action));
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", Input::ActionName(prompt.action));
 	if (m_stfCaptureQueue.size() > 1)
 	{
 		ImGui::TextDisabled("%zu of %zu", m_stfCaptureStep + 1, m_stfCaptureQueue.size());
 	}
 
-	M2Input::PollPads();
+	Input::PollPads();
 	const auto& keys = gGeneral.GetPressedKeys();
 
 	bool advanced = false;
@@ -895,8 +914,8 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	{
 		for (int padIndex = 0; padIndex < 4 && !advanced; padIndex++)
 		{
-			const uint32_t pressed = M2Input::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
-			for (uint32_t button = 1; button < M2Input::Pad_Count && !advanced; button++)
+			const uint32_t pressed = Input::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
+			for (uint32_t button = 1; button < Input::Pad_Count && !advanced; button++)
 			{
 				if (pressed & (1u << button))
 				{
@@ -931,7 +950,7 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	m_stfCapturePrevKeys = keys;
 	for (int i = 0; i < 4; i++)
 	{
-		m_stfCapturePrevPadButtons[i] = M2Input::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = Input::GetPadState(i).buttons;
 	}
 	ImGui::EndPopup();
 }
@@ -1410,6 +1429,33 @@ void YAMPUserInterface::DrawAbout()
 		}
 	}
 
+	// Integrity + ownership verdicts from the pre-load check (source/GameVerify.cpp). The
+	// process only gets this far when neither of them blocked, so this is a record of what
+	// was verified rather than a warning.
+	{
+		const Verify::ModuleResult& module = Verify::LastModuleResult();
+		if (module.status == Verify::ModuleStatus::Verified)
+		{
+			ImGui::Text("DLL checksum: verified, %s", module.buildLabel);
+			ImGui::TextDisabled("SHA-256: %s", module.sha256.c_str());
+		}
+		else if (module.status == Verify::ModuleStatus::NotChecked)
+		{
+			ImGui::TextUnformatted("DLL checksum: no reference for this game yet");
+		}
+
+		const Verify::ParentResult& parent = Verify::LastParentResult();
+		if (parent.status == Verify::ParentStatus::Verified)
+		{
+			ImGui::Text("Base game: verified, %s", parent.buildLabel);
+		}
+		else if (parent.status == Verify::ParentStatus::UnknownBuild)
+		{
+			ImGui::TextColored(WARNING_COLOUR, "Base game: %s found, but its version is not one "
+				"YAMP recognises.", parent.exeName);
+		}
+	}
+
 	// Disclaimers
 	ImGui::Separator();
 	ImGui::TextUnformatted("ACKNOWLEDGEMENTS:");
@@ -1526,10 +1572,11 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_arcadeMode != m_arcadeMode ||
 		settings->m_circleConfirm != m_circleConfirm ||
 		settings->m_language != m_language ||
-		settings->m_stfDifficulty != m_stfDifficulty ||
-		settings->m_stfCountry != m_stfCountry ||
-		settings->m_stfFreeplay != m_stfFreeplay ||
-		settings->m_stfVersusMode != m_stfVersusMode ||
+		settings->m_volumePercent != static_cast<uint32_t>(m_volumePercent) ||
+		settings->m_m2Difficulty != m_m2Difficulty ||
+		settings->m_m2Country != m_m2Country ||
+		settings->m_m2Freeplay != m_m2Freeplay ||
+		settings->m_m2VersusMode != m_m2VersusMode ||
 		settings->m_vf2Version20 != m_vf2Version20 ||
 		settings->m_vf2DisablePepsi != m_vf2DisablePepsi ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
@@ -1545,19 +1592,20 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_arcadeMode = m_arcadeMode;
 	settings->m_circleConfirm = m_circleConfirm;
 	settings->m_language = m_language;
+	settings->m_volumePercent = static_cast<uint32_t>(m_volumePercent);
 
-	settings->m_stfAspect = m_stfAspect;
-	settings->m_stfCrtFilter = m_stfCrtFilter;
-	settings->m_stfDifficulty = m_stfDifficulty;
-	settings->m_stfCountry = m_stfCountry;
-	settings->m_stfFreeplay = m_stfFreeplay;
-	settings->m_stfVersusMode = m_stfVersusMode;
+	settings->m_m2Aspect = m_m2Aspect;
+	settings->m_m2CrtFilter = m_m2CrtFilter;
+	settings->m_m2Difficulty = m_m2Difficulty;
+	settings->m_m2Country = m_m2Country;
+	settings->m_m2Freeplay = m_m2Freeplay;
+	settings->m_m2VersusMode = m_m2VersusMode;
 	// Bindings are re-read by the game loop every frame, so they apply live.
-	settings->m_stfKeyBinds = m_stfKeyBinds;
-	settings->m_stfPadBinds = m_stfPadBinds;
+	settings->m_m2KeyBinds = m_m2KeyBinds;
+	settings->m_m2PadBinds = m_m2PadBinds;
 	for (int player = 0; player < 2; player++)
 	{
-		settings->m_stfPadIndex[player] = m_stfPadIndex[player];
+		settings->m_m2PadIndex[player] = m_m2PadIndex[player];
 	}
 
 	// Consumed once by module_start (config.is_vf20 / is_disable_pepsi), hence the restart warning.

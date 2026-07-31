@@ -1,7 +1,7 @@
 #include "DebugWindows.h"
 
 #include "../../YAMPGeneral.h"
-#include "../ElfRom.h"
+#include "../ELF/ElfRom.h"
 
 #include "../../imgui/imgui.h"
 

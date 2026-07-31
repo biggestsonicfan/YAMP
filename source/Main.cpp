@@ -2,8 +2,11 @@
 #include "YAMPGeneral.h"
 #include "RenderWindow.h"
 #include "GameLauncher.h"
-#include "vf5fs/VF5FS.h"
+#include "vf5fs/Y6/VF5FS.h"
+#include "vf5fs/LJ/VF5FS.h"
+#include "vf5fs/YLAD/VF5FS.h"
 #include "m2ftg/YLAD/VF2.h"
+#include "m2ftg/K2/K2Host.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "imgui/imgui.h"
 
@@ -63,20 +66,92 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
 
     // Game-select arguments: "-stf" runs Sonic the Fighters (LJ), "-fv" runs Fighting Vipers
     // and "-mr" runs Motor Raid (both LJ, same m2ftg path as StF), "-vf5fs" runs VF5FS (Y6),
-    // "-vf2" runs VF2 (YLAD). With no game argument, show the launcher menu instead — it
+    // "-vf5fs-lj" runs Lost Judgment's VF5FS (a different pxd generation — DX12 — hence its own
+    // host), "-vf2" runs VF2 (YLAD). With no game argument, show the launcher menu instead — it
     // discovers which games are present (next to YAMP.exe and in the Steam installs of the
     // parent games) and boots the chosen one as a child process with these arguments and the
     // game folder as its CWD.
     const wchar_t* cmdLine = GetCommandLineW();
-    const bool runVF2 = wcsstr(cmdLine, L"-vf2") != nullptr;
+    // "-vf2-k2" must be tested BEFORE "-vf2", which is a prefix of it (same trap as -vf5fs-lj).
+    const bool runVF2_K2 = wcsstr(cmdLine, L"-vf2-k2") != nullptr;
+    // Kiwami 2's other module, Virtual On ("omg" = Operation Moon Gate). Same host as -vf2-k2.
+    const bool runVON_K2 = wcsstr(cmdLine, L"-von-k2") != nullptr;
+    const bool runVF2 = !runVF2_K2 && wcsstr(cmdLine, L"-vf2") != nullptr;
     const bool runFV = !runVF2 && wcsstr(cmdLine, L"-fv") != nullptr;
     const bool runMR = !runVF2 && !runFV && wcsstr(cmdLine, L"-mr") != nullptr;
-    const bool runVF5FS = !runVF2 && !runFV && !runMR && wcsstr(cmdLine, L"-vf5fs") != nullptr;
-    const bool runStF = !runVF2 && !runVF5FS;
+    // Test the LJ and YLAD switches first: both contain "-vf5fs" as a prefix, so the Y6 test
+    // must exclude them.
+    const bool runVF5FS_LJ = !runVF2 && !runFV && !runMR && wcsstr(cmdLine, L"-vf5fs-lj") != nullptr;
+    const bool runVF5FS_YLAD = !runVF2 && !runFV && !runMR && !runVF5FS_LJ
+        && wcsstr(cmdLine, L"-vf5fs-ylad") != nullptr;
+    const bool runVF5FS = !runVF2 && !runFV && !runMR && !runVF5FS_LJ && !runVF5FS_YLAD
+        && wcsstr(cmdLine, L"-vf5fs") != nullptr;
+    const bool runStF = !runVF2 && !runVF2_K2 && !runVON_K2 && !runVF5FS && !runVF5FS_LJ && !runVF5FS_YLAD;
 
-    const bool anyGameArg = runVF2 || runFV || runMR || runVF5FS || wcsstr(cmdLine, L"-stf") != nullptr;
+    // "-frames N": run N frames, then leave the loop normally and shut the module down. For
+    // automated smoke tests, so a run ends through the real teardown path instead of being killed
+    // (see YAMPGeneral::GetFrameLimit). Absent or malformed = unlimited, the normal case.
+    if (const wchar_t* framesArg = wcsstr(cmdLine, L"-frames "))
+    {
+        gGeneral.SetFrameLimit(static_cast<uint32_t>(_wtoi(framesArg + 8)));
+    }
+
+    const bool anyGameArg = runVF2 || runVF2_K2 || runVON_K2 || runFV || runMR || runVF5FS || runVF5FS_LJ || runVF5FS_YLAD
+        || wcsstr(cmdLine, L"-stf") != nullptr;
     if (!anyGameArg) {
         Launcher::Run(hInstance, nShowCmd);
+        ImGui::DestroyContext();
+        return 0;
+    }
+
+    if (runVF5FS_LJ) {
+        // --- Lost Judgment VF5FS path (DX12, on the shared source/pxd platform layer)
+        gGeneral.SetGameId(YAMPGeneral::GameId::VF5FS_LJ);
+        HMODULE dll = vf5fs::LJ::LoadDLL();
+        if (!dll) {
+            // LoadDLL already told the user what is missing; nothing to run without it.
+            ImGui::DestroyContext();
+            return 0;
+        }
+
+        vf5fs::LJ::PreInitialize();
+        RenderWindow window(hInstance, dll, nShowCmd);
+        vf5fs::LJ::Run(window);
+        ImGui::DestroyContext();
+        return 0;
+    }
+
+    if (runVF2_K2 || runVON_K2) {
+        // --- Yakuza Kiwami 2 m2ftg path (GOG; a third pxd generation, sl 0xF3C0 / gs 0x202140).
+        // Both of Kiwami 2's modules run here: they are the same engine build and differ only in
+        // GameDesc (DLL name + config.kind), which m2ftg::K2::CurrentGame() picks off the GameId.
+        gGeneral.SetGameId(runVON_K2 ? YAMPGeneral::GameId::VON_K2 : YAMPGeneral::GameId::VF2_K2);
+        HMODULE dll = m2ftg::K2::LoadDLL();
+        if (!dll) {
+            ImGui::DestroyContext();
+            return 0;
+        }
+
+        m2ftg::K2::PreInitialize();
+        RenderWindow window(hInstance, dll, nShowCmd);
+        m2ftg::K2::Run(window);
+        ImGui::DestroyContext();
+        return 0;
+    }
+
+    if (runVF5FS_YLAD) {
+        // --- Yakuza: Like a Dragon VF5FS path (DX11; VF2's engine generation, LJ's protocol)
+        gGeneral.SetGameId(YAMPGeneral::GameId::VF5FS_YLAD);
+        HMODULE dll = vf5fs::YLAD::LoadDLL();
+        if (!dll) {
+            // LoadDLL already told the user what is missing; nothing to run without it.
+            ImGui::DestroyContext();
+            return 0;
+        }
+
+        vf5fs::YLAD::PreInitialize();
+        RenderWindow window(hInstance, dll, nShowCmd);
+        vf5fs::YLAD::Run(window);
         ImGui::DestroyContext();
         return 0;
     }
@@ -99,16 +174,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     else if (!runStF) {
         // --- VF5FS path (unchanged; DX11on12)
         gGeneral.SetGameId(YAMPGeneral::GameId::VF5FS);
-        HMODULE dll = Y6::VF5FS::LoadDLL();
+        HMODULE dll = vf5fs::Y6::LoadDLL();
         if (!dll) {
             // LoadDLL already told the user what is missing; nothing to run without it.
             ImGui::DestroyContext();
             return 0;
         }
 
-        Y6::VF5FS::PreInitialize();
+        vf5fs::Y6::PreInitialize();
         RenderWindow window(hInstance, dll, nShowCmd);
-        Y6::VF5FS::Run(window);
+        vf5fs::Y6::Run(window);
         ImGui::DestroyContext();
         return 0;
     }

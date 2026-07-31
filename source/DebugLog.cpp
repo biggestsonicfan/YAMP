@@ -1,6 +1,6 @@
 #include "DebugLog.h"
 
-#ifdef _DEBUG
+#if YAMP_DEBUG_LOGGING
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>

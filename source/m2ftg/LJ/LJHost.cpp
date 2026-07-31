@@ -1,14 +1,14 @@
 #include "LJHost.h"
 
 // Defined in HostCdevice.cpp: close + ExecuteCommandLists StF's recorded render lists (host's job).
-void ExecuteStfRenderListsNow();
+void ExecuteModuleRenderListsNow();
 // Defined in HostCdevice.cpp: mark the DLL's per-frame render window so the ResourceBarrier hook
 // only corrects StF's own barrier StateBefore values (not d3d11on12's blit barriers).
-void SetStfRenderActiveNow(bool active);
+void SetModuleRenderActiveNow(bool active);
 // Defined in HostCdevice.cpp: PATH B — close+execute+flush+reopen StF's own draw list each frame.
-void SubmitStfFrameListNow();
+void SubmitModuleFrameListNow();
 // Defined in HostCdevice.cpp: true once a submit hung/removed the device (stop the loop, DRED dumped).
-bool StfExecDisabledNow();
+bool ModuleExecDisabledNow();
 // Defined in HostCdevice.cpp: the host's per-frame upload-pool frame-advance — bump the upload-frame
 // stamp + recycle StF's upload buffers (in-use -> available). Fixes the pool-exhaustion crash.
 void AdvanceFrameStampNow();
@@ -19,22 +19,23 @@ void AdvanceFrameStampNow();
 
 #include "../../criware/Cri.h"
 
-#include "../sl.h"
-#include "gs.h"
+#include "../../pxd/LJ/sl.h"
+#include "../../pxd/LJ/gs.h"
 #include "../m2ftg.h"
-#include "../Imports.h"
+#include "../../pxd/Imports.h"
 #include "Patch.h"
-#include "sys_util.h"
-#include "cs_game.h"
+#include "../../pxd/LJ/sys_util.h"
+#include "../../pxd/LJ/cs_game.h"
 
 #include "../ImportSymbols.h"
-#include "HostCdevice.h"
+#include "../../pxd/LJ/HostCdevice.h"
 #include "HleHooks.h"
-#include "CharRamFix.h"
-#include "../ElfRom.h"
-#include "../M2Input.h"
+#include "../ELF/CharRamFix.h"
+#include "../ELF/ElfRom.h"
+#include "../../input/Input.h"
 #include "../HostUI.h"
 #include "../../YAMPGeneral.h"
+#include "../../GameVerify.h"
 #include "../../imgui/imgui.h"
 
 #include "../../DebugLog.h"
@@ -43,6 +44,9 @@ void AdvanceFrameStampNow();
 
 namespace m2ftg
 {
+	// The pxd platform layer this host is built on (source/pxd): sl/gs/cgs_device_context,
+	// the host cdevice, Imports/ImportSymbol. Shared with the LJ VF5FS host.
+	using namespace pxd;
         // Per-game facts (DLL name, config.kind, ROM names, i960 RVAs) live in LJHost.h
         // (GameDesc / CurrentGame()) — the LJ-specific but m2ftg-generic hosting header.
 
@@ -206,36 +210,38 @@ namespace m2ftg
                 gamePath.assign(buf.get());
             }
 
-            gameDll.reset(LoadLibraryW((gamePath / game.dll_name).c_str()));
-            if (gameDll == nullptr)
+            // Locate the DLL as a FILE first (the CWD, then the "stf"/"fv"/"mr" subdirectory):
+            // the integrity check has to run before LoadLibrary, or a module YAMP is about to
+            // reject has already run its DllMain by the time we know what it is.
+            std::filesystem::path dllFile = gamePath / game.dll_name;
+            if (!std::filesystem::is_regular_file(dllFile))
             {
-                // Try loading from a subdirectory ("stf" / "fv")
                 gamePath.append(game.subdir);
-                gameDll.reset(LoadLibraryW((gamePath / game.dll_name).c_str()));
+                dllFile = gamePath / game.dll_name;
             }
 
-            if (!gameDll)
+            if (!std::filesystem::is_regular_file(dllFile))
             {
                 const std::wstring str(L"Could not load " + std::wstring(game.dll_name) + L"!\n\nMake sure that YAMP.exe is located next to the DLL file or its \"" + game.subdir + L"\" subdirectory contains it.");
                 MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
+                return nullptr;
             }
-            else
+
+            gGeneral.SetDLLName(WcharToUTF8(game.dll_name));
+
+            // Hard gate: the module's SHA-256 must match a build YAMP knows how to patch, and
+            // the parent game must actually be installed. CheckBeforeLoad sets the DLL
+            // timestamp for the About panel and explains whichever check failed to the user.
+            if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
             {
-                gGeneral.SetDLLName(WcharToUTF8(game.dll_name));
+                return nullptr;
+            }
 
-                // Get the checksum
-                PIMAGE_DOS_HEADER dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(gameDll.get());
-                PIMAGE_NT_HEADERS ntHeader = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(dosHeader) + dosHeader->e_lfanew);
-                const DWORD timeStamp = ntHeader->FileHeader.TimeDateStamp;
-                gGeneral.SetDLLTimestamp(timeStamp);
-
-                // Reject known old DLLs
-                if (timeStamp == 0x603E22E3 || timeStamp == 0x606D6969 || timeStamp == 0x6075A65A)
-                {
-                    const std::wstring str(std::wstring(game.dll_name) + L" is of an unsupported version!\n\nPlease update your game to the latest version.");
-                    MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-                    gameDll.reset();
-                }
+            gameDll.reset(LoadLibraryW(dllFile.c_str()));
+            if (!gameDll)
+            {
+                const std::wstring str(L"Could not load " + std::wstring(game.dll_name) + L"!\n\nThe file exists but Windows refused to load it.");
+                MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
             }
 
             return gameDll.get();
@@ -247,27 +253,9 @@ namespace m2ftg
             gGeneral.LoadSettings();
         }
 
-        static void CheckForExecutable()
-        {
-            // TODO: Make more graceful instead of killing the app
-            const std::wstring executablePath = (gamePath.parent_path() / L"Yakuza6.exe").native();
-
-            // We'll consider the file valid if it has MZ and PE magic values
-            wil::unique_hfile file(CreateFileW(executablePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-            FAIL_FAST_IMMEDIATE_IF(!file);
-
-            wil::unique_handle fileMapping(CreateFileMapping(file.get(), nullptr, PAGE_READONLY, 0, 0, nullptr));
-            FAIL_FAST_IMMEDIATE_IF_NULL(fileMapping);
-
-            wil::unique_mapview_ptr<IMAGE_DOS_HEADER> dosHeaderView(static_cast<PIMAGE_DOS_HEADER>(MapViewOfFile(fileMapping.get(), FILE_MAP_READ, 0, 0, 0)));
-            FAIL_FAST_IMMEDIATE_IF_NULL(dosHeaderView);
-
-            FAIL_FAST_IMMEDIATE_IF(dosHeaderView->e_magic != 'ZM');
-
-            PIMAGE_NT_HEADERS64 peHeaderView = reinterpret_cast<PIMAGE_NT_HEADERS64>(reinterpret_cast<char*>(dosHeaderView.get()) + dosHeaderView->e_lfanew);
-
-            FAIL_FAST_IMMEDIATE_IF(peHeaderView->Signature != 'EP');
-        }
+        // (The old CheckForExecutable stub — a hardcoded Yakuza6.exe MZ/PE test inherited from the
+        // VF5FS host, never enabled here — is gone: Verify::CheckParentGame in LoadDLL does this
+        // properly, for the right executable, before the module is loaded.)
 
         void m2ftg::Run(RenderWindow& window)
         {
@@ -276,8 +264,6 @@ namespace m2ftg
             const auto module_stop = reinterpret_cast<module_func_t>(GetProcAddress(gameDll.get(), "module_stop"));
             THROW_LAST_ERROR_IF_NULL(module_stop);
             module_func_t module_main;
-
-            //CheckForExecutable();
 
             if (!ResolveSymbolsAndInstallPatches(gameDll.get(), window))
             {
@@ -344,10 +330,10 @@ namespace m2ftg
             // are dip switches in the YAMP settings (module_start copies the config once, so
             // changes need a restart).
             params.config.kind = CurrentGame().kind; // 2 = Sonic the Fighters, 1 = Fighting Vipers
-            params.config.difficulty = settings->m_stfDifficulty <= 3 ? static_cast<uint8_t>(settings->m_stfDifficulty) : 1;
-            params.config.country = settings->m_stfCountry <= 2 ? static_cast<uint8_t>(settings->m_stfCountry) : 0;
-            params.config.is_freeplay = settings->m_stfFreeplay ? 1 : 0;
-            params.config.is_vs_mode = settings->m_stfVersusMode ? 1 : 0;
+            params.config.difficulty = settings->m_m2Difficulty <= 3 ? static_cast<uint8_t>(settings->m_m2Difficulty) : 1;
+            params.config.country = settings->m_m2Country <= 2 ? static_cast<uint8_t>(settings->m_m2Country) : 0;
+            params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
+            params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
 
             // Set up a FPS limiter
             // TODO: Do more gracefully
@@ -366,7 +352,7 @@ namespace m2ftg
                 }
             }
 
-            ApplyAspectSetting(window, settings->m_stfAspect);
+            ApplyAspectSetting(window, settings->m_m2Aspect);
 
             // MUST precede module_start too, and precede ApplyRetarget: the loose-ROM gate is
             // consulted during the archive mount inside module_start, and retarget entries may
@@ -403,10 +389,20 @@ namespace m2ftg
             {
                 LARGE_INTEGER lastTime;
                 QueryPerformanceCounter(&lastTime);
+                // "-frames N" ends the run HERE rather than by killing the process, so smoke tests
+                // take the real teardown path (see YAMPGeneral::GetFrameLimit).
+                const uint32_t frameLimit = gGeneral.GetFrameLimit();
+                uint32_t framesRun = 0;
                 while (!window.IsShuttingDown())
                 {
                     DebugLog("[%s::Run] GameLoop iter\n", gGeneral.GetGameTag());
                     if (!GameLoop(module_main, window)) { DebugLog("[%s::Run] GameLoop returned false\n", gGeneral.GetGameTag()); break; }
+                    if (frameLimit != 0 && ++framesRun >= frameLimit)
+                    {
+                        DebugLogFile("[%s::Run] frame limit %u reached, shutting down\n",
+                            gGeneral.GetGameTag(), frameLimit);
+                        break;
+                    }
 
                     // TODO: Waitable timer
                     LARGE_INTEGER currentTime;
@@ -417,7 +413,11 @@ namespace m2ftg
                     lastTime = currentTime;
                 }
 
-                // TODO: module_stop
+                // Tell the module to shut down. Completes the start/main/stop protocol instead of
+                // relying on process exit, and gives the module a chance to release what it
+                // allocated. VF5FS-LJ returns 0 here; the m2ftg modules are logged the same way.
+                const int stopResult = module_stop(0, nullptr);
+                DebugLogFile("[%s::Run] module_stop -> 0x%X\n", gGeneral.GetGameTag(), stopResult);
             }
         }
 
@@ -465,9 +465,9 @@ namespace m2ftg
             // struct; this poll is what makes the change take effect without a restart).
             {
                 static uint32_t s_lastAspect = UINT32_MAX;
-                if (settings->m_stfAspect != s_lastAspect)
+                if (settings->m_m2Aspect != s_lastAspect)
                 {
-                    s_lastAspect = settings->m_stfAspect;
+                    s_lastAspect = settings->m_m2Aspect;
                     ApplyAspectSetting(window, s_lastAspect);
                 }
             }
@@ -482,7 +482,10 @@ namespace m2ftg
             execute_info.status = 0;          // host zeroes each frame, then ORs pause/coin bits
             execute_info.output_texid = 0;
             execute_info.result = 0x80004005; // LJ presets E_FAIL; module_main overwrites
-            execute_info.sound_volume = 1.0f;
+            // Master volume: the module's own field, so its mixer does the attenuation (see
+            // YAMPSettings::m_volumePercent). 100% = 1.0f, exactly what this host passed before.
+            execute_info.sound_volume =
+                static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
 
             // Escape toggles the pause menu; while it is open, drive the MODULE'S OWN pause path
             // (status bit0 — see DrawPauseMenu's RE notes). Escape is reserved for this, like
@@ -503,9 +506,9 @@ namespace m2ftg
             }
 
             // Input: refresh the shared XInput snapshot, evaluate each player's bindings via
-            // csl_pad (M2Input, set up on the YAMP Controls page), then copy the shared
+            // csl_pad (Input, set up on the YAMP Controls page), then copy the shared
             // 0xE0-byte prefix into the m2ftg pad blocks (same pxd sl layout, same button bits).
-            M2Input::PollPads();
+            Input::PollPads();
             s_pads[0].set_state(0);
             s_pads[1].set_state(1);
             for (int i = 0; i < 2; i++)
@@ -524,7 +527,7 @@ namespace m2ftg
             {
                 for (int i = 0; i < 8; i++)
                 {
-                    execute_info.assign[p][i] = M2Input::MODULE_ASSIGN[i];
+                    execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
                 }
             }
 
@@ -535,8 +538,8 @@ namespace m2ftg
                 static bool s_coinWasDown[2] = {};
                 for (int p = 0; p < 2; p++)
                 {
-                    const bool down = M2Input::ActionDown(p, M2Input::Action_Coin);
-                    if (down && !s_coinWasDown[p] && !settings->m_stfFreeplay && !s_pauseMenuOpen)
+                    const bool down = Input::ActionDown(p, Input::Action_Coin);
+                    if (down && !s_coinWasDown[p] && !settings->m_m2Freeplay && !s_pauseMenuOpen)
                     {
                         execute_info.status |= 0x20;
                     }
@@ -552,7 +555,7 @@ namespace m2ftg
             // insert; the dance would just swallow the player's first press. Follows the same
             // setting Run passed to module_start as config.is_freeplay (changing it needs a
             // restart, so the two always agree within a session).
-            const bool isFreeplay = settings->m_stfFreeplay;
+            const bool isFreeplay = settings->m_m2Freeplay;
             if (!isFreeplay && !s_pauseMenuOpen)
             {
                 if (s_coinPending && s_startScreen)
@@ -601,9 +604,9 @@ namespace m2ftg
 
             // Bracket the DLL's render so the ResourceBarrier hook corrects StF's barrier StateBefore
             // values (ping-pong RTs assume last-frame state; YAMP creates in COMMON -> id=527 desync).
-            SetStfRenderActiveNow(true);
+            SetModuleRenderActiveNow(true);
             const int funcResult = func(sizeof(execute_info), &execute_info);
-            SetStfRenderActiveNow(false);
+            SetModuleRenderActiveNow(false);
 
             // Module->host feedback: bit6 = "press start" screen active (LJ mirrors it to
             // scene+0x2B58 and gates the coin/start injection on it).
@@ -690,8 +693,8 @@ namespace m2ftg
             // module records nothing anyway, so skip the close/execute/reopen dance and the upload-stamp
             // advance — submit nothing, exactly like LJ.
             constexpr bool kDisableStfSubmit = false;
-            if (!kDisableStfSubmit && !s_pauseMenuOpen) SubmitStfFrameListNow();
-            if (StfExecDisabledNow())
+            if (!kDisableStfSubmit && !s_pauseMenuOpen) SubmitModuleFrameListNow();
+            if (ModuleExecDisabledNow())
             {
                 // A submit hung/removed the GPU — DRED was dumped. Stop now so StF's next-frame upload
                 // allocation doesn't crash on the dead device (that cascade was masking the real fault).
@@ -699,15 +702,15 @@ namespace m2ftg
                 return false;
             }
 
-            // The other half of the host's per-frame job (twin of SubmitStfFrameListNow): advance the
+            // The other half of the host's per-frame job (twin of SubmitModuleFrameListNow): advance the
             // upload-frame stamp + recycle StF's upload buffers (in-use -> available). Runs AFTER the flush
             // above, so every recycled buffer is GPU-complete. This is the fix for the upload-pool
             // exhaustion crash (FUN_18009be60, ~frame 570). Must precede StF's next-frame func().
             if (!s_pauseMenuOpen) AdvanceFrameStampNow();
 
-            // (Legacy) our force-submit of StF's lists — currently a no-op (kExecuteStfLists=false). The
+            // (Legacy) our force-submit of StF's lists — currently a no-op (kExecuteModuleLists=false). The
             // handler call above is the correct engine-driven submit; keep this disabled.
-            ExecuteStfRenderListsNow();
+            ExecuteModuleRenderListsNow();
 
             cgs_tex* display_tex = gs::sm_context->handle_tex.get(execute_info.output_texid);
             if (display_tex == nullptr) return false;

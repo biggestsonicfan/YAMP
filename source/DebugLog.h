@@ -8,9 +8,23 @@
 //                            debugger attached (D3D12 validation messages, DRED dumps)
 //  - DebugLogV(fmt, va_list) forwarding entry for local variadic wrappers (e.g. AtomEngine's Log)
 // Debug builds only: in Release/Master the macros compile away entirely (arguments are not
-// evaluated) and DebugLogV is an empty inline.
+// evaluated), DebugLogV is an empty inline, and no log file is opened or even named — the
+// filenames do not survive into the binary.
+//
+// YAMP_DEBUG_LOGGING is the single gate for every diagnostic file YAMP writes; RenderWindow.cpp's
+// pso_stream.log / heaps.log dumps use it too. It tests BOTH defines on purpose:
+//   DEBUG  is premake's own (`filter "configurations:Debug"` in premake5.lua) — the authoritative
+//          one, since it tracks the configuration rather than a compiler switch;
+//   _DEBUG comes from the MSVC debug CRT (staticruntime "on" + runtime "Debug").
+// Keying off _DEBUG alone would silently disable ALL logging in Debug builds if the Debug config
+// were ever switched to the release runtime, which is a common speed tweak.
+#if defined(DEBUG) || defined(_DEBUG)
+#define YAMP_DEBUG_LOGGING 1
+#else
+#define YAMP_DEBUG_LOGGING 0
+#endif
 
-#ifdef _DEBUG
+#if YAMP_DEBUG_LOGGING
 
 #include <cstdarg>
 

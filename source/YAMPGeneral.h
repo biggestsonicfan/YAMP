@@ -47,11 +47,19 @@ public:
 	// Launcher = no game selected yet (the no-argument game-select menu).
 	enum class GameId
 	{
-		VF5FS,
+		VF5FS,      // Virtua Fighter 5: Final Showdown from Yakuza 6 (DX11)
 		StF,
 		VF2,
 		FV,
 		MR,
+		VF5FS_LJ,   // the same game from Lost Judgment (DX12) — a different pxd generation, so a
+		            // separate host (source/vf5fs/LJ) but the same settings and save data
+		VF2_K2,     // Virtua Fighter 2 again, from Yakuza Kiwami 2 (GOG) — a THIRD pxd
+		            // generation (sl 0xF3C0 / gs 0x202140), hosted by source/m2ftg/K2
+		VON_K2,     // Virtual On, Kiwami 2's OTHER arcade module ("omg" = Operation Moon Gate).
+		            // Built one second after the VF2 one, so it shares the whole K2 host.
+		VF5FS_YLAD, // ...and again from Yakuza: Like a Dragon (= Yakuza 7, DX11), a third build:
+		            // VF2's engine generation running the LJ module protocol (source/vf5fs/YLAD)
 		Launcher,
 	};
 
@@ -73,6 +81,15 @@ public:
 	GameId GetGameId() const { return m_gameId; }
 	void SetGameId(GameId id) { m_gameId = id; }
 
+	// Optional "-frames N" run limit: after N frames a host leaves its loop NORMALLY and shuts the
+	// module down, instead of the run being ended by killing the process. Zero means unlimited (the
+	// normal case). This exists because a killed process cannot be told apart from a crashed one:
+	// terminating a debuggee mid-frame faults whichever worker thread was inside an allocator, which
+	// looks exactly like a real bug in the module. A frame limit gives smoke tests a deterministic
+	// length AND a real teardown path to exercise.
+	uint32_t GetFrameLimit() const { return m_frameLimit; }
+	void SetFrameLimit(uint32_t frames) { m_frameLimit = frames; }
+
 	// Display names for the hosted arcade game and the parent game it was extracted from,
 	// driven by the GameId set in wWinMain before the window/UI ever read them.
 	const char* GetArcadeGameName() const;
@@ -80,6 +97,12 @@ public:
 	// Short per-game abbreviation for log prefixes ("StF", "FV", "VF2", "VF5FS"), so logs from
 	// code paths shared between games (LJ m2ftg host, HostCdevice) name the game actually running.
 	const char* GetGameTag() const;
+
+	// True only for the Model 2 arcade boards (StF/FV/MR/VF2). Those render a 4:3 240p-era image
+	// on a CRT cabinet, so the aspect-ratio boxing and the CRT filter belong to them. Every VF5FS
+	// build is a modern widescreen 3D game that must NOT get either treatment — the settings are
+	// shared (one [StF] section), so the presentation path has to gate on the game, not the flag.
+	bool IsModel2ArcadeGame() const;
 
 	void SetKeyPressed(uint32_t key, bool pressed)
 	{
@@ -102,6 +125,7 @@ public:
 private:
 	std::string m_dllName;
 	uint32_t m_dllTimestamp = 0;
+	uint32_t m_frameLimit = 0;
 	GameId m_gameId = GameId::VF5FS;
 	std::filesystem::path m_userDataPath;
 	std::unique_ptr<YAMPSettings> m_settings;

@@ -56,12 +56,12 @@ ID3D12RootSignature* GetCapturedRootSignature() { return g_capturedRootSig; }
 // every ID3D12GraphicsCommandList, so YAMP's SetPipelineState hook also fires on d3d11on12's blit
 // list. Injecting StF's heaps/root-sig there corrupts the blit (driver AV). Gate the injection on
 // "is this an StF PSO" so only the DLL's own draws get the StF state.
-static void* g_stfPsos[512] = {};
-static int   g_stfPsoCount = 0;
-bool IsStfPso(void* pso)
+static void* g_modulePsos[512] = {};
+static int   g_modulePsoCount = 0;
+bool IsModulePso(void* pso)
 {
 	if (!pso) return false;
-	for (int i = 0; i < g_stfPsoCount; ++i) if (g_stfPsos[i] == pso) return true;
+	for (int i = 0; i < g_modulePsoCount; ++i) if (g_modulePsos[i] == pso) return true;
 	return false;
 }
 
@@ -74,9 +74,9 @@ static ID3D12Device* g_dredDevice = nullptr;
 
 // Published each frame from BlitDX12Texture; the ResourceBarrier hook watches for this exact resource
 // to learn whether StF ever transitions display_tex+0x98 to RENDER_TARGET (i.e. renders into it).
-static ID3D12Resource* g_stfOutputRes = nullptr;
-void SetStfOutputResource(ID3D12Resource* r) { g_stfOutputRes = r; }
-ID3D12Resource* GetStfOutputResource() { return g_stfOutputRes; }
+static ID3D12Resource* g_moduleOutputRes = nullptr;
+void SetModuleOutputResource(ID3D12Resource* r) { g_moduleOutputRes = r; }
+ID3D12Resource* GetModuleOutputResource() { return g_moduleOutputRes; }
 
 static void DumpDRED(ID3D12Device* dev)
 {
@@ -223,67 +223,45 @@ static LONG WINAPI DredVeh(EXCEPTION_POINTERS* ep)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// Reflect a shader's resource bindings (the ground truth for the root sig). D3D_SHADER_INPUT_TYPE:
-// 0=CBV, 1=TBUFFER, 2=SRV(texture), 3=SAMPLER, 4=UAV. Logs each resource's register + space so we can
-// build a root signature that matches exactly (replacing the fabricated best-guess one).
-typedef HRESULT(WINAPI* D3DReflect_t)(LPCVOID, SIZE_T, REFIID, void**);
-static void ReflectShaderBindings(const void* bc, size_t len, const char* stage)
+// Return the hardware register SV_Position occupies in a shader's input (ISG1/ISGN) or output
+// (OSG1/OSGN) signature, or -1 if absent/unparsable. D3D12 requires the VS output and PS input to
+// agree on it; D3D11 did not, which is why pxd shader pairs can be legal there and rejected here
+// (debug layer STATE_CREATION ERROR #660).
+static int SignaturePositionRegister(const void* bc, size_t len, bool wantInput)
 {
-	if (!bc || !len) { DebugLog("[reflect] %s: no bytecode\n", stage); return; }
-	{
-		const uint8_t* m = static_cast<const uint8_t*>(bc);
-		// DXBC magic "DXBC"; then scan the chunk FourCCs so we know if it's DXIL (DXIL/STAT) vs DXBC (RDEF).
-		DebugLog("[reflect] %s magic=%c%c%c%c chunks:", stage, m[0], m[1], m[2], m[3]);
-		if (m[0] == 'D' && m[1] == 'X' && m[2] == 'B' && m[3] == 'C' && len > 0x20)
-		{
-			const uint32_t nchunks = *reinterpret_cast<const uint32_t*>(m + 0x1C);
-			const uint32_t* offs = reinterpret_cast<const uint32_t*>(m + 0x20);
-			for (uint32_t i = 0; i < nchunks && i < 16; ++i)
-			{
-				if (offs[i] + 4 > len) break;
-				const char* fc = reinterpret_cast<const char*>(m + offs[i]);
-				DebugLog("  %c%c%c%c", fc[0], fc[1], fc[2], fc[3]);
-			}
-		}
-		DebugLog("\n");
-	}
-	// DXIL: parse the PSV0 (Pipeline State Validation) chunk for the resource bindings.
 	const uint8_t* m = static_cast<const uint8_t*>(bc);
-	if (!(m[0] == 'D' && m[1] == 'X' && m[2] == 'B' && m[3] == 'C') || len < 0x20) return;
+	if (!m || len < 0x24 || m[0] != 'D' || m[1] != 'X' || m[2] != 'B' || m[3] != 'C') return -1;
 	const uint32_t nchunks = *reinterpret_cast<const uint32_t*>(m + 0x1C);
 	const uint32_t* offs = reinterpret_cast<const uint32_t*>(m + 0x20);
-	const uint8_t* psv = nullptr;
-	for (uint32_t i = 0; i < nchunks && i < 32; ++i)
+	for (uint32_t i = 0; i < nchunks; ++i)
 	{
+		if (offs[i] + 8 > len) continue;
 		const char* fc = reinterpret_cast<const char*>(m + offs[i]);
-		if (fc[0] == 'P' && fc[1] == 'S' && fc[2] == 'V' && fc[3] == '0') { psv = m + offs[i] + 8; break; }
-	}
-	if (!psv) { DebugLog("[reflect] %s: no PSV0\n", stage); return; }
-	const uint8_t* p = psv;
-	const uint32_t riSize = *reinterpret_cast<const uint32_t*>(p); p += 4 + riSize;   // skip PSVRuntimeInfo
-	const uint32_t resCount = *reinterpret_cast<const uint32_t*>(p); p += 4;
-	DebugLog("[reflect] %s: PSV0 resources=%u\n", stage, resCount);
-	if (resCount)
-	{
-		const uint32_t biSize = *reinterpret_cast<const uint32_t*>(p); p += 4;
-		for (uint32_t i = 0; i < resCount; ++i)
+		const bool isIn = (fc[0] == 'I' && fc[1] == 'S' && fc[2] == 'G');   // ISGN / ISG1
+		const bool isOut = (fc[0] == 'O' && fc[1] == 'S' && fc[2] == 'G');  // OSGN / OSG1
+		if (wantInput ? !isIn : !isOut) continue;
+		const uint8_t* p = m + offs[i] + 8;
+		const uint32_t count = *reinterpret_cast<const uint32_t*>(p);
+		constexpr size_t kElem = 32; // stream,nameOff,semIdx,sysVal,compType,reg,mask,rwMask,pad
+		for (uint32_t e = 0; e < count; ++e)
 		{
-			const uint32_t* ri = reinterpret_cast<const uint32_t*>(p + i * biSize);
-			const uint32_t resType = ri[0], space = ri[1], lo = ri[2], hi = ri[3];
-			const char* tn = resType == 1 ? "SAMPLER" : resType == 2 ? "CBV"
-				: (resType >= 3 && resType <= 5) ? "SRV" : (resType >= 6) ? "UAV" : "?";
-			DebugLog("[reflect]   %s %s(rt%u) space=%u reg=%u..%u\n",
-				stage, tn, resType, space, lo, hi);
+			const uint8_t* el = p + 8 + e * kElem;
+			if (el + kElem > m + len) break;
+			const uint32_t sysVal = *reinterpret_cast<const uint32_t*>(el + 12);
+			if (sysVal == 1) // D3D_NAME_POSITION
+				return static_cast<int>(*reinterpret_cast<const uint32_t*>(el + 20));
 		}
 	}
+	return -1;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 	ID3D12Device2* self, const D3D12_PIPELINE_STATE_STREAM_DESC* pDesc, REFIID riid, void** ppPSO)
 {
-	// Diagnostic stream dump — Debug builds only. In Release psoLog is statically null, so every
-	// `if (psoLog...)` block below is dead code the optimizer strips (no file, no strings).
-#ifdef _DEBUG
+	// Diagnostic stream dump — Debug builds only (YAMP_DEBUG_LOGGING, see DebugLog.h). In Release
+	// psoLog is statically null, so every `if (psoLog...)` block below is dead code the optimizer
+	// strips (no file, no strings).
+#if YAMP_DEBUG_LOGGING
 	static FILE* psoLog = nullptr;
 	if (psoLog == nullptr)
 	{
@@ -380,7 +358,15 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 				s_rtLog++;
 			}
 			// StF's RTs are all B8G8R8A8_UNORM (87) per the [rt-rb] readbacks.
-			constexpr bool kForceRenderTargetFormats = true;
+			//
+			// m2ftg ONLY. This was an StF black-screen fix (GBV id=679: a PSO with NumRenderTargets==0
+			// discards every pixel the shader writes), where numRT==0 always meant "the template was
+			// never filled in". The LJ VF5FS module legitimately builds depth-only pipelines —
+			// numRT==0 with a D32_FLOAT DSV and a PS that writes only SV_Depth — and forcing a colour
+			// target onto those is simply wrong.
+			const bool kForceRenderTargetFormats =
+				gGeneral.GetGameId() != YAMPGeneral::GameId::VF5FS_LJ &&
+				gGeneral.GetGameId() != YAMPGeneral::GameId::VF5FS;
 			if (kForceRenderTargetFormats && *numRT == 0)
 			{
 				*numRT = 1;
@@ -389,21 +375,45 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 			}
 		}
 
-		// ONE-TIME: reflect the VS/PS shader resource bindings to derive the REAL root-sig layout.
-		// Subobjects are {8-byte type} + payload; VS type@0x010 -> D3D12_SHADER_BYTECODE{ptr@0x018,len@0x020},
-		// PS type@0x028 -> {ptr@0x030,len@0x038}.
+
+		// --- VS/PS signature linkage check (VF5FS) -------------------------------------------------
+		// The LJ VF5FS module's first pipeline pairs a full character-model VS (11 varyings, so DXIL
+		// puts SV_Position in register 11) with a depth-only PS (its ONLY input is SV_Position, which
+		// DXIL therefore assigns register 0). D3D11 ignored surplus VS outputs; D3D12 refuses to link
+		// mismatched SV_Position registers (#660) -> E_INVALIDARG -> the module binds a null PSO and
+		// SetPipelineState(null) faults inside D3D12Core.
+		//
+		// A pipeline with no render targets and a PS that only writes SV_Depth is a depth pass, and a
+		// depth pass is legal with NO pixel shader at all. So when the two cannot link, drop the PS
+		// and let the pipeline validate as depth-only. This is LOAD-BEARING: it fires exactly once
+		// per run (VS out reg=11 vs PS in reg=0, numRT=0) and without it that pipeline fails to
+		// create, the module binds a null PSO and SetPipelineState(null) faults. The dropped PS
+		// samples t0, so a depth copy/reproject is presumably lost; revisit if artefacts appear.
 		{
-			static bool s_reflected = false;
-			if (!s_reflected)
+			const void* vsBc = *reinterpret_cast<void* const*>(s + 0x018);
+			const size_t vsLen = *reinterpret_cast<const size_t*>(s + 0x020);
+			void*& psBc = *reinterpret_cast<void**>(s + 0x030);
+			size_t& psLen = *reinterpret_cast<size_t*>(s + 0x038);
+			const uint32_t numRT = *reinterpret_cast<const uint32_t*>(s + 0x27C + 8 * sizeof(DXGI_FORMAT));
+			if (vsBc && psBc)
 			{
-				s_reflected = true;
-				const void* vsBc = *reinterpret_cast<void**>(s + 0x018);
-				const size_t vsLen = *reinterpret_cast<size_t*>(s + 0x020);
-				const void* psBc = *reinterpret_cast<void**>(s + 0x030);
-				const size_t psLen = *reinterpret_cast<size_t*>(s + 0x038);
-				DebugLog("[reflect] VS bc=%p len=%zu | PS bc=%p len=%zu\n", vsBc, vsLen, psBc, psLen);
-				ReflectShaderBindings(vsBc, vsLen, "VS");
-				ReflectShaderBindings(psBc, psLen, "PS");
+				const int vsPos = SignaturePositionRegister(vsBc, vsLen, /*wantInput*/false);
+				const int psPos = SignaturePositionRegister(psBc, psLen, /*wantInput*/true);
+				if (vsPos >= 0 && psPos >= 0 && vsPos != psPos)
+				{
+					static int s_logged = 0;
+					if (s_logged < 4)
+					{
+						DebugLog("[pso-link] SV_Position VS out reg=%d vs PS in reg=%d, numRT=%u -> %s\n",
+							vsPos, psPos, numRT, numRT == 0 ? "dropping PS (depth-only)" : "left alone");
+						s_logged++;
+					}
+					if (numRT == 0)
+					{
+						psBc = nullptr;
+						psLen = 0;
+					}
+				}
 			}
 		}
 
@@ -516,9 +526,10 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 		}
 	}
 
+
 	HRESULT hr = g_origCreatePipelineState(self, pDesc, riid, ppPSO);
-	if (SUCCEEDED(hr) && ppPSO && *ppPSO && g_stfPsoCount < 512)
-		g_stfPsos[g_stfPsoCount++] = *ppPSO; // mark as an StF PSO for injection gating
+	if (SUCCEEDED(hr) && ppPSO && *ppPSO && g_modulePsoCount < 512)
+		g_modulePsos[g_modulePsoCount++] = *ppPSO; // mark as an StF PSO for injection gating
 	if (psoLog != nullptr)
 	{
 		fprintf(psoLog, "  -> hr=0x%08lX  ppPSO=%p\n",
@@ -603,7 +614,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 			g_dllRingSamplerHeap = heap;
 	}
 	// Heap-creation trace — Debug builds only (see psoLog note in HookedCreatePipelineState).
-#ifdef _DEBUG
+#if YAMP_DEBUG_LOGGING
 	static FILE* f = nullptr;
 	if (f == nullptr) fopen_s(&f, "heaps.log", "w");
 #else
@@ -1042,7 +1053,11 @@ void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend)
 
 	// Live setting: route the frame through LJ's CRT pass first (never on the alpha-blended
 	// overlay layer — LJ applies the CRT once, to the completed composite).
-	const bool useCrt = !alphaBlend && gGeneral.GetSettings()->m_stfCrtFilter && EnsureCrtResources();
+	// ...and only for the Model 2 boards: the CRT filter models an arcade cabinet's display, which
+	// is meaningless for the VF5FS builds (modern widescreen 3D). The setting lives in the shared
+	// [StF] section, so it has to be gated on the game rather than on the flag alone.
+	const bool useCrt = !alphaBlend && gGeneral.IsModel2ArcadeGame()
+		&& gGeneral.GetSettings()->m_m2CrtFilter && EnsureCrtResources();
 	D3D11_VIEWPORT finalViewport = m_viewport;
 	bool clearBackbuffer = m_requiresClear && !alphaBlend;
 	if (useCrt)
@@ -1168,10 +1183,10 @@ static bool SafeAcquireResource(ID3D12Resource* p, ID3D12Resource** out)
 // native D3D12, so its output has no D3D11 SRV; wrap the ID3D12Resource through 11on12 into a D3D11
 // shader-resource, then reuse the D3D11 fullscreen-triangle blit. The wrap + SRV are cached by
 // resource pointer (StF reuses the same RT across frames).
-ID3D12Resource* GetStfRenderTarget(int index);
-int GetStfRenderTargetCount();
-int GetStfRenderTargetState(int index);
-ID3D12Resource* GetStfResolveDst();
+ID3D12Resource* GetModuleRenderTarget(int index);
+int GetModuleRenderTargetCount();
+int GetModuleRenderTargetState(int index);
+ID3D12Resource* GetModuleResolveDst();
 
 void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 {
@@ -1196,13 +1211,15 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 	// then the 496x384 output (pre-first-resolve boot frames only).
 	constexpr D3D12_RESOURCE_STATES kShaderRead =
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-	ID3D12Resource* rt3d = texRaw ? texRaw : GetStfResolveDst();
+	ID3D12Resource* rt3d = texRaw ? texRaw : GetModuleResolveDst();
 	D3D12_RESOURCE_STATES st3d = kShaderRead;
+	D3D12_RESOURCE_STATES st3dTracked = kShaderRead;
+	bool st3dFound = false;
 	ID3D12Resource* rt2d = nullptr; D3D12_RESOURCE_STATES st2d = D3D12_RESOURCE_STATE_COMMON;
-	const int nrt = GetStfRenderTargetCount();
+	const int nrt = GetModuleRenderTargetCount();
 	for (int i = 0; i < nrt; ++i)
 	{
-		ID3D12Resource* raw = GetStfRenderTarget(i);
+		ID3D12Resource* raw = GetModuleRenderTarget(i);
 		if (!raw) continue;
 		// The tracked-RT list holds raw pointers and includes old swapchain backbuffers, which
 		// DIE on window resize — validate + ref before touching (freed entries just get skipped).
@@ -1210,15 +1227,30 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 		if (!SafeAcquireResource(raw, &r)) continue;
 		const D3D12_RESOURCE_DESC d = r->GetDesc();
 		r->Release();
-		const D3D12_RESOURCE_STATES rs = static_cast<D3D12_RESOURCE_STATES>(GetStfRenderTargetState(i));
+		const D3D12_RESOURCE_STATES rs = static_cast<D3D12_RESOURCE_STATES>(GetModuleRenderTargetState(i));
 		// Only RTs StF leaves SHADER-READABLE (0xC0) can get an SRV.
 		const bool readable = (rs & kShaderRead) != 0;
 		if (readable && d.Width == 496 && d.Height == 384) { rt2d = raw; st2d = rs; }
+		// Remember the TRACKED state of the primary source. st3d is hardcoded to 0xC0 below because
+		// StF's module leaves its RTs shader-readable; other modules need not. Handing
+		// CreateWrappedResource a state the resource is not actually in means AcquireWrappedResources
+		// emits the wrong barrier (or none), so the sample reads a resource still in RENDER_TARGET —
+		// which renders and presents happily and shows BLACK.
+		if (raw == texRaw) { st3dTracked = rs; st3dFound = true; }
 	}
+	// VF5FS only, so StF's verified-working path is bit-identical: trust the tracked state of the
+	// primary source rather than assuming StF's 0xC0.
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF5FS_LJ && st3dFound)
+	{
+		st3d = st3dTracked;
+	}
+	{ static int s_stLog = 0; if (s_stLog < 4) { ++s_stLog;
+		DebugLogFile("[blit] primary-source state: tracked=%s 0x%X -> using 0x%X\n",
+			st3dFound ? "yes" : "NO", static_cast<unsigned>(st3dTracked), static_cast<unsigned>(st3d)); } }
 	{ static int s_srcLog = 0; if (s_srcLog < 12) { ++s_srcLog;
 		DebugLogFile("[blit] src: texRaw=%p resolveDst=%p rt2d=%p (texRaw==resolveDst:%d)\n",
-			static_cast<void*>(texRaw), static_cast<void*>(GetStfResolveDst()),
-			static_cast<void*>(rt2d), texRaw == GetStfResolveDst() ? 1 : 0); } }
+			static_cast<void*>(texRaw), static_cast<void*>(GetModuleResolveDst()),
+			static_cast<void*>(rt2d), texRaw == GetModuleResolveDst() ? 1 : 0); } }
 	if (!rt3d && !rt2d) return; // nothing shader-readable yet — skip (don't composite the black display_tex)
 
 	// Per-layer 11on12 wrap + SRV cache (two live layers, headroom for RT churn).

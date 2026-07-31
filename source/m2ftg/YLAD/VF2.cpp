@@ -29,13 +29,14 @@
 #include "../../wil/resource.h"
 #include "../../criware/Cri.h"
 
-#include "../sl.h"
+#include "../../pxd/LJ/sl.h"
 #include "../m2ftg.h"
-#include "../Imports.h"
+#include "../../pxd/Imports.h"
 #include "../ImportSymbols.h"
 #include "../HostUI.h" // ApplyAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
-#include "../M2Input.h"
+#include "../../input/Input.h"
 #include "../../YAMPGeneral.h"
+#include "../../GameVerify.h"
 #include "../../RenderWindow.h"
 
 #include "../../Utils/Patterns.h"
@@ -45,6 +46,9 @@
 
 namespace m2ftg
 {
+	// The pxd platform layer this host is built on (source/pxd): sl/gs/cgs_device_context,
+	// the host cdevice, Imports/ImportSymbol. Shared with the LJ VF5FS host.
+	using namespace pxd;
 	namespace VF2
 	{
 		using namespace m2ftg; // sl layer, m2ftg structs, Imports machinery are shared
@@ -245,11 +249,30 @@ namespace m2ftg
 			gamePath.assign(buf.get());
 			gamePath /= L"vf2";
 
-			gameDll.reset(LoadLibraryW((gamePath / DLL_NAME).c_str()));
-			if (gameDll == nullptr)
+			// Locate the DLL as a FILE first: the integrity check has to run before LoadLibrary,
+			// or a module YAMP is about to reject has already run its DllMain.
+			const std::filesystem::path dllFile = gamePath / DLL_NAME;
+			if (!std::filesystem::is_regular_file(dllFile))
 			{
 				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
 					L"!\n\nPlace the DLL (with its rom/ and w64/ folders) in the \"vf2\" subdirectory next to YAMP.exe.");
+				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
+				return nullptr;
+			}
+
+			gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
+
+			// Hard gate: known-good module checksum + an installed copy of Yakuza: Like a Dragon.
+			if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
+			{
+				return nullptr;
+			}
+
+			gameDll.reset(LoadLibraryW(dllFile.c_str()));
+			if (gameDll == nullptr)
+			{
+				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
+					L"!\n\nThe file exists but Windows refused to load it.");
 				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
 			}
 			return gameDll.get();
@@ -365,9 +388,9 @@ namespace m2ftg
 			// Apply button only writes the settings struct).
 			{
 				static uint32_t s_lastAspect = UINT32_MAX;
-				if (gGeneral.GetSettings()->m_stfAspect != s_lastAspect)
+				if (gGeneral.GetSettings()->m_m2Aspect != s_lastAspect)
 				{
-					s_lastAspect = gGeneral.GetSettings()->m_stfAspect;
+					s_lastAspect = gGeneral.GetSettings()->m_m2Aspect;
 					ApplyAspectSetting(window, s_lastAspect);
 				}
 			}
@@ -377,7 +400,10 @@ namespace m2ftg
 			execute_info.status = 0;
 			execute_info.output_texid = 0;
 			execute_info.result = 0x80004005;
-			execute_info.sound_volume = 1.0f;
+			// Master volume: the module's own field, so its mixer does the attenuation (see
+			// YAMPSettings::m_volumePercent). 100% = 1.0f, exactly what this host passed before.
+			execute_info.sound_volume =
+				static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
 
 			// Escape toggles the pause menu; while it is open, drive the MODULE'S OWN pause
 			// path (status bit0 — same m2ftg protocol as StF/FV, see StF.cpp's RE notes).
@@ -397,8 +423,8 @@ namespace m2ftg
 			}
 
 			// Input: refresh the shared XInput snapshot, then evaluate each player's bindings
-			// via csl_pad (M2Input, set up on the YAMP Controls page — shared with StF/FV).
-			M2Input::PollPads();
+			// via csl_pad (Input, set up on the YAMP Controls page — shared with StF/FV).
+			Input::PollPads();
 			s_pads[0].set_state(0);
 			s_pads[1].set_state(1);
 			for (int i = 0; i < 2; i++)
@@ -412,13 +438,13 @@ namespace m2ftg
 			// Button assignments: the FIXED module-facing table (slot order A, B, Y, X, LT, LB,
 			// RT, RB). Remapping happens host-side in csl_pad::set_state, which routes each
 			// player's bound inputs onto the button bit carrying the wanted combo — so this must
-			// be M2Input::MODULE_ASSIGN, the table those routes assume (the old raw template
+			// be Input::MODULE_ASSIGN, the table those routes assume (the old raw template
 			// here shifted every combo button by one slot).
 			for (int p = 0; p < 2; p++)
 			{
 				for (int i = 0; i < 8; i++)
 				{
-					execute_info.assign[p][i] = M2Input::MODULE_ASSIGN[i];
+					execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
 				}
 			}
 
@@ -428,7 +454,7 @@ namespace m2ftg
 				static bool s_coinWasDown[2] = {};
 				for (int p = 0; p < 2; p++)
 				{
-					const bool down = M2Input::ActionDown(p, M2Input::Action_Coin);
+					const bool down = Input::ActionDown(p, Input::Action_Coin);
 					if (down && !s_coinWasDown[p] && !g_isFreeplay && !s_pauseMenuOpen)
 					{
 						execute_info.status |= 0x20;
@@ -612,17 +638,17 @@ namespace m2ftg
 			// the module's own VF2-only switches.
 			const auto* settings = gGeneral.GetSettings();
 			params.config.kind = 0;       // vf2 -> "%s/rom/vf2_rom.par"
-			params.config.difficulty = settings->m_stfDifficulty <= 3 ? static_cast<uint8_t>(settings->m_stfDifficulty) : 1;
-			params.config.country = settings->m_stfCountry <= 2 ? static_cast<uint8_t>(settings->m_stfCountry) : 0;
-			params.config.is_freeplay = settings->m_stfFreeplay ? 1 : 0;
-			params.config.is_vs_mode = settings->m_stfVersusMode ? 1 : 0;
+			params.config.difficulty = settings->m_m2Difficulty <= 3 ? static_cast<uint8_t>(settings->m_m2Difficulty) : 1;
+			params.config.country = settings->m_m2Country <= 2 ? static_cast<uint8_t>(settings->m_m2Country) : 0;
+			params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
+			params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
 			params.config.is_vf20 = settings->m_vf2Version20 ? 1 : 0;
 			params.config.is_disable_pepsi = settings->m_vf2DisablePepsi ? 1 : 0;
 			g_isFreeplay = params.config.is_freeplay != 0;
 
 			// VF2 is a native 4:3 Model 2 arcade game like StF/FV; apply the shared
 			// presentation setting (re-applied live from GameLoop when it changes).
-			ApplyAspectSetting(window, settings->m_stfAspect);
+			ApplyAspectSetting(window, settings->m_m2Aspect);
 
 			DebugLog("[vf2] calling module_start (root=%s)\n", utf8Path.c_str());
 			const int startResult = module_start(sizeof(params), &params);

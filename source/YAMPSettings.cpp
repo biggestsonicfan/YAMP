@@ -166,29 +166,35 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 	}
 
 	{
+		const wchar_t* SECTION_NAME = L"Audio";
+		m_volumePercent = GetPrivateProfileIntW(SECTION_NAME, L"Volume", m_volumePercent, iniPath.c_str());
+		if (m_volumePercent > 100) m_volumePercent = 100;
+	}
+
+	{
 		const wchar_t* SECTION_NAME = L"StF";
-		m_stfAspect = GetPrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_stfAspect, iniPath.c_str());
-		m_stfCrtFilter = GetPrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_stfCrtFilter, iniPath.c_str()) != 0;
-		m_stfDifficulty = GetPrivateProfileIntW(SECTION_NAME, L"Difficulty", m_stfDifficulty, iniPath.c_str());
-		m_stfCountry = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
-		m_stfFreeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str()) != 0;
-		m_stfVersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str()) != 0;
+		m_m2Aspect = GetPrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_m2Aspect, iniPath.c_str());
+		m_m2CrtFilter = GetPrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str()) != 0;
+		m_m2Difficulty = GetPrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
+		m_m2Country = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
+		m_m2Freeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str()) != 0;
+		m_m2VersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str()) != 0;
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
 			swprintf_s(key, L"P%dController", player + 1);
-			int padIndex = static_cast<int>(GetPrivateProfileIntW(SECTION_NAME, key, m_stfPadIndex[player], iniPath.c_str()));
-			m_stfPadIndex[player] = (padIndex >= -1 && padIndex < 4) ? padIndex : -1;
+			int padIndex = static_cast<int>(GetPrivateProfileIntW(SECTION_NAME, key, m_m2PadIndex[player], iniPath.c_str()));
+			m_m2PadIndex[player] = (padIndex >= -1 && padIndex < 4) ? padIndex : -1;
 
-			for (uint32_t action = 0; action < M2Input::Action_Count; action++)
+			for (uint32_t action = 0; action < Input::Action_Count; action++)
 			{
-				swprintf_s(key, L"P%dKey%hs", player + 1, M2Input::ActionIniName(action));
-				uint32_t vk = GetPrivateProfileIntW(SECTION_NAME, key, m_stfKeyBinds[player][action], iniPath.c_str());
-				m_stfKeyBinds[player][action] = vk < 256 ? vk : 0;
+				swprintf_s(key, L"P%dKey%hs", player + 1, Input::ActionIniName(action));
+				uint32_t vk = GetPrivateProfileIntW(SECTION_NAME, key, m_m2KeyBinds[player][action], iniPath.c_str());
+				m_m2KeyBinds[player][action] = vk < 256 ? vk : 0;
 
-				swprintf_s(key, L"P%dPad%hs", player + 1, M2Input::ActionIniName(action));
-				uint32_t button = GetPrivateProfileIntW(SECTION_NAME, key, m_stfPadBinds[player][action], iniPath.c_str());
-				m_stfPadBinds[player][action] = button < M2Input::Pad_Count ? button : M2Input::Pad_None;
+				swprintf_s(key, L"P%dPad%hs", player + 1, Input::ActionIniName(action));
+				uint32_t button = GetPrivateProfileIntW(SECTION_NAME, key, m_m2PadBinds[player][action], iniPath.c_str());
+				m_m2PadBinds[player][action] = button < Input::Pad_Count ? button : Input::Pad_None;
 			}
 		}
 	}
@@ -239,30 +245,35 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"VF5FS";
 		WritePrivateProfileIntW(SECTION_NAME, L"ArcadeMode", m_arcadeMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"CircleConfirm", m_circleConfirm, iniPath.c_str());
+	}
+
+	{
+		const wchar_t* SECTION_NAME = L"Audio";
+		WritePrivateProfileIntW(SECTION_NAME, L"Volume", m_volumePercent, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Language", m_language, iniPath.c_str());
 	}
 
 	{
 		const wchar_t* SECTION_NAME = L"StF";
-		WritePrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_stfAspect, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_stfCrtFilter, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"Difficulty", m_stfDifficulty, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_stfCountry, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_stfFreeplay, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_stfVersusMode, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_m2Aspect, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str());
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
 			swprintf_s(key, L"P%dController", player + 1);
-			WritePrivateProfileIntW(SECTION_NAME, key, m_stfPadIndex[player], iniPath.c_str());
+			WritePrivateProfileIntW(SECTION_NAME, key, m_m2PadIndex[player], iniPath.c_str());
 
-			for (uint32_t action = 0; action < M2Input::Action_Count; action++)
+			for (uint32_t action = 0; action < Input::Action_Count; action++)
 			{
-				swprintf_s(key, L"P%dKey%hs", player + 1, M2Input::ActionIniName(action));
-				WritePrivateProfileIntW(SECTION_NAME, key, m_stfKeyBinds[player][action], iniPath.c_str());
+				swprintf_s(key, L"P%dKey%hs", player + 1, Input::ActionIniName(action));
+				WritePrivateProfileIntW(SECTION_NAME, key, m_m2KeyBinds[player][action], iniPath.c_str());
 
-				swprintf_s(key, L"P%dPad%hs", player + 1, M2Input::ActionIniName(action));
-				WritePrivateProfileIntW(SECTION_NAME, key, m_stfPadBinds[player][action], iniPath.c_str());
+				swprintf_s(key, L"P%dPad%hs", player + 1, Input::ActionIniName(action));
+				WritePrivateProfileIntW(SECTION_NAME, key, m_m2PadBinds[player][action], iniPath.c_str());
 			}
 		}
 	}
