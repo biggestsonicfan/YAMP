@@ -37,14 +37,6 @@ public:
 	ID3D12CommandQueue* GetD3D12Queue()  const { return m_cmdQueue.get(); }
 	HWND                 GetHWND()        const { return m_window.get(); }
 
-	IDXGISwapChain3* GetSwapChain3() const {
-		IDXGISwapChain3* sc3 = nullptr;
-		if (m_swapChain) {
-			(void)m_swapChain->QueryInterface(IID_PPV_ARGS(&sc3));
-		}
-		return sc3;
-	}
-
 	ID3D11Device* GetD3D11Device() const { return m_device.get(); }
 	ID3D11DeviceContext* GetD3D11DeviceContext() const { return m_deviceContext.get(); }
 	IDXGISwapChain* GetSwapChain() const { return m_swapChain.get(); }
@@ -95,7 +87,6 @@ private:
 		void operator()(HWND hwnd) const noexcept { if (hwnd) DestroyWindow(hwnd); }
 	};
 
-	wil::com_ptr<IDXGISwapChain> CreateSwapChainForWindow(ID3D11Device* device, HWND window);
 	void CreateRenderResources();
 	void EnumerateDisplayModes();
 	void CalculateViewport();

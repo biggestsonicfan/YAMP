@@ -9,7 +9,6 @@
 
 #include <dxgi1_6.h>
 #include <DirectXMath.h>
-#include <d3d12shader.h>
 #include <d3dcompiler.h>
 
 #include <algorithm>
@@ -71,12 +70,6 @@ bool IsModulePso(void* pso)
 // auto-breadcrumbs (which op the GPU last completed) + the page-fault VA and whether it hit a RECENTLY
 // FREED allocation (which would confirm the immediate-release flag is freeing a still-in-use resource).
 static ID3D12Device* g_dredDevice = nullptr;
-
-// Published each frame from BlitDX12Texture; the ResourceBarrier hook watches for this exact resource
-// to learn whether StF ever transitions display_tex+0x98 to RENDER_TARGET (i.e. renders into it).
-static ID3D12Resource* g_moduleOutputRes = nullptr;
-void SetModuleOutputResource(ID3D12Resource* r) { g_moduleOutputRes = r; }
-ID3D12Resource* GetModuleOutputResource() { return g_moduleOutputRes; }
 
 static void DumpDRED(ID3D12Device* dev)
 {
@@ -419,7 +412,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 
 		// The ROOT_SIGNATURE subobject payload (stream+0x08) is null in YAMP (the host normally
 		// creates the shared root signature; LJ's is non-null). D3D12 rejects a graphics PSO with no
-		// root signature, so try to build one from the VS/PS embedded RTS0 blob and stamp it in.
+		// root signature, so build the PIX-captured one below and stamp it in.
 		uint64_t& rsSlot = *reinterpret_cast<uint64_t*>(s + 0x08);
 		if (rsSlot == 0)
 		{
@@ -428,30 +421,6 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 			if (!s_rsTried)
 			{
 				s_rsTried = true;
-				// The pxd m2ftg root signature, captured byte-for-byte from a live Lost Judgment: LJ's
-				// host builds it at boot via D3D12SerializeVersionedRootSignature (sub_141AF9DC0, from
-				// shader reflection) and hands the ID3D12RootSignature to the DLL through the template.
-				// The shaders don't embed an RTS0 chunk, so we recreate the sig from the serialized blob.
-				// DXBC/RTS0, version 1.1, 2 params, 0 static samplers (204 bytes).
-				static const uint8_t kRootSigBlob[] = {
-					0x44, 0x58, 0x42, 0x43, 0x35, 0x30, 0x48, 0xBE, 0x96, 0xA3, 0xB7, 0x2A,
-					0xB5, 0xF8, 0xB1, 0xD2, 0xE0, 0xFC, 0x49, 0x29, 0x01, 0x00, 0x00, 0x00,
-					0xCC, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00,
-					0x52, 0x54, 0x53, 0x30, 0xA0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
-					0x02, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-					0xA0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Flags: 0x3E->0x01 (ALLOW_INPUT_ASSEMBLER, no denies) TEST
-					0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-					0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-					0x38, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x00,
-					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-					0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
-					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-					0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
-					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-					0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00,
-					0x03, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-					0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
-				};
 				// EXACT graphics root sig (LJ ApiObjectId 1302), captured from a PIX C++ export of LJ+StF. 10 params
 				// = per-stage table PAIRS { {CBV b0[14] + SRV t0[24]} , {SAMPLER s0[16]} } for the 5 graphics stages
 				// in order PIXEL, VERTEX, GEOMETRY, HULL, DOMAIN. CBV/SRV ranges are DESCRIPTORS_VOLATILE; the sampler
@@ -508,7 +477,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 					rhr = self->CreateRootSignature(0, sblob->GetBufferPointer(),
 						sblob->GetBufferSize(), IID_PPV_ARGS(&s_rootSig));
 				if (psoLog != nullptr)
-					fprintf(psoLog, "  [rootsig] 4-param graphics sig shr=0x%08lX rhr=0x%08lX obj=%p %s\n",
+					fprintf(psoLog, "  [rootsig] 10-param graphics sig shr=0x%08lX rhr=0x%08lX obj=%p %s\n",
 						static_cast<unsigned long>(shr), static_cast<unsigned long>(rhr),
 						static_cast<void*>(s_rootSig),
 						serr ? reinterpret_cast<const char*>(serr->GetBufferPointer()) : "");
@@ -1244,13 +1213,6 @@ void RenderWindow::BlitDX12Texture(ID3D12Resource* texRaw)
 	{
 		st3d = st3dTracked;
 	}
-	{ static int s_stLog = 0; if (s_stLog < 4) { ++s_stLog;
-		DebugLogFile("[blit] primary-source state: tracked=%s 0x%X -> using 0x%X\n",
-			st3dFound ? "yes" : "NO", static_cast<unsigned>(st3dTracked), static_cast<unsigned>(st3d)); } }
-	{ static int s_srcLog = 0; if (s_srcLog < 12) { ++s_srcLog;
-		DebugLogFile("[blit] src: texRaw=%p resolveDst=%p rt2d=%p (texRaw==resolveDst:%d)\n",
-			static_cast<void*>(texRaw), static_cast<void*>(GetModuleResolveDst()),
-			static_cast<void*>(rt2d), texRaw == GetModuleResolveDst() ? 1 : 0); } }
 	if (!rt3d && !rt2d) return; // nothing shader-readable yet — skip (don't composite the black display_tex)
 
 	// Per-layer 11on12 wrap + SRV cache (two live layers, headroom for RT churn).
@@ -1321,72 +1283,7 @@ void RenderWindow::RenderImGui()
 
 	ImGui::Render();
 
-	// CANARY (overlay invisible in the StF path, fine in VF2): confirm the overlay actually has
-	// geometry to draw and a live render target. If vtx>0 and the RTV is non-null, ImGui really is
-	// drawing and the loss is downstream (11on12 flush / present); if vtx==0 or DisplaySize is 0,
-	// the ImGui frame itself is empty and the bug is in NewImGuiFrame/UI state, not in D3D.
-	{
-		static int s_n = 0;
-		if (s_n < 6)
-		{
-			const ImDrawData* dd = ImGui::GetDrawData();
-			const ImGuiIO& io = ImGui::GetIO();
-			DebugLog(
-				"[imgui-canary] valid=%d cmdLists=%d vtx=%d idx=%d display=%.0fx%.0f rtv=%p ctx=%p\n",
-				dd ? dd->Valid : -1, dd ? dd->CmdListsCount : -1,
-				dd ? dd->TotalVtxCount : -1, dd ? dd->TotalIdxCount : -1,
-				io.DisplaySize.x, io.DisplaySize.y,
-				static_cast<void*>(m_backBufferRTV.get()), static_cast<void*>(m_deviceContext.get()));
-			s_n++;
-		}
-	}
-
 	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-}
-
-wil::com_ptr<IDXGISwapChain> RenderWindow::CreateSwapChainForWindow(ID3D11Device* device, HWND window)
-{
-	wil::com_ptr<IDXGISwapChain> swapChain;
-
-	float refreshRate = gGeneral.GetSettings()->m_refreshRate;
-
-	DXGI_SWAP_CHAIN_DESC swapChainDesc {};
-	swapChainDesc.BufferDesc.RefreshRate.Numerator = static_cast<UINT>(refreshRate * 10000);
-	swapChainDesc.BufferDesc.RefreshRate.Denominator = 10000;
-	swapChainDesc.BufferDesc.Format = OUTPUT_FORMAT;
-	swapChainDesc.SampleDesc.Count = 1;                             
-	swapChainDesc.SampleDesc.Quality = 0;
-	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swapChainDesc.BufferCount = 2;
-	swapChainDesc.OutputWindow = window;
-	swapChainDesc.Windowed = TRUE;
-
-	wil::com_ptr<IDXGIDevice> dxgiDevice;
-	HRESULT hr = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.addressof()));
-	THROW_IF_FAILED(hr);
-
-	wil::com_ptr<IDXGIAdapter> adapter;
-	hr = dxgiDevice->GetAdapter(adapter.addressof());
-	THROW_IF_FAILED(hr);
-
-	wil::com_ptr<IDXGIFactory> factory;
-	hr = adapter->GetParent(IID_PPV_ARGS(factory.addressof()));
-	THROW_IF_FAILED(hr);
-
-
-	// Try flip models, if it fails (because of an old Windows version), try a normal blit model
-	for (auto swapEffect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_SWAP_EFFECT_DISCARD})
-	{
-		swapChainDesc.SwapEffect = swapEffect;
-		hr = factory->CreateSwapChain(device, &swapChainDesc, swapChain.put());
-		if (SUCCEEDED(hr))
-		{
-			break;
-		}
-	}
-	THROW_IF_FAILED(hr);
-
-	return swapChain;
 }
 
 void RenderWindow::CreateRenderResources()
@@ -1846,35 +1743,8 @@ void RenderWindow::BeginFrame()
 	// Between frames and before any wrapped-resource Acquire: safe point to follow a window resize.
 	ApplyPendingResize();
 
-	wil::com_ptr<IDXGISwapChain3> sc3;
-
 	if (auto sc3 = m_swapChain.try_query<IDXGISwapChain3>()) {
 		const UINT idx = sc3->GetCurrentBackBufferIndex();
-
-		// CANARY (overlay never reaches the screen in the StF path, but does in VF2): the 11on12
-		// wrapped backbuffers are created ONCE at startup. If the swapchain is resized/recreated
-		// afterwards (StF's boot resizes the window), those wrappers reference orphaned buffers —
-		// ImGui then draws into dead resources while Present shows the new, never-rendered ones.
-		// Compare the LIVE swapchain buffer against the one we wrapped for a few frames.
-		{
-			static int s_chk = 0;
-			if (s_chk < 6)
-			{
-				DXGI_SWAP_CHAIN_DESC sd{};
-				sc3->GetDesc(&sd);
-				ID3D12Resource* live = nullptr;
-				const HRESULT gb = sc3->GetBuffer(idx, IID_PPV_ARGS(&live));
-				DebugLog(
-					"[bb-canary] idx=%u desc=%ux%u count=%u live=%p tracked=%p SAME=%d wrapped=%p gb=0x%08lX\n",
-					idx, sd.BufferDesc.Width, sd.BufferDesc.Height, sd.BufferCount,
-					static_cast<void*>(live), static_cast<void*>(m_backbuffers[idx].get()),
-					(live == m_backbuffers[idx].get()) ? 1 : 0,
-					static_cast<void*>(m_wrappedBackbuffers[idx].get()),
-					static_cast<unsigned long>(gb));
-				if (live) live->Release();
-				s_chk++;
-			}
-		}
 
 		// Put the backbuffer into RENDER_TARGET BEFORE handing it to 11on12 (which won't do it itself).
 		TransitionBackbufferToRenderTarget(idx);

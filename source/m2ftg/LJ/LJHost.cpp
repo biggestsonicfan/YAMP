@@ -1,7 +1,5 @@
 #include "LJHost.h"
 
-// Defined in HostCdevice.cpp: close + ExecuteCommandLists StF's recorded render lists (host's job).
-void ExecuteModuleRenderListsNow();
 // Defined in HostCdevice.cpp: mark the DLL's per-frame render window so the ResourceBarrier hook
 // only corrects StF's own barrier StateBefore values (not d3d11on12's blit barriers).
 void SetModuleRenderActiveNow(bool active);
@@ -50,12 +48,6 @@ namespace m2ftg
         // Per-game facts (DLL name, config.kind, ROM names, i960 RVAs) live in LJHost.h
         // (GameDesc / CurrentGame()) — the LJ-specific but m2ftg-generic hosting header.
 
-        // Resolved from the DLL (ImportSymbol::STF_*): M2FTGAppModule's per-frame render-system submit
-        // (FUN_18003b530) and the live-execute_info global (DAT_1801ee4a0) that submit dereferences.
-        // module_main only RECORDS StF's frame; the host must drive this submit each frame (see GameLoop).
-        static void  (*g_stfFrameSubmit)()   = nullptr;
-        static void** g_stfRenderExecInfo    = nullptr;
-
         // Contexts
         // TODO: Move elsewhere, as they will get very, very long
         // But not in V6-VF5FS.h as they are private!
@@ -101,8 +93,6 @@ namespace m2ftg
             Import(gs::ib_create, ImportSymbol::IB_CREATE);
 			Import(sl::kernel_calloc_internal, ImportSymbol::SL_KERNEL_CALLOC);
 			//Import(sl::memset, ImportSymbol::MEMSET);
-            Import(g_stfFrameSubmit, ImportSymbol::STF_FRAME_SUBMIT);
-            Import(g_stfRenderExecInfo, ImportSymbol::STF_RENDER_EXECINFO);
         }
 
         static void PrefillVariables(const Imports& symbols, const RenderWindow& window)
@@ -432,22 +422,6 @@ namespace m2ftg
         // (FUN_180043020) and keep presenting the last completed frame; clearing the bit resumes.
         // So, like LJ, the host draws the menu and the module handles the pause.
 
-        // SEH-guarded call of StF's per-frame render-system submit (FUN_18003b530). Kept in its own
-        // function because __try/__except cannot share a scope with C++ object unwinding. One-shot: on a
-        // fault it latches off so we never repeat a crash. Returns false once disabled.
-        static bool CallStfFrameSubmit(void* submitFn)
-        {
-            static bool s_ok = true;
-            if (!s_ok || !submitFn) return false;
-            __try { reinterpret_cast<void(__cdecl*)()>(submitFn)(); }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                s_ok = false;
-                DebugLog("[%s-submit] FUN_18003b530 faulted -> disabled\n", gGeneral.GetGameTag());
-            }
-            return s_ok;
-        }
-
         bool m2ftg::GameLoop(module_func_t func, RenderWindow& window)
         {
             // Persistent input/arcade state (LJ keeps these in the scene object across frames):
@@ -581,16 +555,9 @@ namespace m2ftg
                 }
             }
 
-            // TEMP: the D3D11-on-12 overlay/blit path trips the D3D12 debug layer at frame 0
-            // (a null-SRV/shared-resource issue in d3d11), crashing before the StF DX12 PSO builds
-            // at ~frame 18 and masking the CreatePipelineState error we're diagnosing. func() (the
-            // StF render that builds the PSO) is independent of it, so skip the D3D11 path while
-            // debugging the PSO. Flip back to false to restore the visible overlay/output.
-            constexpr bool kDebugSkipD3D11Overlay = false;
-
             window.BeginFrame();
-            if (!kDebugSkipD3D11Overlay) window.NewImGuiFrame();
-            if (!kDebugSkipD3D11Overlay && s_pauseMenuOpen)
+            window.NewImGuiFrame();
+            if (s_pauseMenuOpen)
             {
                 if (!DrawPauseMenu(window, s_pauseMenuOpen))
                 {
@@ -629,71 +596,18 @@ namespace m2ftg
 
             if (funcResult != 0) return false;
 
-            // THE REAL SUBMIT (found by RE): module_main only RECORDS. In "handler mode" (which StF's
-            // vtbl[0] init installs: DAT_18058aad0 = FUN_18003b530), module_main's submit stage vtbl[5] is
-            // a no-op — StF's actual per-frame GPU submit is g_stfFrameSubmit (FUN_18003b530), invoked ONLY
-            // by the engine's render-system loop (the 0x180c945xx table walker) that LJ runs but YAMP does
-            // not. So the host must call it every frame after module_main.
-            // g_stfFrameSubmit dereferences g_stfRenderExecInfo (DAT_1801ee4a0 = the LIVE execute_info):
-            // module_main sets it on entry and CLEARS it to 0 on return, so by here it's null -> the
-            // submit's FUN_180062470 did `*(execinfo + n*400 + 0x20)` = null+0x20 AV. Restore it around the
-            // call (then clear, matching module_main's post-frame cleanup).
-            // PATH B: StF records its whole frame into its own command list but never submits it (host's
-            // job). Close + ExecuteCommandLists + flush + reopen that exact list now. Do this BEFORE the
-            // handler below so the GPU has the frame before StF's frame-boundary recycle runs.
-            // TEST (black-screen): the draws bind CBVs at ring offsets 512/768 whose contents are
-            // never written (stale NaN / zeros) while ring+0 holds a valid 2D ortho. Hand-copy the
-            // valid matrix into the dead slots before the submit: if ANY geometry appears (even
-            // wrongly transformed), those slots are proven to be the live 3D-transform CBs and the
-            // missing piece is their writer — not the D3D12 plumbing.
-            {
-                constexpr bool kTestFillDeadCbSlots = false; // tested 2026-07-25: no change (see memory)
-                if (kTestFillDeadCbSlots)
-                {
-                    auto* ringCpu = *reinterpret_cast<uint8_t**>(
-                        reinterpret_cast<uint8_t*>(gs::sm_context) + 0x188208);
-                    if (ringCpu != nullptr)
-                    {
-                        memcpy(ringCpu + 256, ringCpu, 64);
-                        memcpy(ringCpu + 512, ringCpu, 64);
-                        memcpy(ringCpu + 768, ringCpu, 64);
-                    }
-                }
-            }
-
-            // TEST (overlay canary): the ImGui/11on12 overlay renders every frame but never
-            // reaches the screen, while VF2's identical overlay path DOES show. The only thing
-            // StF's loop adds is this mid-frame close/execute/flush of StF's list. Disable it to
-            // see whether OUR submit is what destroys the presented frame.
-            // *** ORDER MATTERS (HUD-flashing fix, 2026-07-26): record EVERYTHING, then submit ONCE. ***
-            // FUN_18003b530 is NOT just profiling: its second half (FUN_18003a540) is the TASK PUMP that
-            // records TaskM2E's draws (the Model 2 -> D3D12 frame translation). The old order
-            // (submit THEN pump) meant every submit executed a MIX of this frame's func() recordings and
-            // LAST frame's task-pump recordings — the display texture was composed from two different
-            // frames' passes, flashing the HUD every frame regardless of which texture we blitted.
-            // Needs the live execute_info in DAT_1801ee4a0 (module_main clears it on return) or it AVs.
-            // *** GAME-SPEED FIX (2026-07-26): DISABLED. module_main's render stages ALREADY invoke
-            // FUN_18003b530 internally through the installed submit-handler hook (DAT_18058aad0 —
-            // see the "render stages call the handler" RE finding). Calling it here again ran the
-            // TASK PUMP (FUN_18003a540 -> TaskM2E = the Model 2 emulator step) a SECOND time per
-            // frame -> the whole game (timers included) ran ~2x. Left compiled for quick A/B.
-            constexpr bool kCallFrameSubmitManually = false;
-            if (kCallFrameSubmitManually && g_stfFrameSubmit && g_stfRenderExecInfo)
-            {
-                *g_stfRenderExecInfo = &execute_info;
-                CallStfFrameSubmit(reinterpret_cast<void*>(g_stfFrameSubmit));
-                *g_stfRenderExecInfo = nullptr;
-            }
-
-            // Now the whole frame (func() + task pump) is recorded: close/execute/flush it in ONE submit.
+            // The whole frame (func() + the module's own internal task pump) is now recorded:
+            // close/execute/flush it in ONE submit. StF's per-frame GPU submit is invoked internally by
+            // module_main's render stages through the installed submit-handler hook (DAT_18058aad0), so
+            // the host must NOT call g_stfFrameSubmit itself — doing so ran the task pump (the Model 2
+            // emulator step) twice per frame and the whole game, timers included, ran ~2x.
             // PAUSED (LJ ground truth, C:\temp\menu PIX captures 2026-07-26): while the pause menu is
             // open LJ drops the module's command list from ExecuteCommandLists entirely (10 lists -> 9,
             // zero module draws, zero ResolveSubresource, no module upload traffic; the CRT pass keeps
             // re-sampling the LAST resolved frame, which receives no barriers). With status bit0 set the
             // module records nothing anyway, so skip the close/execute/reopen dance and the upload-stamp
             // advance — submit nothing, exactly like LJ.
-            constexpr bool kDisableStfSubmit = false;
-            if (!kDisableStfSubmit && !s_pauseMenuOpen) SubmitModuleFrameListNow();
+            if (!s_pauseMenuOpen) SubmitModuleFrameListNow();
             if (ModuleExecDisabledNow())
             {
                 // A submit hung/removed the GPU — DRED was dumped. Stop now so StF's next-frame upload
@@ -708,15 +622,10 @@ namespace m2ftg
             // exhaustion crash (FUN_18009be60, ~frame 570). Must precede StF's next-frame func().
             if (!s_pauseMenuOpen) AdvanceFrameStampNow();
 
-            // (Legacy) our force-submit of StF's lists — currently a no-op (kExecuteModuleLists=false). The
-            // handler call above is the correct engine-driven submit; keep this disabled.
-            ExecuteModuleRenderListsNow();
-
             cgs_tex* display_tex = gs::sm_context->handle_tex.get(execute_info.output_texid);
             if (display_tex == nullptr) return false;
             if (display_tex->m_type != 2) return false;
 
-            if (!kDebugSkipD3D11Overlay)
             {
                 // StF renders DX12-native; the DX11-typed fields (m_pD3DShaderResourceView / m_pD3DResource)
                 // are null on this path. The output ID3D12Resource lives at sbgl_resource+0x98 (found via QI:
@@ -725,32 +634,14 @@ namespace m2ftg
                 ID3D12Resource* rt = res
                     ? *reinterpret_cast<ID3D12Resource**>(reinterpret_cast<uint8_t*>(res) + 0x98)
                     : nullptr;
-                // CANARY TEST: skip the StF-texture 11on12 blit, keep ONLY ImGui. If the overlay
-                // reappears, BlitDX12Texture's wrap/acquire is what kills the whole overlay path.
-                constexpr bool kSkipStfBlit = false; // canary test done: skipping the blit does NOT restore ImGui
-                if (!kSkipStfBlit) window.BlitDX12Texture(rt);
-                else (void)rt;
+                window.BlitDX12Texture(rt);
                 window.RenderImGui();
             }
             window.EndFrame();
 
-            // Present using the swapchain the game already created
+            // Present using the swapchain the game already created (the same object the 11on12
+            // backbuffers were wrapped from — gs::sm_context's sbgl_device holds YAMP's swapchain).
             auto& swapChain = gs::sm_context->sbgl_device.m_swap_chain;
-            // CANARY (user insight): YAMP's own ImGui/11on12 overlay never reaches the screen in the
-            // StF path but does in VF2 — a HOST-side symptom. If the gs swapchain is not the very
-            // object the 11on12 backbuffers were wrapped from, we composite into one swapchain and
-            // present a different one => black screen AND no overlay, regardless of what StF renders.
-            {
-                static bool s_logged = false;
-                if (!s_logged)
-                {
-                    s_logged = true;
-                    DebugLog("[swapchain] gs=%p window=%p SAME=%d\n",
-                        static_cast<void*>(swapChain.m_pDXGISwapChain),
-                        static_cast<void*>(window.GetSwapChain()),
-                        swapChain.m_pDXGISwapChain == window.GetSwapChain() ? 1 : 0);
-                }
-            }
             HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
             if (FAILED(hr)) return false;
 

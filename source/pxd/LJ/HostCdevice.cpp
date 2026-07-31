@@ -29,13 +29,9 @@ ID3D12DescriptorHeap* GetDllRingSamplerHeap();
 // True only for PSOs the DLL created (tracked in RenderWindow.cpp). The command-list vtable is shared
 // with d3d11on12's blit list; gate the StF heap/root-sig injection on this so we don't corrupt the blit.
 bool IsModulePso(void* pso);
-// display_tex+0x98 (StF's output RT), published each frame by BlitDX12Texture. The ResourceBarrier hook
-// watches for it to learn whether StF ever renders into it (transitions it to RENDER_TARGET).
-ID3D12Resource* GetModuleOutputResource();
 // Defined in RenderWindow.cpp: dump DRED (last GPU op + page-fault resource) on device-removal, and
 // append a line to d3d12_debug.log. Used by the frame-submit path to record a GPU hang once.
 void DumpDredNow();
-// render-target bind can be identified rather than guessed at from its dimensions.
 
 namespace pxd
 {
@@ -94,8 +90,7 @@ namespace pxd
 			// buffer id) is read on the boot path; zero is a valid initial value.
 			alignas(16) uint8_t s_devState[0x8000] = {};
 
-			ID3D12Device*       s_device = nullptr;
-			ID3D12CommandQueue* s_queue = nullptr;
+			ID3D12Device* s_device = nullptr;
 
 			inline uint64_t& CdevU64(size_t off) { return *reinterpret_cast<uint64_t*>(s_cdevice + off); }
 			inline uint32_t& CdevU32(size_t off) { return *reinterpret_cast<uint32_t*>(s_cdevice + off); }
@@ -311,34 +306,14 @@ namespace pxd
 			alignas(16) uint8_t s_renderCmdCtx[kCmdCtxSize] = {};
 			alloc_wrapper       s_renderCmdAllocWrap = {};
 
-			// cmdctx+0x00/+0x268 pxd vtable: the upload path never calls it, but stub it with
-			// return-0 no-ops so an unexpected virtual call cannot fault on a null vtable pointer.
-			uint64_t CmdCtxStub(void*) { return 0; }
+			// cmdctx+0x00/+0x268 pxd vtable: the pxd engine never calls it on the paths YAMP drives
+			// (the frame submit is host-side — see SubmitModuleFrameList), but every slot is filled
+			// with a return-0 no-op so an unexpected virtual call cannot fault on a null entry.
+			uint64_t STDMETHODCALLTYPE CmdCtxStub(void*, void*, void*, void*) { return 0; }
 			void* s_cmdCtxStubVtbl[24] = {};
-
-			// DIAGNOSTIC: PIX proved StF's scene draws are recorded but the render command list is NEVER
-			// executed (LJ executes it; YAMP stubs the cmdctx vtable). Log per-slot call counts so we can
-			// find which vtable slot is the frame-end SUBMIT (the one called ~once per frame) — that's the
-			// method that must Close() + ExecuteCommandLists() the recorded list.
-			uint64_t g_cmdctxSlotCount[24] = {};
-			uint64_t g_cmdctxTotal = 0;
-			template<int N>
-			uint64_t STDMETHODCALLTYPE CmdCtxSlotLog(void*, void*, void*, void*)
+			void FillCmdCtxStubVtbl()
 			{
-				g_cmdctxSlotCount[N]++; g_cmdctxTotal++;
-				if (g_cmdctxSlotCount[N] <= 2 || g_cmdctxTotal % 400 == 0)
-				{
-					char b[300]; int o = _snprintf_s(b, sizeof(b), _TRUNCATE, "[cmdctx] slot %d (total=%llu):", N, (unsigned long long)g_cmdctxTotal);
-					for (int i = 0; i < 24; ++i)
-						if (g_cmdctxSlotCount[i]) o += _snprintf_s(b + o, sizeof(b) - o, _TRUNCATE, " s%d=%llu", i, (unsigned long long)g_cmdctxSlotCount[i]);
-					DebugLog("%s\n", b);
-				}
-				return 0;
-			}
-			template<int... Ns>
-			void FillCmdCtxStubVtbl(std::integer_sequence<int, Ns...>)
-			{
-				((s_cmdCtxStubVtbl[Ns] = reinterpret_cast<void*>(&CmdCtxSlotLog<Ns>)), ...);
+				for (auto& slot : s_cmdCtxStubVtbl) slot = reinterpret_cast<void*>(&CmdCtxStub);
 			}
 
 			// Build one pxd command context (0x280 layout, ground truth in scratchpad/cmdctx-spec.md)
@@ -346,178 +321,50 @@ namespace pxd
 			// engine reads (+0x10 cmdlist, +0x28 self+0x38 slot array, +0x80 empty AVL state map,
 			// +0x88 self+0x98 barrier records, +0x94 count, +0x258 = -1). leaveOpen keeps the list in
 			// the recording state (device-context path) vs Close()d for the acquire+reset() pool path.
-			// ---- DIAGNOSTIC: log SetDescriptorHeaps / SetGraphicsRootDescriptorTable -------------------
-			// The DLL binds a shader-visible descriptor heap and a root table into the render command
-			// list; the debug layer reports the bound GPU handle "does not refer to a location in a
-			// descriptor heap". Hook the command list's vtable (slot 28 = SetDescriptorHeaps, slot 32 =
-			// SetGraphicsRootDescriptorTable) to log the bound heap(s) + each handle, so we can see which
-			// shader-visible heap the DLL actually uses vs the gs+0x7550 rings YAMP wired.
-			typedef void (STDMETHODCALLTYPE* SetDescHeaps_t)(ID3D12GraphicsCommandList*, UINT, ID3D12DescriptorHeap* const*);
-			typedef void (STDMETHODCALLTYPE* SetGfxRootTable_t)(ID3D12GraphicsCommandList*, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
-			static SetDescHeaps_t    g_origSetDescHeaps    = nullptr;
-			static SetGfxRootTable_t g_origSetGfxRootTable = nullptr;
-			static FILE*             g_cmdLog              = nullptr;
-			// cmdlist.log DISABLED: it logged every SetDescriptorHeaps/SetGraphicsRootDescriptorTable/PSO
-			// call (per-draw), ballooning past 1 GB in a long run. The descriptor-heap-binding question it
-			// answered is settled; leave g_cmdLog null so every `if (g_cmdLog)` write is skipped (the PSO
-			// hook's StF heap/root-sig INJECTION is outside that guard and still runs). Restore the fopen_s
-			// if a future descriptor bug needs it.
-			static void CmdLogOpen() { /* disabled — was ballooning cmdlist.log to gigabytes */ }
-
 			// Forward decls so the draw hooks (below) can flag the list they draw into as StF's. Flagging
 			// by draw (during func()) is far more reliable than by PSO: StF's scene lists use PSOs from a
 			// creation path IsModulePso() doesn't track, so PSO-flagging missed them and they never executed.
 			void MarkModuleRenderList(ID3D12GraphicsCommandList*);
 			bool ModuleRenderActive();
 
-			// CAPTURE: the last command list StF drew into (during func()) + lifecycle counters. Logged each
-			// frame so we get the EXACT list pointer (to bp in x64dbg) and confirm StF never Close/Reset/
-			// Execute-s it (the missing submit). g_lastModuleCmdList is deliberately a plain global so its
-			// address is easy to find (it's logged); read/watch it live via the x64dbg bridge.
-			ID3D12GraphicsCommandList* g_lastModuleCmdList = nullptr;
-			uint64_t g_moduleListCloses = 0, g_moduleListResets = 0, g_moduleListExecs = 0;
-
-			// TEMP [seq]: capture the EXACT per-frame call order on StF's draw list (root sig / heaps /
-			// root tables / PSO / draw) to see whether YAMP's PSO-hook SetGraphicsRootSignature injection
-			// wipes root descriptor tables StF set earlier (SetGraphicsRootSignature resets all root
-			// params). Shared cap shows ~the first frame's sequence, then stops. Remove once resolved.
-			static int g_seqLog = 0;
-#ifdef _DEBUG
-			static void SeqLog(const char* s) { if (ModuleRenderActive() && g_seqLog < 140) { g_seqLog++; DebugLogFile("%s", s); } }
-#else
-#define SeqLog(s) ((void)0)
-#endif
-
-			// The CB buffer + offsets StF bound CBVs at — re-read at SUBMIT time (all writes done) to tell a
-			// genuinely zero/NaN matrix from a read-before-write artifact of the CreateCBV-time [cbv] dump.
-			static ID3D12Resource* g_cbDumpRes = nullptr;
-			static uint64_t g_cbDumpOff[8] = {}; static int g_cbDumpCount = 0;
-
-			// DIAGNOSTIC: count draw calls. StF's output RT is confirmed all-black over 300+ frames; if
-			// the DLL issues zero draws it isn't reaching render code (assets/game-state stuck); if it
-			// draws a lot, the geometry just isn't landing on the output (state / wrong RT). Slots 12/13.
+			// Draw hooks (slots 12/13): flag the list the module records into so SubmitModuleFrameList
+			// knows which lists to close + execute. The counters drive the periodic [draw] health line
+			// (a healthy StF run is ~0.7 draws/frame; zero means the module never reached render code).
 			typedef void (STDMETHODCALLTYPE* DrawInstanced_t)(ID3D12GraphicsCommandList*, UINT, UINT, UINT, UINT);
 			typedef void (STDMETHODCALLTYPE* DrawIndexed_t)(ID3D12GraphicsCommandList*, UINT, UINT, UINT, INT, UINT);
 			static DrawInstanced_t g_origDrawInstanced = nullptr;
 			static DrawIndexed_t   g_origDrawIndexed   = nullptr;
 			static uint64_t g_drawInstCount = 0, g_drawIdxCount = 0, g_drawVertsTotal = 0;
-			// TEMP [vp-tally]: bucket draws by the last-set viewport, to see whether the (dead)
-			// 3D scene pass (vp 1024x768 -> MSAA RT -> resolve) still records draws at all.
-			static UINT g_lastVpW = 0, g_lastVpH = 0;
-			static uint64_t g_vpDraws768 = 0, g_vpDraws1024 = 0, g_vpDraws384 = 0, g_vpDrawsOther = 0;
-			static void TallyDrawViewport()
+			static void LogDrawTally()
 			{
-				if (g_lastVpH == 768) ++g_vpDraws768;
-				else if (g_lastVpH == 1024) ++g_vpDraws1024;
-				else if (g_lastVpH == 384) ++g_vpDraws384;
-				else ++g_vpDrawsOther;
+				if ((g_drawInstCount + g_drawIdxCount) % 500 == 1)
+					DebugLogFile("[draw] instanced=%llu indexed=%llu vertsTotal=%llu\n",
+						(unsigned long long)g_drawInstCount, (unsigned long long)g_drawIdxCount,
+						(unsigned long long)g_drawVertsTotal);
 			}
 
 			static void STDMETHODCALLTYPE HookedDrawInstanced(ID3D12GraphicsCommandList* self,
 				UINT vpi, UINT inst, UINT svl, UINT sil)
 			{
 				g_drawInstCount++; g_drawVertsTotal += static_cast<uint64_t>(vpi) * (inst ? inst : 1);
-				TallyDrawViewport();
-				if (ModuleRenderActive()) { g_lastModuleCmdList = self; MarkModuleRenderList(self); } // capture StF's draw list
-				if ((g_drawInstCount + g_drawIdxCount) % 500 == 1)
-				{ DebugLogFile("[draw] instanced=%llu indexed=%llu vertsTotal=%llu\n",
-					(unsigned long long)g_drawInstCount,(unsigned long long)g_drawIdxCount,(unsigned long long)g_drawVertsTotal); }
+				if (ModuleRenderActive()) MarkModuleRenderList(self); // this list records the module's scene
+				LogDrawTally();
 				g_origDrawInstanced(self, vpi, inst, svl, sil);
 			}
-			// Closed-list tracking (defined with the Close/Reset hooks further down): GBV id=547 says
-			// commands recorded onto a closed list are silently dropped.
-			static bool IsListClosed(ID3D12GraphicsCommandList* l);
-			extern uint64_t g_drawsOnClosedList;
-			extern uint64_t g_drawsOnOpenList;
 
 			static void STDMETHODCALLTYPE HookedDrawIndexed(ID3D12GraphicsCommandList* self,
 				UINT ipi, UINT inst, UINT sil, INT bvl, UINT sivl)
 			{
 				g_drawIdxCount++; g_drawVertsTotal += static_cast<uint64_t>(ipi) * (inst ? inst : 1);
-				TallyDrawViewport();
-				// GBV id=547 test: is StF drawing into a list we have already Closed? Such draws are
-				// silently dropped by the runtime, which would explain "counted but never rendered".
-				if (IsListClosed(self))
-				{
-					g_drawsOnClosedList++;
-					static int s_cl = 0;
-					if (s_cl < 8)
-					{
-						DebugLogFile("[closed-draw] DrawIndexed on CLOSED list %p (dropped by runtime)\n",
-							static_cast<void*>(self));
-						s_cl++;
-					}
-				}
-				else g_drawsOnOpenList++;
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[112]; _snprintf_s(b, _TRUNCATE, "[seq] DrawIndexed idxPerInst=%u inst=%u list=%p\n", ipi, inst, static_cast<void*>(self)); SeqLog(b); }
-				if (ModuleRenderActive()) { g_lastModuleCmdList = self; MarkModuleRenderList(self); } // capture StF's draw list
-				if ((g_drawInstCount + g_drawIdxCount) % 500 == 1)
-				{ DebugLogFile("[draw] instanced=%llu indexed=%llu vertsTotal=%llu\n",
-					(unsigned long long)g_drawInstCount,(unsigned long long)g_drawIdxCount,(unsigned long long)g_drawVertsTotal); }
+				if (ModuleRenderActive()) MarkModuleRenderList(self); // this list records the module's scene
+				LogDrawTally();
 				g_origDrawIndexed(self, ipi, inst, sil, bvl, sivl);
 			}
 
-			static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
-				ID3D12GraphicsCommandList* self, UINT n, ID3D12DescriptorHeap* const* heaps)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140)
-				{
-					unsigned long long g0 = 0; D3D12_DESCRIPTOR_HEAP_DESC d0{};
-					if (n && heaps && heaps[0]) { d0 = heaps[0]->GetDesc(); if (d0.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) g0 = heaps[0]->GetGPUDescriptorHandleForHeapStart().ptr; }
-					char b[160]; _snprintf_s(b, _TRUNCATE, "[seq] SetHeaps n=%u heap0=%p type=%d gpuBase=0x%llX list=%p\n", n, n && heaps ? static_cast<void*>(heaps[0]) : nullptr, d0.Type, g0, static_cast<void*>(self));
-					SeqLog(b);
-				}
-				CmdLogOpen();
-				if (g_cmdLog)
-				{
-					for (UINT i = 0; i < n && heaps; ++i)
-					{
-						ID3D12DescriptorHeap* h = heaps[i];
-						D3D12_DESCRIPTOR_HEAP_DESC d = h ? h->GetDesc() : D3D12_DESCRIPTOR_HEAP_DESC{};
-						unsigned long long gpu = 0, cpu = 0;
-						if (h && (d.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
-						{ gpu = h->GetGPUDescriptorHandleForHeapStart().ptr; cpu = h->GetCPUDescriptorHandleForHeapStart().ptr; }
-						fprintf(g_cmdLog, "list=%p SetDescriptorHeaps[%u/%u] heap=%p type=%d num=%u sv=%d gpuBase=0x%llX cpuBase=0x%llX\n",
-							(void*)self, i, n, (void*)h, d.Type, d.NumDescriptors,
-							(d.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ? 1 : 0, gpu, cpu);
-					}
-					fflush(g_cmdLog);
-				}
-				g_origSetDescHeaps(self, n, heaps);
-			}
-			static void STDMETHODCALLTYPE HookedSetGraphicsRootDescriptorTable(
-				ID3D12GraphicsCommandList* self, UINT idx, D3D12_GPU_DESCRIPTOR_HANDLE h)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[128]; _snprintf_s(b, _TRUNCATE, "[seq] SetRootTable root=%u gpu=0x%llX list=%p\n", idx, static_cast<unsigned long long>(h.ptr), static_cast<void*>(self)); SeqLog(b); }
-				CmdLogOpen();
-				if (g_cmdLog)
-				{
-					void* ret = _ReturnAddress();
-					uint64_t dllBase = reinterpret_cast<uint64_t>(GetModuleHandleW(L"stf-pxd-w64-d3d12_retail.dll"));
-					fprintf(g_cmdLog, "  list=%p SetGraphicsRootDescriptorTable root=%u gpu=0x%llX  <- ret=0x%llX (dll+0x%llX)\n",
-						(void*)self, idx, (unsigned long long)h.ptr, (unsigned long long)ret,
-						dllBase ? (unsigned long long)((uint64_t)ret - dllBase) : 0ull);
-					fflush(g_cmdLog);
-				}
-				g_origSetGfxRootTable(self, idx, h);
-			}
-			typedef void (STDMETHODCALLTYPE* SetGfxRootSig_t)(ID3D12GraphicsCommandList*, ID3D12RootSignature*);
 			typedef void (STDMETHODCALLTYPE* SetPSO_t)(ID3D12GraphicsCommandList*, ID3D12PipelineState*);
-			static SetGfxRootSig_t g_origSetGfxRootSig = nullptr;
-			static SetPSO_t        g_origSetPSO        = nullptr;
-			void MarkModuleRenderList(ID3D12GraphicsCommandList*); // defined below (Close-hook section)
-			static void STDMETHODCALLTYPE HookedSetGraphicsRootSignature(ID3D12GraphicsCommandList* self, ID3D12RootSignature* rs)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[96]; _snprintf_s(b, _TRUNCATE, "[seq] SetRootSig rs=%p list=%p\n", static_cast<void*>(rs), static_cast<void*>(self)); SeqLog(b); }
-				CmdLogOpen();
-				if (g_cmdLog) { fprintf(g_cmdLog, "SetGraphicsRootSignature rs=%p\n", (void*)rs); fflush(g_cmdLog); }
-				g_origSetGfxRootSig(self, rs);
-			}
+			static SetPSO_t g_origSetPSO = nullptr;
 			static void STDMETHODCALLTYPE HookedSetPipelineState(ID3D12GraphicsCommandList* self, ID3D12PipelineState* pso)
 			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[112]; _snprintf_s(b, _TRUNCATE, "[seq] SetPSO pso=%p isModule=%d list=%p\n", static_cast<void*>(pso), IsModulePso(pso) ? 1 : 0, static_cast<void*>(self)); SeqLog(b); }
-				CmdLogOpen();
-				if (g_cmdLog) { fprintf(g_cmdLog, "SetPipelineState pso=%p\n", (void*)pso); fflush(g_cmdLog); }
 				g_origSetPSO(self, pso);
 				// The DLL binds the shader-visible heaps + never sets a root signature on a DIFFERENT
 				// command list than the draw list. So on THIS (draw) list, right after the PSO and
@@ -533,11 +380,10 @@ namespace pxd
 					self->SetDescriptorHeaps(2, heaps);
 				if (ID3D12RootSignature* rs = GetCapturedRootSignature())
 					self->SetGraphicsRootSignature(rs);
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[128]; _snprintf_s(b, _TRUNCATE, "[seq]   -> YAMP INJECT heaps(%d)+rootsig(%p) [resets root params!] list=%p\n", (heaps[0] && heaps[1]) ? 2 : 0, static_cast<void*>(GetCapturedRootSignature()), static_cast<void*>(self)); SeqLog(b); }
 			}
-			// ResourceBarrier hook (slot 26): watch whether StF ever transitions its output RT
-			// (display_tex+0x98) — if it does, StF renders into it (state issue); if never, StF renders
-			// elsewhere and display_tex is a copy dest that's not being written.
+			// ResourceBarrier hook (slot 26): corrects the module's transition StateBefore values (see
+			// below) and catalogs the render targets it draws into, which the host composite picks its
+			// display source from (GetModuleRenderTarget / GetModuleRenderTargetState).
 			typedef void (STDMETHODCALLTYPE* ResourceBarrier_t)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
 			static ResourceBarrier_t g_origResourceBarrier = nullptr;
 			ID3D12Resource* g_rtSeen[64] = {};
@@ -566,9 +412,9 @@ namespace pxd
 			void SetModuleRenderActive(bool active) { g_inModuleRender = active; }
 			bool ModuleRenderActive() { return g_inModuleRender; }
 
-			// Diagnostic watch-list: specific resources (the swapchain backbuffers) whose EVERY transition
-			// we dump, so we can see the exact 11on12 Acquire/Release sequence that leaves them COMMON at
-			// draw (id=527/538). Registered from RenderWindow::CreateWrappedBackbuffers.
+			// The swapchain backbuffers, registered from RenderWindow::CreateWrappedBackbuffers. Their
+			// transitions are driven by d3d11on12 + TransitionBackbufferToRenderTarget, so the barrier
+			// corrector below must leave them strictly alone.
 			static ID3D12Resource* g_watchRes[8] = {};
 			static int g_watchCount = 0;
 			void RegisterWatchResource(ID3D12Resource* r)
@@ -603,49 +449,6 @@ namespace pxd
 						ID3D12Resource* r = bars[i].Transition.pResource;
 						if (!r) continue;
 
-						// TEMP DESYNC DETECTOR (id=527 diagnosis): keep a GLOBAL mirror of every resource's
-						// state (updated on EVERY barrier we see, across ALL lists, in record order) and log
-						// only the barriers whose declared StateBefore disagrees with the mirror — i.e. the
-						// actual desyncs the runtime rejects as id=527. This isolates the offending list
-						// (e.g. F0430AE0) + shows the state the barrier SHOULD have declared, validating the
-						// global-tracking fix. Capped. Remove once id=527 is fixed.
-						{
-							static std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> mirror;
-							auto it = mirror.find(r);
-							const D3D12_RESOURCE_STATES known = (it != mirror.end())
-								? it->second : bars[i].Transition.StateBefore; // first sight: trust the barrier
-							if (known != bars[i].Transition.StateBefore)
-							{
-								static int t = 0;
-								if (t < 400)
-								{
-									const D3D12_RESOURCE_DESC de = r->GetDesc();
-									DebugLogFile(
-										"[bar-desync2] res=%p %llux%u before=0x%X MIRROR=0x%X after=0x%X inModule=%d list=%p\n",
-										static_cast<void*>(r), static_cast<unsigned long long>(de.Width), de.Height,
-										static_cast<unsigned>(bars[i].Transition.StateBefore), static_cast<unsigned>(known),
-										static_cast<unsigned>(bars[i].Transition.StateAfter),
-										g_inModuleRender ? 1 : 0, static_cast<void*>(self));
-								}
-								t++;
-							}
-							mirror[r] = bars[i].Transition.StateAfter;
-						}
-
-						// Dump every transition on a watched backbuffer (who/before/after).
-						if (IsWatched(r))
-						{
-							static int w = 0;
-							if (w < 48)
-							{
-								DebugLogFile("[watch-bar] res=%p %s before=0x%X after=0x%X\n",
-									static_cast<void*>(r), g_inModuleRender ? "StF" : "11on12/blit",
-									static_cast<unsigned>(bars[i].Transition.StateBefore),
-									static_cast<unsigned>(bars[i].Transition.StateAfter));
-							}
-							w++;
-						}
-
 						// Correct StateBefore to our tracked current state, then advance the tracking. Only
 						// simple (non-split) whole-resource transitions are rewritten; leave split barriers
 						// (BEGIN/END flags) untouched so we never desync a half-transition. Apply during
@@ -653,40 +456,14 @@ namespace pxd
 						// creation-seed hook) — the id=527 texture desyncs happen on StF's draw lists that
 						// aren't always bracketed by g_inModuleRender. NEVER touch the watched swapchain
 						// backbuffers: those are driven by 11on12 + TransitionBackbufferToRenderTarget.
-						// CANARY: g_resState is seeded by our device-level creation hook for EVERY texture
-						// created on the device — including ones d3d11on12 makes for itself (ImGui font
-						// atlas, staging textures). For those, `knownModuleRes` is true and we rewrite
-						// 11on12's OWN barriers using state tracking that never saw its internal
-						// transitions, which would corrupt its rendering — matching the observed
-						// "host overlay never reaches the screen" symptom (VF2 has no such hooks).
-						// Set false to pass every barrier through untouched.
-						constexpr bool kEnableBarrierRewrite = true; // canary test done: disabling it did NOT restore the overlay
 						std::unique_lock<std::mutex> resLk(g_resStateMutex);
 						const bool knownModuleRes = (g_resState.find(r) != g_resState.end());
-						if (kEnableBarrierRewrite
-							&& bars[i].Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && !IsWatched(r)
+						if (bars[i].Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && !IsWatched(r)
 							&& (g_inModuleRender || knownModuleRes))
 						{
 							auto it = g_resState.find(r);
-							D3D12_RESOURCE_STATES cur = (it != g_resState.end())
+							const D3D12_RESOURCE_STATES cur = (it != g_resState.end())
 								? it->second : D3D12_RESOURCE_STATE_COMMON; // fallback if never seen created
-							// Diagnostic: StF's own StateBefore disagreeing with our tracked state means this
-							// resource desynced (e.g. 11on12 transitioned it outside func()). These are exactly
-							// the resources that still trip id=527/538. Name them (+ desc) to the log file.
-							if (cur != bars[i].Transition.StateBefore)
-							{
-								static int d = 0;
-								if (d < 64)
-								{
-									const D3D12_RESOURCE_DESC de = r->GetDesc();
-									DebugLogFile(
-										"[barrier-desync] res=%p W=%llu H=%u fmt=%d  StF says before=0x%X, tracked=0x%X, after=0x%X\n",
-										static_cast<void*>(r), static_cast<unsigned long long>(de.Width), de.Height, de.Format,
-										static_cast<unsigned>(bars[i].Transition.StateBefore), static_cast<unsigned>(cur),
-										static_cast<unsigned>(bars[i].Transition.StateAfter));
-								}
-								d++;
-							}
 							if (cur != bars[i].Transition.StateAfter)     // skip no-op self-transitions
 								patched[i].Transition.StateBefore = cur;
 							g_resState[r] = bars[i].Transition.StateAfter;
@@ -721,57 +498,12 @@ namespace pxd
 				g_origResourceBarrier(self, n, pass);
 			}
 
-			// ClearRenderTargetView hook (slot 48): log the color StF clears its RTs to. If a RT is
-			// cleared to non-black but reads back black, even clears aren't landing (state/sync). If it
-			// reads the clear color, only the draws fail (pipeline/root-sig). Decisive either way.
-			typedef void (STDMETHODCALLTYPE* ClearRTV_t)(ID3D12GraphicsCommandList*, D3D12_CPU_DESCRIPTOR_HANDLE, const FLOAT[4], UINT, const D3D12_RECT*);
-			static ClearRTV_t g_origClearRTV = nullptr;
-			// DIAGNOSTIC TEST (black-RT): force StF's render-target clears to bright RED. Decisive:
-			// if red (or non-black readback) shows, the RT is being written AND displayed -> StF's draws
-			// produce no color (shader/texture/constant issue). If still pure black, the RT isn't written
-			// or isn't reaching the screen (execution/blit/wrong-target). Only override StF's own clears
-			// (g_inModuleRender); leave 11on12/ImGui clears alone. Set kForceRedClear=false to disable.
-			static constexpr bool kForceRedClear = false;
-			static void STDMETHODCALLTYPE HookedClearRTV(ID3D12GraphicsCommandList* self,
-				D3D12_CPU_DESCRIPTOR_HANDLE h, const FLOAT c[4], UINT nr, const D3D12_RECT* rects)
-			{
-				static int s_n = 0;
-				if (s_n < 24 && c) { ++s_n;
-					DebugLogFile("[clear] RTV=0x%llX color=(%.3f, %.3f, %.3f, %.3f) inModule=%d rects=%u list=%p\n",
-						static_cast<unsigned long long>(h.ptr), c[0], c[1], c[2], c[3], ModuleRenderActive() ? 1 : 0, nr, static_cast<void*>(self));
-				}
-				if (kForceRedClear && ModuleRenderActive())
-				{
-					const FLOAT red[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-					g_origClearRTV(self, h, red, nr, rects);
-					return;
-				}
-				g_origClearRTV(self, h, c, nr, rects);
-			}
-
-			// ExecuteCommandLists hook (queue slot 10): does StF submit on YAMP's queue (=> 11on12 reads
-			// are ordered) or its own (=> the read races and sees black even though StF rendered)?
-			typedef void (STDMETHODCALLTYPE* ExecCmdLists_t)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
-			static ExecCmdLists_t g_origExec = nullptr;
+			// YAMP's own D3D12 queue — the one the frame batch is submitted on.
 			static ID3D12CommandQueue* g_yampQueue = nullptr;
-			static void STDMETHODCALLTYPE HookedExec(ID3D12CommandQueue* self, UINT n, ID3D12CommandList* const* lists)
-			{
-				// Does StF actually submit? Log the CALLER: return address inside the game DLL
-				// means its own sbgl backend is doing ExecuteCommandLists; else it's 11on12/our blit.
-				static int s_n = 0;
-				if (s_n < 24) { ++s_n;
-					const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
-					const bool inModule = IsGameDllAddr(ra);
-					DebugLogFile("[exec] n=%u SAME=%d caller=%s (%s+0x%llX)\n",
-						n, self == g_yampQueue ? 1 : 0, inModule ? "StF" : "other",
-						inModule ? "StF" : "?", inModule ? static_cast<unsigned long long>(ra - g_gameDllBase) : static_cast<unsigned long long>(ra));
-				}
-				if (lists) for (UINT i = 0; i < n; ++i) if (lists[i] == g_lastModuleCmdList) g_moduleListExecs++;
-				g_origExec(self, n, lists);
-			}
 
-			// Close(slot 9) / Reset(slot 10) hooks: does StF close its render command list (=> executable)
-			// or leave it open (=> YAMP must close it)? And what allocator does it Reset with?
+			// Close(slot 9) / Reset(slot 10) hooks. The module never closes or resets its own lists
+			// (the host's job), but the ORIGINAL entry points are needed: the frame submit must close
+			// and reopen those lists without re-entering the hooks.
 			typedef HRESULT(STDMETHODCALLTYPE* Close_t)(ID3D12GraphicsCommandList*);
 			typedef HRESULT(STDMETHODCALLTYPE* Reset_t)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
 			static Close_t g_origClose = nullptr;
@@ -788,10 +520,8 @@ namespace pxd
 			// and submit them together in one call, flushing once.
 			static ID3D12GraphicsCommandList* g_moduleFlagged[64] = {}; // lists flagged StF since their last Reset
 			static int g_moduleFlaggedCount = 0;
-			static ID3D12GraphicsCommandList* g_frameLists[64] = {}; // StF lists closed this frame, in order
 			// Per-list allocator we own, so we can Reset (reopen) StF's lists each frame for it to re-record.
 			static std::unordered_map<ID3D12GraphicsCommandList*, ID3D12CommandAllocator*> g_listAlloc;
-			static int g_frameListCount = 0;
 			static ID3D12Fence* g_execFence = nullptr; static UINT64 g_execFv = 0; static HANDLE g_execEv = nullptr;
 			void MarkModuleRenderList(ID3D12GraphicsCommandList* l) // "this list is StF's" (from the PSO hook)
 			{
@@ -799,11 +529,6 @@ namespace pxd
 				for (int i = 0; i < g_moduleFlaggedCount; ++i) if (g_moduleFlagged[i] == l) return;
 				if (g_moduleFlaggedCount < 64) g_moduleFlagged[g_moduleFlaggedCount++] = l;
 				static int m = 0; if (m < 8) { DebugLogFile("[mark] %s list %p type=%d (flagged=%d)\n", gGeneral.GetGameTag(), static_cast<void*>(l), l->GetType(), g_moduleFlaggedCount); } m++;
-			}
-			static bool IsModuleFlagged(ID3D12GraphicsCommandList* l)
-			{
-				for (int i = 0; i < g_moduleFlaggedCount; ++i) if (g_moduleFlagged[i] == l) return true;
-				return false;
 			}
 			static void UnflagModuleList(ID3D12GraphicsCommandList* l) // on Reset the recording is gone; re-earn it
 			{
@@ -820,7 +545,7 @@ namespace pxd
 				// PATH B (multi-list): StF records its frame across SEVERAL command lists and NEVER
 				// Close/Execute/Reset-s any of them (host's job; dynamically confirmed closes=resets=0). Dynamic
 				// capture proved StF draws into 2+ lists per scene frame (flaggedLists=2); submitting only the
-				// LAST (g_lastModuleCmdList) left the earlier list's draws unexecuted -> black screen. So Close EVERY
+				// LAST one left the earlier list's draws unexecuted -> black screen. So Close EVERY
 				// list StF drew into this frame (flagged in draw order by the draw/PSO hooks), ExecuteCommandLists
 				// them ALL in ONE call (D3D12 carries resource state across them, like LJ's RenderFrame submitting
 				// ~10 lists at once), flush once, then Reset each (its own allocator) so StF re-records next frame.
@@ -853,39 +578,6 @@ namespace pxd
 					}
 					if (nn == 0) { g_moduleFlaggedCount = 0; return; }
 
-					// VERIFY constant buffers at SUBMIT time (all StF writes for the frame are done, right
-					// before the GPU reads them) — distinguishes a genuinely zero/NaN matrix from a
-					// read-before-write artifact of the CreateCBV-time [cbv] dump.
-					{
-						static int cbf = 0;
-						if (cbf < 20 && g_cbDumpRes && g_cbDumpCount) // log the CPU addr a while so there's time to set the x64dbg bp
-						{
-							void* p = nullptr; D3D12_RANGE rr{ 0, 0 };
-							if (SUCCEEDED(g_cbDumpRes->Map(0, &rr, &p)) && p)
-							{
-								for (int i = 0; i < g_cbDumpCount; ++i)
-								{
-									float f[16]; std::memcpy(f, static_cast<uint8_t*>(p) + g_cbDumpOff[i], sizeof(f));
-									DebugLogFile("[cbv-submit] off=%llu [%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]\n",
-										g_cbDumpOff[i], f[0],f[1],f[2],f[3], f[4],f[5],f[6],f[7], f[8],f[9],f[10],f[11], f[12],f[13],f[14],f[15]);
-								}
-								// x64dbg NaN-TRACE: log the CPU write-addresses of each dumped CB slot via
-								// OutputDebugString (visible in x64dbg's log). The mapped pointer is stable
-								// across frames (StF's CB ring is persistently mapped), so set a HARDWARE WRITE
-								// breakpoint on a NaN/zero slot's address, continue, and either catch StF's
-								// matrix-compute writing it (stack -> the fn + its bad input) or see it NEVER
-								// fires (=> the CB is left uninitialized; StF creates a CBV for a CB it doesn't
-								// fill). Compare vs the valid off=0 (2D ortho) slot's writer.
-								char ab[320]; int ao = _snprintf_s(ab, _TRUNCATE, "STF-CB-CPU base=%p", p);
-								for (int i = 0; i < g_cbDumpCount && ao > 0; ++i)
-									ao += _snprintf_s(ab + ao, sizeof(ab) - ao, _TRUNCATE, " | off%llu=%p", g_cbDumpOff[i], static_cast<void*>(static_cast<uint8_t*>(p) + g_cbDumpOff[i]));
-								_snprintf_s(ab + ao, sizeof(ab) - ao, _TRUNCATE, "  <-- hw write-bp a NaN/zero slot in x64dbg\n");
-								DebugLog("%s", ab);
-								g_cbDumpRes->Unmap(0, nullptr);
-							}
-							cbf++;
-						}
-					}
 					g_yampQueue->ExecuteCommandLists(static_cast<UINT>(nn), lists);
 
 					if (!g_execFence) { s_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_execFence)); g_execEv = CreateEventA(nullptr, FALSE, FALSE, nullptr); }
@@ -929,13 +621,8 @@ namespace pxd
 			// buffers, and StF crashed in FUN_18009be60 (~frame 570). YAMP flushes the GPU every frame
 			// (SubmitModuleFrameList), so at each frame boundary ALL in-use buffers are GPU-complete and can
 			// be recycled unconditionally — no fence tracking needed.
-			// The stamp advance + recycle (the upload-exhaustion fix) — VERIFIED not to affect StF's CB data
-			// (constant buffers were identical zero/NaN with this on vs off; StF's CB ring is separate from
-			// the upload pool). Kept ON as the correct host behavior that prevents the ~frame-570 crash.
-			static constexpr bool kAdvanceStamp = true;
 			void AdvanceFrameStamp()
 			{
-				if (!kAdvanceStamp) return;
 				// (1) advance the upload-frame stamp: next frame's first alloc sees tag != stamp and pops a
 				// fresh buffer (offset reset to 0) instead of growing one buffer for the whole session.
 				uint64_t& stamp = *reinterpret_cast<uint64_t*>(s_devState + 0x67d8);
@@ -974,146 +661,11 @@ namespace pxd
 				fr++;
 			}
 
-			// Upload-copy counters (defined with the CopyBufferRegion/CopyResource hooks below).
-			extern unsigned int g_copyBufCount;
-			extern unsigned int g_copyResCount;
-			extern unsigned int g_resolveCount;
-
-			// DIAGNOSTIC: measure StF's per-frame recording without submitting (no GPU work -> no TDR freeze),
-			// to test whether draw volume is constant (normal multi-pass) or GROWING (StF's lists accumulate
-			// because our per-frame Reset is failing / frame never completes). Set false to actually render.
-			static constexpr bool kExecuteModuleLists = false;
-			void ExecuteModuleRenderLists()
-			{
-				{
-					static uint64_t s_li = 0, s_ln = 0; static int s_fr = 0;
-					const uint64_t di = g_drawIdxCount - s_li, dn = g_drawInstCount - s_ln;
-					s_li = g_drawIdxCount; s_ln = g_drawInstCount;
-					// Log boot in detail, then every 20th frame up to 2000 — to see if the in-scene draw rate
-					// is FLAT (normal) or CLIMBING (StF re-recording / accumulating).
-					if ((s_fr < 40 || s_fr % 20 == 0) && s_fr < 2000) { DebugLogFile(
-						"[frame %d] draws this frame: indexed=%llu instanced=%llu, flaggedLists=%d\n",
-						s_fr, (unsigned long long)di, (unsigned long long)dn, g_moduleFlaggedCount); }
-					// The exact StF draw list + whether StF EVER closes/resets/executes it (the missing submit).
-					if (s_fr < 40 || s_fr % 20 == 0) { DebugLogFile(
-						"[stf-list] list=%p closes=%llu resets=%llu execs=%llu  (&g_lastModuleCmdList=%p)\n",
-						static_cast<void*>(g_lastModuleCmdList), (unsigned long long)g_moduleListCloses,
-						(unsigned long long)g_moduleListResets, (unsigned long long)g_moduleListExecs,
-						static_cast<void*>(&g_lastModuleCmdList)); }
-					// Upload-copy tally: are StF's DEFAULT-heap vertex/index buffers ever filled?
-					if (s_fr < 40 || s_fr % 20 == 0) { DebugLogFile(
-						"[copy-tally] copyBufferRegion=%u copyResource=%u resolves=%u\n",
-						g_copyBufCount, g_copyResCount, g_resolveCount); }
-					// [vp-tally] per-frame deltas: does the 3D pass (vp height 768) record draws?
-					{
-						static uint64_t p768 = 0, p1024 = 0, p384 = 0, pOther = 0;
-						const uint64_t d768 = g_vpDraws768 - p768, d1024 = g_vpDraws1024 - p1024,
-							d384 = g_vpDraws384 - p384, dOther = g_vpDrawsOther - pOther;
-						p768 = g_vpDraws768; p1024 = g_vpDraws1024; p384 = g_vpDraws384; pOther = g_vpDrawsOther;
-						if (s_fr < 40 || s_fr % 20 == 0) { DebugLogFile(
-							"[vp-tally] draws vp768=%llu vp1024=%llu vp384=%llu other=%llu\n",
-							(unsigned long long)d768, (unsigned long long)d1024,
-							(unsigned long long)d384, (unsigned long long)dOther); }
-					}
-					// GBV id=547 tally: draws landing on a CLOSED list are silently dropped by the runtime.
-					if (s_fr < 40 || s_fr % 20 == 0) { DebugLogFile(
-						"[closed-tally] drawsOnClosed=%llu drawsOnOpen=%llu\n",
-						(unsigned long long)g_drawsOnClosedList, (unsigned long long)g_drawsOnOpenList); }
-					s_fr++;
-				}
-				if (!kExecuteModuleLists) { g_moduleFlaggedCount = 0; g_frameListCount = 0; return; } // measure only
-				if (g_execDisabled) { g_moduleFlaggedCount = 0; g_frameListCount = 0; return; }
-				if (!g_yampQueue || !s_device || g_moduleFlaggedCount == 0) { g_moduleFlaggedCount = 0; g_frameListCount = 0; return; }
-				// Execute EVERY list StF drew into this frame (flagged by the draw hooks during func()), in
-				// flag order (= draw-encounter order ~= record order). StF hands lists to the host to submit
-				// and may leave them OPEN, so close any still recording (bypassing our Close hook) to make
-				// them submittable. ONE ExecuteCommandLists + ONE flush = LJ's RenderFrame_000.
-				// Snapshot the flagged lists (the reset loop below calls g_origReset, which must not perturb
-				// the array; and we need them again after the flush).
-				ID3D12CommandList* lists[64]; ID3D12GraphicsCommandList* gl[64]; int n = 0;
-				for (int i = 0; i < g_moduleFlaggedCount && n < 64; ++i)
-				{
-					ID3D12GraphicsCommandList* l = g_moduleFlagged[i];
-					if (!l || l->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) continue;
-					if (g_origClose) g_origClose(l); // StF never closes its lists; the host must before submit
-					gl[n] = l; lists[n] = l; ++n;
-				}
-				if (n)
-				{
-					g_yampQueue->ExecuteCommandLists(static_cast<UINT>(n), lists);
-					if (!g_execFence) { s_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_execFence)); g_execEv = CreateEventA(nullptr, FALSE, FALSE, nullptr); }
-					// Wait 4s (> the ~2s GPU TDR window) so a hang on StF's draws surfaces as a clean
-					// device-removal we can name via DRED — instead of the 1s timeout letting the next frame
-					// resubmit/reset a still-in-flight list (id=553/544/547 cascade -> crash).
-					bool timedOut = false;
-					if (g_execFence) { g_yampQueue->Signal(g_execFence, ++g_execFv); if (g_execFence->GetCompletedValue() < g_execFv) { g_execFence->SetEventOnCompletion(g_execFv, g_execEv); timedOut = (WaitForSingleObject(g_execEv, 4000) == WAIT_TIMEOUT); } }
-					static int f = 0; if (f < 8) { DebugLogFile("[exec-fix] frame executed %d %s list(s) in ONE submit%s\n", n, gGeneral.GetGameTag(), timedOut ? " (FLUSH TIMED OUT - GPU HANG)" : ""); } f++;
-					if (timedOut) { DebugLogFile("[exec-fix] GPU did not complete in 4s -> hang on %s draws; disabling + dumping DRED\n", gGeneral.GetGameTag()); DumpDredNow(); g_execDisabled = true; }
-					const HRESULT rr = s_device->GetDeviceRemovedReason();
-					if (FAILED(rr))
-					{
-						DebugLogFile("[exec-fix] DEVICE REMOVED 0x%08X after submit — disabling %s execution\n", static_cast<unsigned>(rr), gGeneral.GetGameTag());
-						DumpDredNow();
-						g_execDisabled = true;
-					}
-
-					// REOPEN each list for next frame. StF never Resets/Closes its lists — in LJ the host does
-					// (PopulateCommandList opens with Reset, closes before Execute). We just flushed, so the GPU
-					// is done and the per-list allocator is safe to Reset. Without this, StF's next-frame
-					// recording hits a CLOSED list (id=547 flood) and re-submitting the same in-flight list
-					// fails the fence check (id=553). Reset via g_origReset to bypass our Reset hook.
-					if (!g_execDisabled && g_origReset)
-					{
-						for (int i = 0; i < n; ++i)
-						{
-							ID3D12CommandAllocator*& a = g_listAlloc[gl[i]];
-							if (!a) s_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a));
-							if (a) { a->Reset(); g_origReset(gl[i], a, nullptr); }
-						}
-					}
-				}
-				g_moduleFlaggedCount = 0; // clear this frame's flags; next frame re-flags via the draw hooks
-				g_frameListCount = 0;
-			}
-
-			// GBV id=547 ("This API cannot be called on a closed command list") — commands recorded onto
-			// a CLOSED list are silently DROPPED, which would explain draws that we count but never see.
-			// Track open/closed per list and count the draws that land while closed. Our submit does
-			// Close -> Execute -> flush -> Reset while StF has ~22 worker threads, so any recording in
-			// that window evaporates.
-			static std::unordered_map<ID3D12GraphicsCommandList*, bool> g_listClosed;
-			static std::mutex g_listClosedMutex;
-			uint64_t g_drawsOnClosedList = 0, g_drawsOnOpenList = 0;
-			static bool IsListClosed(ID3D12GraphicsCommandList* l)
-			{
-				std::lock_guard<std::mutex> lk(g_listClosedMutex);
-				auto it = g_listClosed.find(l);
-				return it != g_listClosed.end() && it->second;
-			}
-			static void MarkListClosed(ID3D12GraphicsCommandList* l, bool closed)
-			{
-				std::lock_guard<std::mutex> lk(g_listClosedMutex);
-				g_listClosed[l] = closed;
-			}
-			static HRESULT STDMETHODCALLTYPE HookedClose(ID3D12GraphicsCommandList* self)
-			{
-				if (self == g_lastModuleCmdList) g_moduleListCloses++; // does StF close its own draw list? (expect: no)
-				const HRESULT hr = g_origClose(self);
-				if (SUCCEEDED(hr)) MarkListClosed(self, true);
-				// Diagnostic only: note when StF closes a list it drew into. Execution is driven by the
-				// frame-end flagged-list sweep (ExecuteModuleRenderLists), not by close, so nothing is queued here.
-				if (SUCCEEDED(hr) && IsModuleFlagged(self))
-				{
-					static int c = 0; if (c < 16) { DebugLogFile("[close] game-flagged list %p closed by %s\n", static_cast<void*>(self), gGeneral.GetGameTag()); } c++;
-				}
-				return hr;
-			}
+			// Reset clears a list's recording, so it must re-earn its module flag via a new module draw
+			// before the frame submit will close + execute it.
 			static HRESULT STDMETHODCALLTYPE HookedReset(ID3D12GraphicsCommandList* self, ID3D12CommandAllocator* a, ID3D12PipelineState* p)
 			{
-				if (self == g_lastModuleCmdList) g_moduleListResets++; // does StF reset its own draw list? (expect: no)
-				MarkListClosed(self, false); // Reset reopens it for recording
-				UnflagModuleList(self); // recording cleared; the list must re-earn its StF flag via a new StF PSO
-				static int c = 0; if (c < 8 || c % 600 == 0) { DebugLog("[cmdlist] Reset self=%p alloc=%p #%d\n", static_cast<void*>(self), static_cast<void*>(a), c); } c++;
+				UnflagModuleList(self);
 				return g_origReset(self, a, p);
 			}
 
@@ -1133,85 +685,15 @@ namespace pxd
 			static CreateCommitted_t g_origCreateCommitted = nullptr;
 			static CreatePlaced_t    g_origCreatePlaced    = nullptr;
 
-			// TEST: force CullMode=NONE on every graphics PSO. If StF's scene appears, back-face culling
-			// (winding/projection-handedness mismatch) was discarding all triangles -> solid clear. Also
-			// logs the original rasterizer/depth state so we see what StF used. kForceCullNone toggles it.
-			static constexpr bool kForceCullNone = false;
-			static constexpr bool kForceDepthOff = false;
-			typedef HRESULT(STDMETHODCALLTYPE* CreateGfxPSO_t)(ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
-			static CreateGfxPSO_t g_origCreateGfxPSO = nullptr;
-			static HRESULT STDMETHODCALLTYPE HookedCreateGfxPSO(ID3D12Device* self, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** ppv)
-			{
-				if (desc)
-				{
-					static int s = 0;
-					if (s < 24) { s++; DebugLogFile(
-						"[pso] cull=%d frontCCW=%d fill=%d depthEnable=%d depthFunc=%d depthWrite=%d numRT=%u rt0fmt=%d dsvfmt=%d\n",
-						desc->RasterizerState.CullMode, desc->RasterizerState.FrontCounterClockwise, desc->RasterizerState.FillMode,
-						desc->DepthStencilState.DepthEnable, desc->DepthStencilState.DepthFunc, desc->DepthStencilState.DepthWriteMask,
-						desc->NumRenderTargets, desc->RTVFormats[0], desc->DSVFormat); }
-				}
-				// TEST: StF's PSOs enable depth test (LESS) but set DSVFormat=UNKNOWN and bind no DSV, so the
-				// depth test reads 0 and rejects every fragment -> black. Force DepthEnable=FALSE to confirm
-				// that's the black-screen cause (proper fix = provide a real depth buffer, like the host).
-				if ((kForceCullNone || kForceDepthOff) && desc)
-				{
-					D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
-					if (kForceCullNone) copy.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-					if (kForceDepthOff) { copy.DepthStencilState.DepthEnable = FALSE; copy.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; }
-					return g_origCreateGfxPSO(self, &copy, riid, ppv);
-				}
-				return g_origCreateGfxPSO(self, desc, riid, ppv);
-			}
-			// TEMP: track BUFFER resources' GPU-VA ranges so a CBV's BufferLocation can be mapped back to
-			// its resource + offset, to dump the constant-buffer contents (the transform matrix) StF binds.
-			struct BufRange { uint64_t va0, va1; ID3D12Resource* res; };
-			static BufRange g_bufRanges[4096];
-			static int      g_bufRangeCount = 0;
 			static void SeedCreatedResourceState(const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES st, REFIID riid, void** ppv)
 			{
 				if (!ppv || !*ppv || !desc) return;
 				if (riid != __uuidof(ID3D12Resource)) return;
-				if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-				{
-					ID3D12Resource* r = static_cast<ID3D12Resource*>(*ppv);
-					const uint64_t va = r->GetGPUVirtualAddress();
-					if (va)
-					{
-						std::lock_guard<std::mutex> lk(g_resStateMutex);
-						if (g_bufRangeCount < 4096) g_bufRanges[g_bufRangeCount++] = { va, va + desc->Width, r };
-					}
-					return; // runtime forces buffers to COMMON — don't seed barrier state for them
-				}
+				// The runtime forces buffers to COMMON regardless of InitialState (id=1328); tracking
+				// their requested state would itself create a false mismatch.
+				if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) return;
 				std::lock_guard<std::mutex> lk(g_resStateMutex);
 				g_resState[static_cast<ID3D12Resource*>(*ppv)] = st; // TRUE initial state for the barrier corrector
-			}
-			// CreateConstantBufferView (device slot 17): dump the first 16 floats (a 4x4 matrix) of each CB
-			// StF binds during render — if all zero, the host normally fills this and YAMP doesn't.
-			typedef void (STDMETHODCALLTYPE* CreateCBV_t)(ID3D12Device*, const D3D12_CONSTANT_BUFFER_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-			static CreateCBV_t g_origCreateCBV = nullptr;
-			static int g_cbvLog = 0;
-			static void STDMETHODCALLTYPE HookedCreateCBV(ID3D12Device* self, const D3D12_CONSTANT_BUFFER_VIEW_DESC* d, D3D12_CPU_DESCRIPTOR_HANDLE h)
-			{
-				if (ModuleRenderActive() && d && g_cbvLog < 12)
-				{
-					ID3D12Resource* res = nullptr; uint64_t off = 0;
-					{
-						std::lock_guard<std::mutex> lk(g_resStateMutex);
-						for (int i = 0; i < g_bufRangeCount; ++i)
-							if (d->BufferLocation >= g_bufRanges[i].va0 && d->BufferLocation < g_bufRanges[i].va1)
-							{ res = g_bufRanges[i].res; off = d->BufferLocation - g_bufRanges[i].va0; break; }
-					}
-					float f[16] = {}; bool got = false;
-					if (res) { void* p = nullptr; D3D12_RANGE rr{ 0, 0 };
-						if (SUCCEEDED(res->Map(0, &rr, &p)) && p) { std::memcpy(f, static_cast<uint8_t*>(p) + off, sizeof(f)); res->Unmap(0, nullptr); got = true; } }
-					if (res) { g_cbDumpRes = res; if (g_cbDumpCount < 8) g_cbDumpOff[g_cbDumpCount++] = off; } // for the submit-time re-read
-					DebugLogFile("[cbv] va=0x%llX size=%u res=%p off=%llu got=%d\n     [%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]\n",
-						static_cast<unsigned long long>(d->BufferLocation), d->SizeInBytes, static_cast<void*>(res), off, got ? 1 : 0,
-						f[0],f[1],f[2],f[3], f[4],f[5],f[6],f[7], f[8],f[9],f[10],f[11], f[12],f[13],f[14],f[15]);
-					g_cbvLog++;
-				}
-				g_origCreateCBV(self, d, h);
 			}
 			static HRESULT STDMETHODCALLTYPE HookedCreateCommitted(ID3D12Device* self, const D3D12_HEAP_PROPERTIES* hp, D3D12_HEAP_FLAGS hf,
 				const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES st, const D3D12_CLEAR_VALUE* cv, REFIID riid, void** ppv)
@@ -1244,124 +726,10 @@ namespace pxd
 					vtbl[29] = reinterpret_cast<void*>(&HookedCreatePlaced);
 					VirtualProtect(&vtbl[29], sizeof(void*), op, &op);
 				}
-				if (VirtualProtect(&vtbl[10], sizeof(void*), PAGE_READWRITE, &op)) // CreateGraphicsPipelineState
-				{
-					g_origCreateGfxPSO = reinterpret_cast<CreateGfxPSO_t>(vtbl[10]);
-					vtbl[10] = reinterpret_cast<void*>(&HookedCreateGfxPSO);
-					VirtualProtect(&vtbl[10], sizeof(void*), op, &op);
-				}
-				if (VirtualProtect(&vtbl[17], sizeof(void*), PAGE_READWRITE, &op)) // CreateConstantBufferView
-				{
-					g_origCreateCBV = reinterpret_cast<CreateCBV_t>(vtbl[17]);
-					vtbl[17] = reinterpret_cast<void*>(&HookedCreateCBV);
-					VirtualProtect(&vtbl[17], sizeof(void*), op, &op);
-				}
 			}
 
-			// DIAGNOSTIC (black-RT, draw-time): StF's draws execute on a submitted list but produce no
-			// pixels. The two classic causes are a degenerate viewport/scissor (nothing rasterized) or an
-			// unbound/wrong render target (draws go nowhere). Log the viewport StF sets and the RTV it binds
-			// during its render (g_inModuleRender), capped.
-			typedef void (STDMETHODCALLTYPE* RSSetViewports_t)(ID3D12GraphicsCommandList*, UINT, const D3D12_VIEWPORT*);
-			typedef void (STDMETHODCALLTYPE* OMSetRenderTargets_t)(ID3D12GraphicsCommandList*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*);
-			// Scissor (slot 22) — never inspected before. An empty/degenerate scissor discards every
-			// pixel with NO validation error and no symptom other than a black RT: exactly what we see.
-			typedef void (STDMETHODCALLTYPE* RSSetScissorRects_t)(ID3D12GraphicsCommandList*, UINT, const D3D12_RECT*);
-			static RSSetScissorRects_t  g_origRSSetScissorRects  = nullptr;
-			static RSSetViewports_t     g_origRSSetViewports     = nullptr;
-			static OMSetRenderTargets_t g_origOMSetRenderTargets = nullptr;
-			static void STDMETHODCALLTYPE HookedRSSetScissorRects(ID3D12GraphicsCommandList* self, UINT n, const D3D12_RECT* rects)
-			{
-				if (ModuleRenderActive() && rects && n)
-				{
-					static int s = 0;
-					if (s < 20)
-					{
-						DebugLogFile("[scissor] n=%u [0] l=%ld t=%ld r=%ld b=%ld (w=%ld h=%ld) list=%p\n",
-							n, rects[0].left, rects[0].top, rects[0].right, rects[0].bottom,
-							rects[0].right - rects[0].left, rects[0].bottom - rects[0].top,
-							static_cast<void*>(self));
-						s++;
-					}
-					// TEST: force a wide-open scissor. If pixels appear, StF's scissor was the killer.
-					constexpr bool kForceFullScissor = false; // tested 2026-07-25: StF's scissors are already
-					// correct (1024x768 / 1024x1024 / 496x384, matching each RT); forcing wide-open changed nothing
-					if (kForceFullScissor)
-					{
-						D3D12_RECT wide{ 0, 0, 16384, 16384 };
-						g_origRSSetScissorRects(self, 1, &wide);
-						return;
-					}
-				}
-				g_origRSSetScissorRects(self, n, rects);
-			}
-			// IA-stage diagnostics: topology (slot 20), index buffer (43), vertex buffers (44). A garbage
-			// VB/IB GPU VA or an odd topology makes draws execute but rasterize nothing.
-			typedef void (STDMETHODCALLTYPE* IASetTopology_t)(ID3D12GraphicsCommandList*, D3D12_PRIMITIVE_TOPOLOGY);
-			typedef void (STDMETHODCALLTYPE* IASetIndexBuffer_t)(ID3D12GraphicsCommandList*, const D3D12_INDEX_BUFFER_VIEW*);
-			typedef void (STDMETHODCALLTYPE* IASetVertexBuffers_t)(ID3D12GraphicsCommandList*, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
-			static IASetTopology_t      g_origIASetTopology      = nullptr;
-			static IASetIndexBuffer_t   g_origIASetIndexBuffer   = nullptr;
-			static IASetVertexBuffers_t g_origIASetVertexBuffers = nullptr;
-			static void STDMETHODCALLTYPE HookedIASetTopology(ID3D12GraphicsCommandList* self, D3D12_PRIMITIVE_TOPOLOGY t)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[80]; _snprintf_s(b, _TRUNCATE, "[seq] IATopology=%d list=%p\n", static_cast<int>(t), static_cast<void*>(self)); SeqLog(b); }
-				g_origIASetTopology(self, t);
-			}
-			static void STDMETHODCALLTYPE HookedIASetIndexBuffer(ID3D12GraphicsCommandList* self, const D3D12_INDEX_BUFFER_VIEW* v)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[128]; _snprintf_s(b, _TRUNCATE, "[seq] IASetIB va=0x%llX size=%u fmt=%d list=%p\n", v ? static_cast<unsigned long long>(v->BufferLocation) : 0, v ? v->SizeInBytes : 0, v ? v->Format : 0, static_cast<void*>(self)); SeqLog(b); }
-				g_origIASetIndexBuffer(self, v);
-			}
-			static void STDMETHODCALLTYPE HookedIASetVertexBuffers(ID3D12GraphicsCommandList* self, UINT start, UINT num, const D3D12_VERTEX_BUFFER_VIEW* v)
-			{
-				if (ModuleRenderActive() && g_seqLog < 140) { char b[144]; _snprintf_s(b, _TRUNCATE, "[seq] IASetVB slot=%u num=%u va=0x%llX size=%u stride=%u list=%p\n", start, num, (v && num) ? static_cast<unsigned long long>(v[0].BufferLocation) : 0, (v && num) ? v[0].SizeInBytes : 0, (v && num) ? v[0].StrideInBytes : 0, static_cast<void*>(self)); SeqLog(b); }
-				// TEST (black-screen): dump the actual CONTENT of the bound VB. If the buffer maps
-				// (upload heap) and the bytes are all zero, the geometry is degenerate and no matrix
-				// can save it — the missing piece would be the VB upload/copy, not transforms.
-				{
-					static int s_vbDump = 0;
-					if (ModuleRenderActive() && s_vbDump < 10 && v != nullptr && num != 0 && v[0].BufferLocation != 0)
-					{
-						ID3D12Resource* res = nullptr; uint64_t off = 0;
-						{
-							std::lock_guard<std::mutex> lk(g_resStateMutex);
-							for (int i = 0; i < g_bufRangeCount; ++i)
-								if (v[0].BufferLocation >= g_bufRanges[i].va0 && v[0].BufferLocation < g_bufRanges[i].va1)
-								{ res = g_bufRanges[i].res; off = v[0].BufferLocation - g_bufRanges[i].va0; break; }
-						}
-						float f[8] = {}; int got = 0; unsigned int nz = 0;
-						if (res != nullptr)
-						{
-							void* p = nullptr; D3D12_RANGE rr{ 0, 0 };
-							if (SUCCEEDED(res->Map(0, &rr, &p)) && p != nullptr)
-							{
-								const uint8_t* base = static_cast<uint8_t*>(p) + off;
-								std::memcpy(f, base, sizeof(f));
-								for (unsigned int k = 0; k < 256 && off + k < v[0].SizeInBytes; ++k) if (base[k] != 0) ++nz;
-								res->Unmap(0, nullptr); got = 1;
-							}
-							else got = -1; // not CPU-mappable (default heap)
-						}
-						DebugLogFile("[vbdump] va=0x%llX res=%p off=%llu map=%d nz256=%u [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f]\n",
-							static_cast<unsigned long long>(v[0].BufferLocation), static_cast<void*>(res), off, got, nz,
-							f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-						s_vbDump++;
-					}
-				}
-				g_origIASetVertexBuffers(self, start, num, v);
-			}
-			// TEST (black-screen): StF's 3D vertex buffers live in DEFAULT heaps (Map fails), so their
-			// contents can only arrive through a GPU copy from an upload/intermediate buffer. Count
-			// and log those copies during StF's render: if none target the bound VB, the geometry is
-			// never uploaded (degenerate -> black) and the missing host piece is the intermediate-
-			// buffer flush, not the transform CBs.
 			typedef void (STDMETHODCALLTYPE* CopyBufferRegion_t)(ID3D12GraphicsCommandList*, ID3D12Resource*, UINT64, ID3D12Resource*, UINT64, UINT64);
-			typedef void (STDMETHODCALLTYPE* CopyResource_t)(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*);
 			static CopyBufferRegion_t g_origCopyBufferRegion = nullptr;
-			static CopyResource_t     g_origCopyResource     = nullptr;
-			static int g_copyLog = 0;
-			unsigned int g_copyBufCount = 0, g_copyResCount = 0;
 			// *** IB-FILL FIX v2 — SHADOW COPY LIST (2026-07-26; replaces the v1 "flag copy lists"
 			// approach). StF records its ONE-TIME buffer uploads (e.g. the emulator's 24576-index
 			// tile-grid quad IB) on loader lists that never draw and are recorded from WORKER THREADS
@@ -1417,253 +785,70 @@ namespace pxd
 				// loader/worker threads OUTSIDE the func() bracket. A return address inside the
 				// loaded game DLL's range is definitively the module, never d3d11on12/YAMP.
 				const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				const bool fromModule = IsGameDllAddr(ra);
-				if (fromModule)
+				if (IsGameDllAddr(ra))
 					ShadowRecordBufferCopy(dst, dstOff, src, srcOff, bytes);
-				if (fromModule || ModuleRenderActive())
-				{
-					++g_copyBufCount;
-					if (g_copyLog < 16)
-					{
-						// The SOURCE is StF's intermediate/upload buffer (CPU-mappable): dump its
-						// content at the copy offset. All-zero here => StF never wrote the vertex
-						// data (broken upload path upstream), which no transform could rescue.
-						unsigned int nz = 0; int mapped = 0; float f[12] = {};
-						unsigned int nanCount = 0; int firstNan = -1, nanStride = -1;
-						if (src != nullptr)
-						{
-							void* p = nullptr; D3D12_RANGE rr{ 0, 0 };
-							if (SUCCEEDED(src->Map(0, &rr, &p)) && p != nullptr)
-							{
-								const uint8_t* s = static_cast<uint8_t*>(p) + srcOff;
-								const uint64_t n = bytes < 4096 ? bytes : 4096;
-								for (uint64_t k = 0; k < n; ++k) if (s[k] != 0) ++nz;
-								std::memcpy(f, s, sizeof(f));
-								// NaN periodicity over the first 1024 floats: which lane repeats?
-								const float* fs = reinterpret_cast<const float*>(s);
-								const uint64_t fn = (bytes / 4) < 1024 ? (bytes / 4) : 1024;
-								int prevNan = -1;
-								for (uint64_t k = 0; k < fn; ++k)
-								{
-									if (std::isnan(fs[k]))
-									{
-										++nanCount;
-										if (firstNan < 0) firstNan = static_cast<int>(k);
-										else if (nanStride < 0 && prevNan >= 0) nanStride = static_cast<int>(k) - prevNan;
-										prevNan = static_cast<int>(k);
-									}
-								}
-								src->Unmap(0, nullptr); mapped = 1;
-							}
-							else mapped = -1;
-						}
-						// RAW HEX too: '-nan' is exactly how 0xFFFFFFFF prints when read as a float, i.e.
-						// an opaque-white PACKED VERTEX COLOR would masquerade as a broken position .w.
-						// Check the bits before trusting the float reading of lane 3.
-						{
-							const uint32_t* uu = reinterpret_cast<const uint32_t*>(f);
-							DebugLogFile("[copy-hex] %08X %08X %08X %08X | %08X %08X %08X %08X\n",
-								uu[0], uu[1], uu[2], uu[3], uu[4], uu[5], uu[6], uu[7]);
-						}
-						DebugLogFile("[copy] dstVA=0x%llX bytes=%llu srcMap=%d nz4k=%u nan/1024=%u first=%d stride=%d [%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f]\n",
-							dst ? static_cast<unsigned long long>(dst->GetGPUVirtualAddress()) : 0ull, bytes,
-							mapped, nz, nanCount, firstNan, nanStride,
-							f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11]);
-						g_copyLog++;
-					}
-				}
 				g_origCopyBufferRegion(self, dst, dstOff, src, srcOff, bytes);
 			}
-			// [resolve-tally] TEMP: does the MSAA->non-MS ResolveSubresource (the 3D layer's path to
-			// the 1024x768 RT) ever get recorded live? Slot 19.
+			// ResolveSubresource hook (slot 19). The MSAA->non-MS resolve DST = the Model 2 3D scene
+			// layer (1024x768), which the host composites (see RenderWindow::BlitDX12Texture). StF
+			// leaves it SHADER-READABLE (0xC0) at frame end (fight-capture final-state ground truth).
 			typedef void (STDMETHODCALLTYPE* ResolveSubresource_t)(ID3D12GraphicsCommandList*, ID3D12Resource*, UINT, ID3D12Resource*, UINT, DXGI_FORMAT);
 			static ResolveSubresource_t g_origResolveSubresource = nullptr;
-			unsigned int g_resolveCount = 0;
-			// The MSAA->non-MS resolve DST = the Model 2 3D scene layer (1024x768). The host must
-			// composite it under the 496x384 2D output (see RenderWindow::BlitDX12Texture). StF
-			// leaves it SHADER-READABLE (0xC0) at frame end (fight-capture final-state ground truth).
 			static ID3D12Resource* g_lastModuleResolveDst = nullptr;
 			static void STDMETHODCALLTYPE HookedResolveSubresource(ID3D12GraphicsCommandList* self,
 				ID3D12Resource* dst, UINT dstSub, ID3D12Resource* src, UINT srcSub, DXGI_FORMAT fmt)
 			{
-				++g_resolveCount;
 				// No MarkModuleRenderList here: the resolve rides StF's DRAW list (already flagged by the
 				// draw hooks); flagging based on the resolve alone risks touching a foreign list.
-				const uintptr_t raRS = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				if (IsGameDllAddr(raRS))
+				if (IsGameDllAddr(reinterpret_cast<uintptr_t>(_ReturnAddress())))
 					g_lastModuleResolveDst = dst; // fallback display source (see BlitDX12Texture)
-				static int s_rs = 0;
-				if (s_rs < 12)
-				{
-					D3D12_RESOURCE_DESC sd{}, dd{};
-					if (src) sd = src->GetDesc();
-					if (dst) dd = dst->GetDesc();
-					DebugLogFile("[resolve] src=%p %llux%u s=%u -> dst=%p %llux%u fmt=%d ra=0x%llX list=%p\n",
-						static_cast<void*>(src), static_cast<unsigned long long>(sd.Width), sd.Height, sd.SampleDesc.Count,
-						static_cast<void*>(dst), static_cast<unsigned long long>(dd.Width), dd.Height, fmt,
-						static_cast<unsigned long long>(raRS), static_cast<void*>(self));
-					s_rs++;
-				}
 				g_origResolveSubresource(self, dst, dstSub, src, srcSub, fmt);
 			}
-			static void STDMETHODCALLTYPE HookedCopyResource(ID3D12GraphicsCommandList* self, ID3D12Resource* dst, ID3D12Resource* src)
-			{
-				// CopyResource is not shadowed (never observed from StF: g_copyResCount==0 all runs);
-				// log if it ever fires so we know to extend the shadow list to it.
-				const uintptr_t raCR = reinterpret_cast<uintptr_t>(_ReturnAddress());
-				const bool fromModuleCR = IsGameDllAddr(raCR);
-				if (fromModuleCR || ModuleRenderActive())
-				{
-					++g_copyResCount;
-					if (g_copyLog < 16)
-					{
-						DebugLogFile("[copy] Resource dst=%p src=%p dstVA=0x%llX list=%p\n",
-							static_cast<void*>(dst), static_cast<void*>(src),
-							dst ? static_cast<unsigned long long>(dst->GetGPUVirtualAddress()) : 0ull, static_cast<void*>(self));
-						g_copyLog++;
-					}
-				}
-				g_origCopyResource(self, dst, src);
-			}
-			static void STDMETHODCALLTYPE HookedRSSetViewports(ID3D12GraphicsCommandList* self, UINT n, const D3D12_VIEWPORT* vp)
-			{
-				if (vp && n) { g_lastVpW = static_cast<UINT>(vp[0].Width); g_lastVpH = static_cast<UINT>(vp[0].Height); } // [vp-tally]
-				if (ModuleRenderActive() && vp && n)
-				{
-					static int s = 0;
-					if (s < 24) { DebugLogFile(
-						"[vp] n=%u [0] x=%.1f y=%.1f w=%.1f h=%.1f z=[%.2f,%.2f] list=%p\n",
-						n, vp[0].TopLeftX, vp[0].TopLeftY, vp[0].Width, vp[0].Height, vp[0].MinDepth, vp[0].MaxDepth, static_cast<void*>(self));
-						s++; }
-				}
-				g_origRSSetViewports(self, n, vp);
-			}
-			static void STDMETHODCALLTYPE HookedOMSetRenderTargets(ID3D12GraphicsCommandList* self, UINT n,
-				const D3D12_CPU_DESCRIPTOR_HANDLE* rtv, BOOL single, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv)
-			{
-				if (ModuleRenderActive())
-				{
-					static int s = 0;
-					if (s < 24) { DebugLogFile(
-						"[omrt] numRT=%u rtv[0]=0x%llX single=%d dsv=%s list=%p\n",
-						n, static_cast<unsigned long long>(rtv && n ? rtv[0].ptr : 0), single ? 1 : 0, dsv ? "yes" : "no", static_cast<void*>(self));
-						s++; }
-				}
-				g_origOMSetRenderTargets(self, n, rtv, single, dsv);
-			}
 
+			// Patch the ID3D12GraphicsCommandList vtable. NOTE: that vtable is SHARED by every list in
+			// the process, so each hook below also fires on d3d11on12's internal blit lists — only slots
+			// the host genuinely needs are patched, and each hook is written to be inert for foreign
+			// lists (the PSO injection gates on IsModulePso, the barrier rewrite on module-created
+			// resources). Do not add diagnostic-only hooks here.
+			//      10 Reset            clear the list's module flag (its recording is gone).
+			//   12/13 Draw*            flag the list the module records into (the submit set).
+			//      15 CopyBufferRegion replay the module's buffer uploads onto the shadow copy list.
+			//      19 ResolveSubresource  capture the 3D-layer resolve dst the host composites.
+			//      25 SetPipelineState inject the module's descriptor heaps + root signature.
+			//      26 ResourceBarrier  correct StateBefore + catalog the module's render targets.
+			// Slot 9 (Close) is only READ, never replaced: the frame submit calls the original directly
+			// (the module never closes its own lists, so there is nothing to intercept).
 			static void HookCmdListVtable(ID3D12GraphicsCommandList* list)
 			{
-				// CANARY: the D3D12 command-list vtable is SHARED by every list in the process, so
-				// these StF-only hooks also intercept d3d11on12's internal lists. VF2 installs none
-				// of them and its identical ImGui/11on12 overlay works; in StF the overlay never
-				// reaches the screen. Set false to install NO hooks and see if the overlay returns.
-				// (Disables the SetPipelineState injection, barrier correction and all diagnostics.)
-				constexpr bool kInstallCmdListHooks = true; // canary: disabling ALL hooks crashes StF (the
-				// SetPipelineState injection is required), so this test cannot isolate the overlay bug
-				if (!kInstallCmdListHooks) return;
-				if (g_origSetDescHeaps || !list) return; // once
+				if (g_origSetPSO || !list) return; // once
 				void** vtbl = *reinterpret_cast<void***>(list);
 				DWORD op = 0;
-				if (VirtualProtect(&vtbl[25], sizeof(void*) * 8, PAGE_READWRITE, &op))
+				g_origClose = reinterpret_cast<Close_t>(vtbl[9]);
+
+				struct Patch { int slot; void** orig; void* hook; };
+				const Patch patches[] = {
+					{ 10, reinterpret_cast<void**>(&g_origReset),              reinterpret_cast<void*>(&HookedReset) },
+					{ 12, reinterpret_cast<void**>(&g_origDrawInstanced),      reinterpret_cast<void*>(&HookedDrawInstanced) },
+					{ 13, reinterpret_cast<void**>(&g_origDrawIndexed),        reinterpret_cast<void*>(&HookedDrawIndexed) },
+					{ 15, reinterpret_cast<void**>(&g_origCopyBufferRegion),   reinterpret_cast<void*>(&HookedCopyBufferRegion) },
+					{ 19, reinterpret_cast<void**>(&g_origResolveSubresource), reinterpret_cast<void*>(&HookedResolveSubresource) },
+					{ 26, reinterpret_cast<void**>(&g_origResourceBarrier),    reinterpret_cast<void*>(&HookedResourceBarrier) },
+					// SetPipelineState last: g_origSetPSO doubles as the "already hooked" sentinel above.
+					{ 25, reinterpret_cast<void**>(&g_origSetPSO),             reinterpret_cast<void*>(&HookedSetPipelineState) },
+				};
+				for (const Patch& p : patches)
 				{
-					g_origSetPSO          = reinterpret_cast<SetPSO_t>(vtbl[25]);
-					g_origSetDescHeaps    = reinterpret_cast<SetDescHeaps_t>(vtbl[28]);
-					g_origSetGfxRootSig   = reinterpret_cast<SetGfxRootSig_t>(vtbl[30]);
-					g_origSetGfxRootTable = reinterpret_cast<SetGfxRootTable_t>(vtbl[32]);
-					g_origResourceBarrier = reinterpret_cast<ResourceBarrier_t>(vtbl[26]);
-					vtbl[25] = reinterpret_cast<void*>(&HookedSetPipelineState);
-					vtbl[26] = reinterpret_cast<void*>(&HookedResourceBarrier);
-					vtbl[28] = reinterpret_cast<void*>(&HookedSetDescriptorHeaps);
-					vtbl[30] = reinterpret_cast<void*>(&HookedSetGraphicsRootSignature);
-					vtbl[32] = reinterpret_cast<void*>(&HookedSetGraphicsRootDescriptorTable);
-					VirtualProtect(&vtbl[25], sizeof(void*) * 8, op, &op);
-				}
-				// Draw hooks (slots 12 = DrawInstanced, 13 = DrawIndexedInstanced).
-				if (VirtualProtect(&vtbl[12], sizeof(void*) * 2, PAGE_READWRITE, &op))
-				{
-					g_origDrawInstanced = reinterpret_cast<DrawInstanced_t>(vtbl[12]);
-					g_origDrawIndexed   = reinterpret_cast<DrawIndexed_t>(vtbl[13]);
-					vtbl[12] = reinterpret_cast<void*>(&HookedDrawInstanced);
-					vtbl[13] = reinterpret_cast<void*>(&HookedDrawIndexed);
-					VirtualProtect(&vtbl[12], sizeof(void*) * 2, op, &op);
-				}
-				// ClearRenderTargetView hook (slot 48).
-				if (VirtualProtect(&vtbl[48], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origClearRTV = reinterpret_cast<ClearRTV_t>(vtbl[48]);
-					vtbl[48] = reinterpret_cast<void*>(&HookedClearRTV);
-					VirtualProtect(&vtbl[48], sizeof(void*), op, &op);
-				}
-				// Close(slot 9) + Reset(slot 10) hooks.
-				if (VirtualProtect(&vtbl[9], sizeof(void*) * 2, PAGE_READWRITE, &op))
-				{
-					g_origClose = reinterpret_cast<Close_t>(vtbl[9]);
-					g_origReset = reinterpret_cast<Reset_t>(vtbl[10]);
-					vtbl[9]  = reinterpret_cast<void*>(&HookedClose);
-					vtbl[10] = reinterpret_cast<void*>(&HookedReset);
-					VirtualProtect(&vtbl[9], sizeof(void*) * 2, op, &op);
-				}
-				// RSSetViewports(slot 21) + OMSetRenderTargets(slot 46) diagnostics.
-				if (VirtualProtect(&vtbl[22], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origRSSetScissorRects = reinterpret_cast<RSSetScissorRects_t>(vtbl[22]);
-					vtbl[22] = reinterpret_cast<void*>(&HookedRSSetScissorRects);
-					VirtualProtect(&vtbl[22], sizeof(void*), op, &op);
-				}
-				if (VirtualProtect(&vtbl[21], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origRSSetViewports = reinterpret_cast<RSSetViewports_t>(vtbl[21]);
-					vtbl[21] = reinterpret_cast<void*>(&HookedRSSetViewports);
-					VirtualProtect(&vtbl[21], sizeof(void*), op, &op);
-				}
-				if (VirtualProtect(&vtbl[46], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origOMSetRenderTargets = reinterpret_cast<OMSetRenderTargets_t>(vtbl[46]);
-					vtbl[46] = reinterpret_cast<void*>(&HookedOMSetRenderTargets);
-					VirtualProtect(&vtbl[46], sizeof(void*), op, &op);
-				}
-				// IA diagnostics: IASetPrimitiveTopology(20), IASetIndexBuffer(43), IASetVertexBuffers(44).
-				if (VirtualProtect(&vtbl[20], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origIASetTopology = reinterpret_cast<IASetTopology_t>(vtbl[20]);
-					vtbl[20] = reinterpret_cast<void*>(&HookedIASetTopology);
-					VirtualProtect(&vtbl[20], sizeof(void*), op, &op);
-				}
-				if (VirtualProtect(&vtbl[43], sizeof(void*) * 2, PAGE_READWRITE, &op))
-				{
-					g_origIASetIndexBuffer   = reinterpret_cast<IASetIndexBuffer_t>(vtbl[43]);
-					g_origIASetVertexBuffers = reinterpret_cast<IASetVertexBuffers_t>(vtbl[44]);
-					vtbl[43] = reinterpret_cast<void*>(&HookedIASetIndexBuffer);
-					vtbl[44] = reinterpret_cast<void*>(&HookedIASetVertexBuffers);
-					VirtualProtect(&vtbl[43], sizeof(void*) * 2, op, &op);
-				}
-				// Upload-copy diagnostics: CopyBufferRegion(15), CopyResource(17).
-				if (VirtualProtect(&vtbl[15], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origCopyBufferRegion = reinterpret_cast<CopyBufferRegion_t>(vtbl[15]);
-					vtbl[15] = reinterpret_cast<void*>(&HookedCopyBufferRegion);
-					VirtualProtect(&vtbl[15], sizeof(void*), op, &op);
-				}
-				// ResolveSubresource diagnostics + flagging (slot 19).
-				if (VirtualProtect(&vtbl[19], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origResolveSubresource = reinterpret_cast<ResolveSubresource_t>(vtbl[19]);
-					vtbl[19] = reinterpret_cast<void*>(&HookedResolveSubresource);
-					VirtualProtect(&vtbl[19], sizeof(void*), op, &op);
-				}
-				if (VirtualProtect(&vtbl[17], sizeof(void*), PAGE_READWRITE, &op))
-				{
-					g_origCopyResource = reinterpret_cast<CopyResource_t>(vtbl[17]);
-					vtbl[17] = reinterpret_cast<void*>(&HookedCopyResource);
-					VirtualProtect(&vtbl[17], sizeof(void*), op, &op);
+					if (!VirtualProtect(&vtbl[p.slot], sizeof(void*), PAGE_READWRITE, &op)) continue;
+					*p.orig = vtbl[p.slot];
+					vtbl[p.slot] = p.hook;
+					VirtualProtect(&vtbl[p.slot], sizeof(void*), op, &op);
 				}
 			}
 
 			bool BuildCmdCtx(uint8_t* cc, alloc_wrapper& w, bool leaveOpen)
 			{
 				if (!s_device) return false;
-				FillCmdCtxStubVtbl(std::make_integer_sequence<int, 24>{});
+				FillCmdCtxStubVtbl();
 
 				ID3D12CommandAllocator*    alloc  = nullptr;
 				ID3D12CommandAllocator*    alloc2 = nullptr;
@@ -1734,27 +919,13 @@ namespace pxd
 		void* BuildHostCdevice(ID3D12Device* device, ID3D12CommandQueue* queue, void* (*cdeviceCtor)(void*))
 		{
 			s_device = device;
-			s_queue = queue;
 
 			// Hook resource creation FIRST (before StF/D3D12MA allocate anything) so the barrier-state
 			// tracker learns every texture's true InitialState — fixes the id=527 desync that leaves StF's
 			// sampled textures reading black. See HookDeviceResourceCreation.
 			HookDeviceResourceCreation(device);
 
-			// Hook ExecuteCommandLists on the queue vtable (shared by all queues) to see which queue StF
-			// submits its rendering on vs YAMP's.
 			g_yampQueue = queue;
-			if (queue)
-			{
-				void** qvtbl = *reinterpret_cast<void***>(queue);
-				DWORD qop = 0;
-				if (VirtualProtect(&qvtbl[10], sizeof(void*), PAGE_READWRITE, &qop))
-				{
-					if (!g_origExec) g_origExec = reinterpret_cast<ExecCmdLists_t>(qvtbl[10]);
-					qvtbl[10] = reinterpret_cast<void*>(&HookedExec);
-					VirtualProtect(&qvtbl[10], sizeof(void*), qop, &qop);
-				}
-			}
 
 			memset(s_cdevice, 0, sizeof(s_cdevice));
 
@@ -1877,12 +1048,9 @@ ID3D12Resource* GetModuleResolveDst()
 	return pxd::g_lastModuleResolveDst;
 }
 
-// Called by GameLoop right after the DLL records a frame (func()): close + ExecuteCommandLists StF's
-// recorded render lists on YAMP's queue (the host's job — StF never submits them itself). See PIX.
-void ExecuteModuleRenderListsNow() { pxd::ExecuteModuleRenderLists(); }
-
-// PATH B: close + ExecuteCommandLists + flush + reopen StF's own draw list (g_lastModuleCmdList) each frame
-// after func() — the per-frame submit StF records for but never issues (the host's job).
+// Called by GameLoop right after the DLL records a frame (func()): close + ExecuteCommandLists + flush
+// + reopen every list the module drew into — the per-frame submit it records for but never issues
+// (the host's job). See the PIX RenderFrame export: LJ submits ~10 lists in ONE call.
 void SubmitModuleFrameListNow() { pxd::SubmitModuleFrameList(); }
 // The other half of the host's per-frame job: advance the upload-frame stamp and recycle StF's upload
 // buffers (in-use -> available). Called after the flush so all recycled buffers are GPU-complete. Fixes
