@@ -32,6 +32,16 @@ public:
 	uint32_t m_volumePercent = 100;
 
 	// Sonic the Fighters (m2ftg module)
+	// The module's OWN internal render resolution, index into m2ftg::DISPLAY_MODES
+	// (m2ftg/DisplayModes.h). Distinct from m_resX/m_resY, which stay the window and swapchain
+	// size: index 1 makes the emulator draw at the arcade board's 496x384 and YAMP presents that
+	// upscaled into whatever window you chose. Selected through the module's own command-line
+	// option parser, which it reads once during module_start (restart to change).
+	uint32_t m_m2RenderMode = 0;
+	// Size the window to the module's render resolution instead of [Graphics] ResolutionX/Y, and
+	// present 1:1 with no letterboxing - a pixel-exact arcade window. Ignored in fullscreen and
+	// for the VF5FS builds, which have no Model 2 render mode.
+	bool m_m2WindowMatchesRender = false;
 	// Aspect: 0 = 4:3 (original), 1 = 16:9 (stretched), 2 = fill window. Applied live.
 	uint32_t m_m2Aspect = 0;
 	// Lost Judgment's own CRT shader (exact port), applied in the host blit. Applied live.

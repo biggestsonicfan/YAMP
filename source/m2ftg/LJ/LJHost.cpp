@@ -20,6 +20,8 @@ void AdvanceFrameStampNow();
 #include "../../pxd/LJ/sl.h"
 #include "../../pxd/LJ/gs.h"
 #include "../m2ftg.h"
+#include "../ModuleArgs.h"
+#include "../DisplayModes.h"
 #include "../../pxd/Imports.h"
 #include "Patch.h"
 #include "../../pxd/LJ/sys_util.h"
@@ -130,6 +132,11 @@ namespace m2ftg
 
             const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
             const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+
+            // Lets YAMP's command line reach the module's own option parser, which module_start
+            // otherwise calls with an empty argv. Must be before module_start - the parse happens
+            // inside it.
+            ModuleArgs::Install(dll);
 
             // Patch up structures and do post-DllMain work here
             // Saves having to reimplement all the complex constructors and data types
@@ -353,7 +360,22 @@ namespace m2ftg
                 std::string stem(game.rom_archive_name);
                 if (const size_t dot = stem.rfind('.'); dot != std::string::npos) { stem.erase(dot); }
                 const std::wstring elfPath = L"rom/" + UTF8ToWchar(stem) + L'/' + ElfRom::OVERRIDE_FILE_NAME;
-                if (ElfRom::Load(elfPath, ElfRom::PROGRAM_ROM_SIZE))
+                // Only parse it when it can actually be served. The ELF reaches the i960 solely
+                // through the loose-ROM file path (file_access.cpp swaps it in for an open of
+                // rom_code1.bin), which exists only while the archive bypass is on. Loading it
+                // regardless left IsLoaded() true with the game running from the .par: the
+                // 960STAT panes then relabel the real ROM with the homebrew's symbols (every
+                // address past its _etext collapses onto that one marker), and the HLE retarget
+                // resolves against a program that is not the one executing.
+                if (!settings->m_stfLooseRomFiles)
+                {
+                    if (GetFileAttributesW(elfPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        DebugLog("[%s::Run] '%ls' ignored: loose ROM files are off, the archive supplies the program ROM\n",
+                            gGeneral.GetGameTag(), elfPath.c_str());
+                    }
+                }
+                else if (ElfRom::Load(elfPath, ElfRom::PROGRAM_ROM_SIZE))
                 {
                     DebugLog("[%s::Run] program ROM overridden by '%ls'\n", gGeneral.GetGameTag(), elfPath.c_str());
                 }
@@ -370,6 +392,17 @@ namespace m2ftg
             // Kick off the game
             DebugLog("[%s::Run] calling module_start...\n", gGeneral.GetGameTag());
             const auto msRet = module_start(sizeof(params), &params);
+            // The module renders into a fixed 1024x768 texture whatever its own resolution option
+            // selected, so tell the compositor which sub-rect of it actually holds the frame. Read
+            // after module_start: that is when the module's parse ran, and a switch on YAMP's command
+            // line can differ from the setting.
+            {
+            	uint32_t srcW = 0, srcH = 0;
+            	if (ModuleArgs::ResolvedRenderSize(srcW, srcH))
+            	{
+            		const_cast<RenderWindow&>(window).SetModuleSourceRect(srcW, srcH);
+            	}
+            }
             DebugLog("[%s::Run] module_start returned %lld\n", gGeneral.GetGameTag(), (long long)msRet);
 
             // Must follow module_start: board bring-up is what fills the memory-map table this

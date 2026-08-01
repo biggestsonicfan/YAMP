@@ -1,5 +1,7 @@
 #include "RenderWindow.h"
 
+#include "m2ftg/DisplayModes.h"
+
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_win32.h"
 #include "imgui/imgui_impl_dx11.h"
@@ -700,6 +702,24 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 			style = WS_OVERLAPPEDWINDOW;
 			m_width = settings->m_resX;
 			m_height = settings->m_resY;
+
+			// "Match window to render resolution": size the client area to what the module is
+			// about to render at instead of the configured resolution, for a pixel-exact arcade
+			// window. Resolved from the command line / setting rather than from the module,
+			// because the window has to exist long before module_start runs the option parse -
+			// ModuleArgs applies the same precedence, so the two agree.
+			if (settings->m_m2WindowMatchesRender && gGeneral.IsModel2ArcadeGame())
+			{
+				// Sized to the full PICTURE, not to the raw framebuffer: a Model 2 board's 496x384
+				// is displayed as 4:3 (non-square pixels), so a literal 496x384 window would
+				// squash it. Taking the render height at the display aspect means the ordinary
+				// aspect-correct viewport fills the whole client area - no letterboxing, and the
+				// game blit itself stays exactly what it always was.
+				const uint32_t mode = static_cast<uint32_t>(m2ftg::IntendedDisplayMode(settings->m_m2RenderMode));
+				const uint32_t renderH = m2ftg::DisplayModeHeight(mode);
+				m_height = renderH;
+				m_width = static_cast<uint32_t>(renderH * (4.0f / 3.0f) + 0.5f);
+			}
 		}
 
         RECT clientArea { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
@@ -892,15 +912,37 @@ RenderWindow::~RenderWindow()
 // grille stripe per source column (uv.x*512, ^8 ramp, max 1.68%), a Bayer 4x4 dither jittering
 // the scanline phase (grid = 2048x1536), all 4x supersampled along the pixel derivative. LJ's
 // quad also CROPS 16px off each side of the 1024-wide frame (UV x = 16/1024..1008/1024 — the
-// active 992px Model 2 image); we do the same crop in the shader since our fullscreen triangle
-// spans UV 0..1. Reverse-engineered 2026-07-26 from the PIX C++ exports (C:\temp\stf-lj-pix).
+// active 992px Model 2 image). That crop is deliberately NOT reproduced: it only makes sense for
+// LJ's own 1024-wide layout, and once the render resolution became selectable it started eating
+// into the picture instead of the padding. Reverse-engineered 2026-07-26 from the PIX C++ exports
+// (C:\temp\stf-lj-pix).
 static const char LJ_CRT_PS_HLSL[] = R"(
 Texture2D backBufferTexture : register(t0);
 SamplerState backBufferSampler : register(s0);
 
+// The fraction of the source texture the module's picture actually occupies. The module always
+// renders into a 1024x768 target but lays its viewport out at whatever its own resolution option
+// selected, so at "Model 2 native" the frame is the top-left 496x384 and this is (0.4844, 0.5).
+// Every ramp below is anchored to the PICTURE (512x384 logical), so all of them work in
+// normalised picture space and only the texture fetch is scaled back into the sub-rect.
+// gSrcScale = (1,1) reproduces the original shader exactly.
+cbuffer CrtParams : register(b0)
+{
+	float2 gSrcScale;    // (u,v) fraction of the texture the picture occupies
+	float2 gCrtPad;
+};
+
+// uv is NORMALISED picture space - 0..1 across whatever the module rendered - which is what every
+// ramp below is anchored to. Only the fetch scales back into the source sub-rect, so the scanline
+// and grille frequencies stay one-per-source-line at any render size.
+//
+// LJ's own quad samples 16/1024..1008/1024, trimming the padding its 1024-wide layout leaves
+// around the 992-wide image. That trim is NOT reproduced here: at any other render size the module
+// fills from the left edge, so the same trim eats into the picture instead of the padding (it
+// clipped the F of "FREE PLAY" at Model 2 native). Showing the whole frame is the intent.
 float3 CrtTap(float2 uv)
 {
-	float3 c = backBufferTexture.Sample(backBufferSampler, uv).rgb;
+	float3 c = backBufferTexture.Sample(backBufferSampler, uv * gSrcScale).rgb;
 
 	// Bayer 4x4 phase dither, keyed on a 2048x1536 grid (4x the 512x384 logical grid)
 	static const float kBayer[16] = {
@@ -930,8 +972,9 @@ float3 CrtTap(float2 uv)
 
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
 {
-	// LJ's quad carries TEXCOORD x = 16/1024 .. 1008/1024; ours is 0..1, so remap first.
-	float2 uvc = float2(0.015625 + uv.x * 0.96875, uv.y);
+	// The vertex UVs are pre-scaled to the module's sub-rect; undo that so the ramps see the
+	// picture as 0..1 whatever the module rendered at.
+	float2 uvc = uv / gSrcScale;
 	float2 d = float2(ddx_coarse(uvc.x), ddy_coarse(uvc.y));
 	float3 s = CrtTap(uvc) + CrtTap(uvc + 0.25 * d) + CrtTap(uvc + 0.5 * d) + CrtTap(uvc + 0.75 * d);
 	return float4(s * 0.25, 1.0);
@@ -1018,6 +1061,44 @@ void RenderWindow::ClearBackbuffer()
 	m_deviceContext->ClearRenderTargetView(rtv, clearColor);
 }
 
+void RenderWindow::SetModuleSourceRect(uint32_t width, uint32_t height)
+{
+	// Clamped: a mode larger than the output texture is already clipped by the module itself, and
+	// a UV scale above 1 would only sample past the edge (clamped) and squash the picture.
+	const float u = width == 0 ? 1.0f
+		: (std::min)(1.0f, static_cast<float>(width) / static_cast<float>(m2ftg::OUTPUT_TEXTURE_WIDTH));
+	const float v = height == 0 ? 1.0f
+		: (std::min)(1.0f, static_cast<float>(height) / static_cast<float>(m2ftg::OUTPUT_TEXTURE_HEIGHT));
+	if (u == m_srcUScale && v == m_srcVScale)
+	{
+		return;
+	}
+	m_srcUScale = u;
+	m_srcVScale = v;
+	UpdateBlitVertices();
+}
+
+// The blit is a single oversized triangle whose UVs run 0..2; scaling them by the sub-rect makes
+// the drawn area cover exactly the part of the texture the module rendered into.
+void RenderWindow::UpdateBlitVertices()
+{
+	if (!m_vb || !m_deviceContext)
+	{
+		return;
+	}
+	const struct { DirectX::XMFLOAT2 Position; DirectX::XMFLOAT2 Texcoord0; } verts[] = {
+		{ { -1.0f, -3.0f }, { 0.0f,                 2.0f * m_srcVScale } },
+		{ { -1.0f,  1.0f }, { 0.0f,                 0.0f } },
+		{ {  3.0f,  1.0f }, { 2.0f * m_srcUScale,   0.0f } },
+	};
+	D3D11_MAPPED_SUBRESOURCE mapped{};
+	if (SUCCEEDED(m_deviceContext->Map(m_vb.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+	{
+		memcpy(mapped.pData, verts, sizeof(verts));
+		m_deviceContext->Unmap(m_vb.get(), 0);
+	}
+}
+
 void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend)
 {
 	const FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -1048,6 +1129,17 @@ void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend)
 		m_deviceContext->PSSetShader(m_psCrt.get(), nullptr, 0);
 		m_deviceContext->PSSetShaderResources(0, 1, &src);
 		m_deviceContext->PSSetSamplers(0, 1, m_blitSampler.addressof());
+		if (m_crtCb)
+		{
+			D3D11_MAPPED_SUBRESOURCE cb{};
+			if (SUCCEEDED(m_deviceContext->Map(m_crtCb.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cb)))
+			{
+				const float params[4] = { m_srcUScale, m_srcVScale, 0.0f, 0.0f };
+				memcpy(cb.pData, params, sizeof(params));
+				m_deviceContext->Unmap(m_crtCb.get(), 0);
+			}
+			m_deviceContext->PSSetConstantBuffers(0, 1, m_crtCb.addressof());
+		}
 
 		const float upscale = static_cast<float>(m_crtTexH) / m_height;
 		D3D11_VIEWPORT crtViewport = m_viewport;
@@ -1107,7 +1199,11 @@ void RenderWindow::BlitGameFrame(ID3D11ShaderResourceView* src, bool alphaBlend)
 	const UINT Offsets[1] = { 0 };
 	m_deviceContext->IASetInputLayout(m_inputLayout.get());
 	m_deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	m_deviceContext->IASetVertexBuffers(0, 1, m_vb.addressof(), &m_vbStride, Offsets);
+	// After the CRT pass the source is the full-size intermediate, not the module's output, so the
+	// source sub-rect UVs must NOT be applied a second time - that would magnify a corner of the
+	// finished frame over the whole window.
+	m_deviceContext->IASetVertexBuffers(0, 1,
+		useCrt ? m_vbFull.addressof() : m_vb.addressof(), &m_vbStride, Offsets);
 
 	m_deviceContext->PSSetShader(m_ps.get(), nullptr, 0);
 	m_deviceContext->PSSetShaderResources(0, 1, &src);
@@ -1520,18 +1616,37 @@ void RenderWindow::CreateRenderResources()
 			{ XMFLOAT2(-1.0f, 1.0f), XMFLOAT2(0.0f, 0.0f) },
 			{ XMFLOAT2(3.0f, 1.0f), XMFLOAT2(2.0f, 0.0f) },
 		};
+		// DYNAMIC rather than IMMUTABLE: the UVs carry the module source sub-rect, which changes
+		// when the module's own render-resolution option does (see SetModuleSourceRect).
 		D3D11_BUFFER_DESC desc;
-		desc.Usage = D3D11_USAGE_IMMUTABLE;
+		desc.Usage = D3D11_USAGE_DYNAMIC;
 		desc.ByteWidth = sizeof(vertexBuffer);
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-		desc.CPUAccessFlags = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 		desc.MiscFlags = 0;
 
 		const D3D11_SUBRESOURCE_DATA initData { vertexBuffer };
 		hr = device->CreateBuffer(&desc, &initData, m_vb.addressof());
 		THROW_IF_FAILED(hr);
 
+		// The unscaled companion, for passes that sample a full-size texture rather than the
+		// module's output.
+		D3D11_BUFFER_DESC fullDesc = desc;
+		fullDesc.Usage = D3D11_USAGE_IMMUTABLE;
+		fullDesc.CPUAccessFlags = 0;
+		hr = device->CreateBuffer(&fullDesc, &initData, m_vbFull.addressof());
+		THROW_IF_FAILED(hr);
+
+		D3D11_BUFFER_DESC cbDesc{};
+		cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+		cbDesc.ByteWidth = 16;
+		cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+		cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		hr = device->CreateBuffer(&cbDesc, nullptr, m_crtCb.addressof());
+		THROW_IF_FAILED(hr);
+
 		m_vbStride = sizeof(vertexBuffer[0]);
+		UpdateBlitVertices();
 	}
 
 	// Linear-clamp sampler for the game blit (see the PSSetSamplers note in BlitGameFrame)

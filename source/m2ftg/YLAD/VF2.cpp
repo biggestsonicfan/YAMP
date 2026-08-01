@@ -31,6 +31,8 @@
 
 #include "../../pxd/LJ/sl.h"
 #include "../m2ftg.h"
+#include "../ModuleArgs.h"
+#include "../DisplayModes.h"
 #include "../../pxd/Imports.h"
 #include "../ImportSymbols.h"
 #include "../HostUI.h" // ApplyAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
@@ -290,6 +292,11 @@ namespace m2ftg
 
 			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
 			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+
+			// Lets YAMP's command line reach the module's own option parser, which module_start
+			// otherwise calls with an empty argv. Must be before module_start - the parse happens
+			// inside it.
+			ModuleArgs::Install(dll);
 
 			auto Import = [&symbolMap](auto& var, auto symbol)
 				{
@@ -652,6 +659,17 @@ namespace m2ftg
 
 			DebugLog("[vf2] calling module_start (root=%s)\n", utf8Path.c_str());
 			const int startResult = module_start(sizeof(params), &params);
+			// The module renders into a fixed 1024x768 texture whatever its own resolution option
+			// selected, so tell the compositor which sub-rect of it actually holds the frame. Read
+			// after module_start: that is when the module's parse ran, and a switch on YAMP's command
+			// line can differ from the setting.
+			{
+				uint32_t srcW = 0, srcH = 0;
+				if (ModuleArgs::ResolvedRenderSize(srcW, srcH))
+				{
+					const_cast<RenderWindow&>(window).SetModuleSourceRect(srcW, srcH);
+				}
+			}
 			DebugLog("[vf2] module_start returned %d, module_main=%p\n", startResult, module_main);
 
 			if (startResult < 0 || module_main == nullptr) return;

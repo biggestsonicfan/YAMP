@@ -1,5 +1,7 @@
 #include "YAMPUserInterface.h"
 
+#include "m2ftg/DisplayModes.h"
+
 #include "YAMPGeneral.h"
 #include "GameVerify.h"
 #include "m2ftg/ELF/ElfRom.h"
@@ -257,6 +259,8 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_language = settings->m_language;
 	m_volumePercent = static_cast<int>(settings->m_volumePercent);
 
+	m_m2RenderMode = settings->m_m2RenderMode;
+	m_m2WindowMatchesRender = settings->m_m2WindowMatchesRender;
 	m_m2Aspect = settings->m_m2Aspect;
 	m_m2CrtFilter = settings->m_m2CrtFilter;
 	m_m2Difficulty = settings->m_m2Difficulty;
@@ -477,6 +481,49 @@ void YAMPUserInterface::DrawGame()
 
 void YAMPUserInterface::DrawGameStF()
 {
+	{
+		if (m_m2RenderMode >= m2ftg::DISPLAY_MODE_COUNT)
+		{
+			m_m2RenderMode = 0;
+		}
+		if (ImGui::BeginCombo("Render resolution", m2ftg::DISPLAY_MODES[m_m2RenderMode].label))
+		{
+			for (uint32_t index = 0; index < m2ftg::DISPLAY_MODE_COUNT; index++)
+			{
+				const bool isSelected = index == m_m2RenderMode;
+				if (ImGui::Selectable(m2ftg::DISPLAY_MODES[index].label, isSelected))
+				{
+					m_pageModified = true;
+					m_m2RenderMode = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The size the emulator itself renders at, chosen through the module's own\n"
+				"command-line option - not the window size, which stays on the Graphics page.\n"
+				"\"Model 2 native\" is the arcade board's real 496x384, presented upscaled.\n"
+				"The module reads this once at startup, so it takes effect on the next launch.");
+		}
+	}
+
+	if (ImGui::Checkbox("Match window to render resolution", &m_m2WindowMatchesRender))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Sizes the window to the resolution above instead of the one on the Graphics\n"
+			"page, and presents it 1:1 with no letterboxing - a pixel-exact arcade window.\n"
+			"\"Model 2 native\" gives a literal 496x384 window. Overrides the aspect ratio\n"
+			"setting while it is on, and is ignored in fullscreen. Takes effect on the next launch.");
+	}
+
+
 	{
 		const char* labels[] = { "4:3 (Original)", "16:9 (Stretched)", "Fill Window" };
 		if (m_m2Aspect >= std::size(labels))
@@ -1573,6 +1620,8 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_circleConfirm != m_circleConfirm ||
 		settings->m_language != m_language ||
 		settings->m_volumePercent != static_cast<uint32_t>(m_volumePercent) ||
+		settings->m_m2RenderMode != m_m2RenderMode ||
+		settings->m_m2WindowMatchesRender != m_m2WindowMatchesRender ||
 		settings->m_m2Difficulty != m_m2Difficulty ||
 		settings->m_m2Country != m_m2Country ||
 		settings->m_m2Freeplay != m_m2Freeplay ||
@@ -1594,6 +1643,8 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_language = m_language;
 	settings->m_volumePercent = static_cast<uint32_t>(m_volumePercent);
 
+	settings->m_m2RenderMode = m_m2RenderMode;
+	settings->m_m2WindowMatchesRender = m_m2WindowMatchesRender;
 	settings->m_m2Aspect = m_m2Aspect;
 	settings->m_m2CrtFilter = m_m2CrtFilter;
 	settings->m_m2Difficulty = m_m2Difficulty;

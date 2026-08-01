@@ -18,6 +18,7 @@
 #include "RenderWindow.h"
 #include "DebugLog.h"
 #include "imgui/imgui.h"
+#include "m2ftg/DisplayModes.h"
 
 #include <filesystem>
 #include <iterator>
@@ -231,6 +232,68 @@ namespace Launcher
 			return games;
 		}
 
+		// ---- Model 2 render resolution --------------------------------------------------
+		// The module's own internal resolution, not YAMP's window: m2ftg::ModuleArgs feeds the
+		// module's command-line option parser (which module_start otherwise calls with an empty argv)
+		// and the emulator lays its viewport out at the size it picks. The launcher edits the same
+		// [Graphics] Model2RenderMode key the in-game settings panel does, and the child process
+		// reads it from the ini next to YAMP.exe - GetDataPath() resolves from the module path, not
+		// the CWD, so the game folder the child runs in makes no difference.
+
+		// VF5FS is not a Model 2 emulator - its module has no mode table for these switches.
+		bool HasDisplayModes(YAMPGeneral::GameId id)
+		{
+			switch (id)
+			{
+			case YAMPGeneral::GameId::VF5FS:
+			case YAMPGeneral::GameId::VF5FS_LJ:
+			case YAMPGeneral::GameId::VF5FS_YLAD:
+				return false;
+			default:
+				return true;
+			}
+		}
+
+		std::filesystem::path LauncherIniPath()
+		{
+			wchar_t exePath[MAX_PATH];
+			if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) return {};
+			return fs::path(exePath).parent_path() / L"settings.ini";
+		}
+
+		int LoadDisplayMode()
+		{
+			const std::filesystem::path ini = LauncherIniPath();
+			if (ini.empty()) return 0;
+			wchar_t buf[64] {};
+			GetPrivateProfileStringW(L"Graphics", L"Model2RenderMode", L"", buf,
+				static_cast<DWORD>(std::size(buf)), ini.c_str());
+			return m2ftg::DisplayModeFromArg(buf);
+		}
+
+		bool LoadWindowMatchesRender()
+		{
+			const std::filesystem::path ini = LauncherIniPath();
+			if (ini.empty()) return false;
+			return GetPrivateProfileIntW(L"Graphics", L"Model2WindowMatchesRender", 0, ini.c_str()) != 0;
+		}
+
+		void SaveWindowMatchesRender(bool enabled)
+		{
+			const std::filesystem::path ini = LauncherIniPath();
+			if (ini.empty()) return;
+			WritePrivateProfileStringW(L"Graphics", L"Model2WindowMatchesRender",
+				enabled ? L"1" : L"0", ini.c_str());
+		}
+
+		void SaveDisplayMode(int index)
+		{
+			const std::filesystem::path ini = LauncherIniPath();
+			if (ini.empty() || index < 0 || index >= static_cast<int>(m2ftg::DISPLAY_MODE_COUNT)) return;
+			WritePrivateProfileStringW(L"Graphics", L"Model2RenderMode",
+				m2ftg::DISPLAY_MODES[index].arg, ini.c_str());
+		}
+
 		bool BootGame(const FoundGame& game)
 		{
 			wchar_t exePath[MAX_PATH];
@@ -255,8 +318,8 @@ namespace Launcher
 			return true;
 		}
 
-		void DrawLauncherUI(const std::vector<FoundGame>& games, int& selected,
-			bool& playRequested, bool& rescanRequested)
+		void DrawLauncherUI(const std::vector<FoundGame>& games, int& selected, int& displayMode,
+			bool& matchWindow, bool& playRequested, bool& rescanRequested)
 		{
 			const ImVec2& displaySize = ImGui::GetIO().DisplaySize;
 			ImGui::SetNextWindowPos({ 0.0f, 0.0f });
@@ -273,8 +336,9 @@ namespace Launcher
 
 				// Reserve room for the details block (path, source, checksum verdict, parent
 				// game verdict — the wrapped ones can take two lines) + buttons below the table.
+				// ... plus the resolution combo, which sits between the details block and the buttons.
 				const float footerHeight = 7.0f * ImGui::GetTextLineHeightWithSpacing()
-					+ ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2.0f;
+					+ 2.0f * ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 3.0f;
 				if (ImGui::BeginTable("##games", 3,
 					ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
 					{ 0.0f, -footerHeight }))
@@ -394,6 +458,50 @@ namespace Launcher
 				}
 
 				ImGui::Spacing();
+
+				// Model 2 resolution. This is the module's own option, not a YAMP scaler: it picks
+				// the entry the emulator lays its viewport and 2D screen out at, so "Model 2 native"
+				// is the arcade board's real 496x384 rather than the 1024x768 the module defaults to.
+				const bool model2 = selected >= 0 && selected < static_cast<int>(games.size())
+					&& HasDisplayModes(games[selected].info->id);
+				if (!model2)
+				{
+					ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+				}
+				ImGui::SetNextItemWidth(260.0f);
+				const char* preview = m2ftg::DISPLAY_MODES[displayMode].label;
+				if (ImGui::BeginCombo("Model 2 render resolution", preview))
+				{
+					for (int i = 0; i < static_cast<int>(m2ftg::DISPLAY_MODE_COUNT); i++)
+					{
+						const bool isSelected = displayMode == i;
+						if (ImGui::Selectable(m2ftg::DISPLAY_MODES[i].label, isSelected) && model2)
+						{
+							displayMode = i;
+							SaveDisplayMode(i);
+						}
+						if (isSelected) ImGui::SetItemDefaultFocus();
+					}
+					ImGui::EndCombo();
+				}
+				if (!model2)
+				{
+					ImGui::PopStyleVar();
+					ImGui::SameLine();
+					ImGui::TextDisabled("(Model 2 games only)");
+				}
+
+				if (ImGui::Checkbox("Match window to render resolution", &matchWindow) && model2)
+				{
+					SaveWindowMatchesRender(matchWindow);
+				}
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("Sizes the window to the resolution above rather than the one in\n"
+						"the settings, presented 1:1 with no letterboxing. Ignored in fullscreen.");
+				}
+
+				ImGui::Spacing();
 				// The vendored ImGui predates BeginDisabled/EndDisabled; mirror ButtonToggleable's
 				// dimming (YAMPUserInterface.cpp) for the disabled Play button.
 				const bool canPlay = selected >= 0 && selected < static_cast<int>(games.size())
@@ -442,6 +550,8 @@ namespace Launcher
 		// Start on the first game that can actually be played, falling back to the first one
 		// that is merely present so a failed check is what the user sees first.
 		int selected = 0;
+		int displayMode = LoadDisplayMode();
+		bool matchWindow = LoadWindowMatchesRender();
 		for (size_t i = 0; i < games.size(); i++)
 		{
 			if (games[i].CanPlay())
@@ -464,7 +574,7 @@ namespace Launcher
 			window.BeginFrame();
 			window.ClearBackbuffer();
 			window.NewImGuiFrame();
-			DrawLauncherUI(games, selected, playRequested, rescanRequested);
+			DrawLauncherUI(games, selected, displayMode, matchWindow, playRequested, rescanRequested);
 			window.RenderImGui();
 			window.EndFrame();
 			if (FAILED(swapChain->Present(1, 0))) break;

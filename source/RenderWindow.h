@@ -53,6 +53,14 @@ public:
 	// pillarboxed in a widescreen window instead of stretched — their hosts apply the shared
 	// aspect setting via m2ftg::ApplyAspectSetting. Recomputes the blit viewport immediately.
 	void SetGameAspectRatio(float ar) { m_gameAspect = ar; CalculateViewport(); }
+
+	// The sub-rect of the module's output texture that actually holds the frame. The m2ftg modules
+	// always render into a 1024x768 texture but lay their viewport out at whatever their own
+	// -model2/-vga/... option selected, so a smaller mode leaves the picture in the top-left corner
+	// with the remainder black. Sampling the full texture would stretch that black in with it;
+	// this restricts the blit's UVs to the part the module drew, and the existing aspect-corrected
+	// viewport then scales and centres it as before. Default = the whole texture (no change).
+	void SetModuleSourceRect(uint32_t width, uint32_t height);
 	// When set, the game blit covers the whole window regardless of aspect ratio ("Fill Window").
 	void SetGameStretchToFill(bool fill) { m_fillViewport = fill; CalculateViewport(); }
 
@@ -106,6 +114,16 @@ private:
 	wil::com_ptr<ID3D11PixelShader> m_ps;
 	wil::com_ptr<ID3D11InputLayout> m_inputLayout;
 	wil::com_ptr<ID3D11Buffer> m_vb;
+	// Same triangle with the UVs left at 0..2. m_vb's UVs are scaled to the module's source
+	// sub-rect, which is only correct when sampling the module's own output texture; any pass that
+	// samples a full-size intermediate (the CRT pass's second draw) has to use this one instead.
+	wil::com_ptr<ID3D11Buffer> m_vbFull;
+	// 16-byte constant feeding the CRT shader's gSrcScale; rewritten with the source sub-rect.
+	wil::com_ptr<ID3D11Buffer> m_crtCb;
+	// Written whenever the source sub-rect changes; the blit triangle's UVs carry the scale.
+	void UpdateBlitVertices();
+	float m_srcUScale = 1.0f;
+	float m_srcVScale = 1.0f;
 	UINT m_vbStride;
 	D3D11_VIEWPORT m_viewport;
 	bool m_requiresClear = false;

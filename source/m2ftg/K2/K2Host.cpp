@@ -14,6 +14,8 @@
 #include "../../pxd/K2/sl.h"            // pxd::K2 — THIS generation's context layout (0xF3C0)
 #include "../../pxd/LJ/sl_internal.h"   // handle_internal_buffer_t (the 8-byte queue node)
 #include "../m2ftg.h"                 // m2ftg_config_t (0x100C) — unchanged in this generation
+#include "../ModuleArgs.h"
+#include "../DisplayModes.h"
 #include "../../input/Input.h"
 #include "../HostUI.h"
 #include "../../DebugLog.h"
@@ -444,6 +446,11 @@ namespace m2ftg
 			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
 			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
 
+			// Lets YAMP's command line reach the module's own option parser, which module_start
+			// otherwise calls with an empty argv. Must be before module_start - the parse happens
+			// inside it.
+			ModuleArgs::Install(dll);
+
 			g_moduleMain = reinterpret_cast<module_func_t>(
 				symbolMap.GetSymbol(ImportSymbol::MODULE_MAIN));
 			g_gsContext = static_cast<uint8_t*>(symbolMap.GetSymbol(ImportSymbol::GS_CONTEXT_INSTANCE));
@@ -839,6 +846,17 @@ namespace m2ftg
 			DebugLogFile("[m2ftg::K2] module_start(size=%zu, root='%s', kind=%u)\n",
 				sizeof(params), params.root_path, params.config.kind);
 			const int startResult = module_start(sizeof(params), &params);
+			// The module renders into a fixed 1024x768 texture whatever its own resolution option
+			// selected, so tell the compositor which sub-rect of it actually holds the frame. Read
+			// after module_start: that is when the module's parse ran, and a switch on YAMP's command
+			// line can differ from the setting.
+			{
+				uint32_t srcW = 0, srcH = 0;
+				if (ModuleArgs::ResolvedRenderSize(srcW, srcH))
+				{
+					const_cast<RenderWindow&>(window).SetModuleSourceRect(srcW, srcH);
+				}
+			}
 			DebugLogFile("[m2ftg::K2] module_start -> 0x%X, module_main(params)=%p\n",
 				startResult, reinterpret_cast<void*>(g_moduleMainFromParams));
 			if (g_moduleMainFromParams != nullptr && g_moduleMainFromParams != g_moduleMain)

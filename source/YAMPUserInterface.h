@@ -75,6 +75,8 @@ private:
 	int m_volumePercent = 100;
 
 	// Sonic the Fighters (see YAMPSettings for field semantics)
+	uint32_t m_m2RenderMode = 0;
+	bool m_m2WindowMatchesRender = false;
 	uint32_t m_m2Aspect = 0;
 	bool m_m2CrtFilter = false;
 	uint32_t m_m2Difficulty = 1;

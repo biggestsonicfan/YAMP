@@ -61,18 +61,40 @@ namespace
 	constexpr uintptr_t RVA_RUN_STATE = 0x6C19E0;     // written by STEP/GO/RESET handlers
 	constexpr uintptr_t RVA_STUB_RET0 = 0x4C780;      // `xor eax,eax; ret` — stripped handlers
 
-	// i960 machine state, used by the 960STAT call-stack pane. All of this is the DLL's own
-	// data and code; the only piece missing from the retail DLL is the text output, which the
-	// stripped CALL STACK handler (+0x4C6C0) discarded — it still performs the walk correctly.
+	// i960 machine state, used by the 960STAT call-stack and DISASM panes. All of this is the
+	// DLL's own data and code; the only piece missing from the retail DLL is the text output,
+	// which the stripped CALL STACK handler (+0x4C6C0) discarded — it still performs the walk
+	// correctly.
 	constexpr uintptr_t RVA_CPU_CTX_PTR = 0x58A960;   // -> i960 context (set by the CPU init)
-	// The DLL's walker reads its frame pointer from +0x58 and a frame count from +0x48, but
-	// retail never populates either (verified by polling the live context: both stay 0 while
-	// the game runs) — they belong to the stripped break/debugger state. The frame pointer the
-	// running CPU actually maintains is +0x5C, and walking it with the DLL's own algorithm
-	// produces a correct, cleanly terminating chain. Prefer it, fall back to the DLL's field.
+	// The emulated register file is embedded in the context at +0x58 as 64 consecutive u32
+	// slots, indexed straight off the instruction's register field: the interpreter's operand
+	// fetch is *(u32*)(ctx + 0x58 + regIndex * 4) with a 5-bit index (+0x180027120) or a 6-bit
+	// one composed from the global bit (+0x1800260F0). Slots 0-15 are the i960 locals r0-r15,
+	// 16-31 the globals g0-g15, so by the i960 ABI:
+	//   r0  = pfp, previous frame pointer, return-type bits in the low 6   -> ctx+0x58
+	//   r1  = sp,  stack pointer                                          -> ctx+0x5C
+	//   r2  = rip, return address of the running procedure                -> ctx+0x60
+	//   g15 = fp,  frame pointer of the running procedure                 -> ctx+0xD4
+	// Confirmed against the DLL's own call/ret pair (+0x1800258D0 / +0x180025CB0), which does
+	// newFP = (sp + 0x3F) & ~0x3F; saves r0-r15 to [oldFP]; sets g15 = newFP, sp = newFP + 0x40,
+	// r0 = (oldFP & ~0x3F) | returnType — and masks +0xD4 with 0xFFFFFFC0 throughout.
+	//
+	// An earlier pass took +0x58 for "the break-state frame pointer" and +0x5C for the live one.
+	// +0x5C is the stack pointer, which only aliases the frame base while a frame is empty; the
+	// frame pointer is +0xD4.
 	constexpr uintptr_t CTX_CALL_DEPTH = 0x48;        // int32: frame count (break-state only)
-	constexpr uintptr_t CTX_FRAME_PTR = 0x58;         // uint32: frame pointer (break-state only)
-	constexpr uintptr_t CTX_LIVE_FRAME_PTR = 0x5C;    // uint32: frame pointer of the running CPU
+	constexpr uintptr_t CTX_REG_R0_PFP = 0x58;        // uint32: r0, caller's frame pointer
+	constexpr uintptr_t CTX_REG_R2_RIP = 0x60;        // uint32: r2, return address into the caller
+	constexpr uintptr_t CTX_REG_G15_FP = 0xD4;        // uint32: g15, running frame pointer
+	// Instruction pointer. The interpreter fetches from *(u64*)(ctx+0) + *(u32*)(ctx+8), so +8
+	// is an offset within whichever code bank +0 currently selects (+0x1800255F0). The bank
+	// bases sit at +0x10 (ROM 0x000000), +0x20 (ROM 0x200000) and +0x18 (RAM 0x500000); the
+	// DLL's own call handler reconstructs the absolute address by comparing +0 against them.
+	constexpr uintptr_t CTX_CODE_BASE = 0x00;         // void*: host base of the live code bank
+	constexpr uintptr_t CTX_IP = 0x08;                // uint32: IP relative to that bank
+	constexpr uintptr_t CTX_BANK_ROM0 = 0x10;         // void*: bank for guest 0x000000+
+	constexpr uintptr_t CTX_BANK_RAM = 0x18;          // void*: bank for guest 0x500000+
+	constexpr uintptr_t CTX_BANK_ROM2 = 0x20;         // void*: bank for guest 0x200000+
 	// Emulated memory map: 64 records x 0x70, each holding {read,write} pairs by access size.
 	// Slot +0x20 is the 32-bit read: void read(void* out, uint32_t addr); slot +0x28 is its
 	// paired 32-bit write: void write(uint32_t addr, const void* src). Unmapped regions
@@ -113,7 +135,7 @@ namespace
 		{ 0x4C820,  "Writes debugger run-state 0 (single step). The retail DLL no longer reads the run-state." },
 		{ 0x4C830,  "Writes debugger run-state 2 (run). The retail DLL no longer reads the run-state." },
 		{ 0x4C840,  "Writes run-state 0, then re-runs the DLL's own i960 CPU/board init. This is a REAL reset." },
-		{ 0x4C6C0,  "Walks the emulated i960 call chain via the DLL's memory-map accessors. Its text output was stripped, so it returns 0." },
+		{ 0x4C6C0,  "Walks the emulated i960 call chain via the DLL's memory-map accessors, starting at r0. Its text output was stripped, so it returns 0. The pane below runs the same walk, plus the running procedure and its caller (live in g15/r2, not yet in a frame save area)." },
 		{ 0x4C790,  "DLL handler: toggles the DEKU byte flag." },
 		{ 0x4C7A0,  "Pokes the emulated RAM: sets 1P health word to 1." },
 		{ 0x4C7C0,  "Pokes the emulated RAM: sets 1P health word to 150 (max)." },
@@ -388,6 +410,58 @@ namespace
 		}
 	}
 
+	// Rebuilds the absolute i960 IP from the bank-relative one, the way the DLL's own call
+	// handler does when it stores a return address into r2.
+	static bool CurrentI960Ip(uint8_t* ctx, uint32_t& out)
+	{
+		const void* liveBank = *reinterpret_cast<void* const*>(ctx + CTX_CODE_BASE);
+		if (liveBank == nullptr)
+		{
+			return false;
+		}
+		const uint32_t ip = *reinterpret_cast<const uint32_t*>(ctx + CTX_IP);
+		if (liveBank == *reinterpret_cast<void* const*>(ctx + CTX_BANK_ROM2))
+		{
+			out = ip + 0x200000;
+		}
+		else if (liveBank == *reinterpret_cast<void* const*>(ctx + CTX_BANK_RAM))
+		{
+			out = ip + 0x500000;
+		}
+		else
+		{
+			// Includes the CTX_BANK_ROM0 case, which needs no adjustment.
+			out = ip;
+		}
+		return true;
+	}
+
+	// The 960STAT DISASM item points at the generic stub (+0x4C780, `xor eax,eax; ret`) in the
+	// retail DLL, so there is no handler left to call. What it used to do survives in the PS3
+	// build of the same emulator, whose DISASM handler symbolises the running IP and then drops
+	// the string; this is that line, kept.
+	static void DrawDisasmPane(uint8_t* base, bool booted)
+	{
+		ImGui::Separator();
+		ImGui::TextUnformatted("DISASM (live IP)");
+
+		uint8_t* ctx = booted ? *reinterpret_cast<uint8_t**>(base + RVA_CPU_CTX_PTR) : nullptr;
+		uint32_t ip = 0;
+		if (ctx == nullptr || !CurrentI960Ip(ctx, ip))
+		{
+			ImGui::TextDisabled("i960 not running.");
+			return;
+		}
+
+		char symbol[128];
+		SymbolizeI960(base, ip, symbol, sizeof(symbol));
+		ImGui::Text("IP 0x%08X  %s", ip, symbol);
+		ImGui::Text("FP 0x%08X   SP 0x%08X   PFP 0x%08X",
+			*reinterpret_cast<const uint32_t*>(ctx + CTX_REG_G15_FP) & I960_FRAME_ALIGN_MASK,
+			*reinterpret_cast<const uint32_t*>(ctx + CTX_REG_R0_PFP + 4),
+			*reinterpret_cast<const uint32_t*>(ctx + CTX_REG_R0_PFP) & I960_FRAME_ALIGN_MASK);
+	}
+
 	static void DrawCallStackPane(uint8_t* base, bool booted)
 	{
 		ImGui::Separator();
@@ -407,14 +481,31 @@ namespace
 		}
 
 		const int depth = *reinterpret_cast<const int*>(ctx + CTX_CALL_DEPTH);
-		uint32_t framePtr = *reinterpret_cast<const uint32_t*>(ctx + CTX_LIVE_FRAME_PTR);
-		if (framePtr == 0)
-		{
-			framePtr = *reinterpret_cast<const uint32_t*>(ctx + CTX_FRAME_PTR);
-		}
-		ImGui::Text("FP 0x%08X    (break-state depth %d)", framePtr, depth);
+		const uint32_t livePtr = *reinterpret_cast<const uint32_t*>(ctx + CTX_REG_G15_FP);
+		uint32_t framePtr = *reinterpret_cast<const uint32_t*>(ctx + CTX_REG_R0_PFP);
+		ImGui::Text("FP 0x%08X    (break-state depth %d)",
+			livePtr & I960_FRAME_ALIGN_MASK, depth);
 
-		if (framePtr == 0)
+		uint32_t chain[MAX_FRAMES];
+		int frameCount = 0;
+
+		// The DLL's own walker starts at r0, so its first entry is already the return address
+		// into the caller's caller: it never names the running procedure or its immediate
+		// caller. Both are live in registers rather than in the frame save area, so seed the
+		// chain with them before walking memory.
+		uint32_t liveIp = 0;
+		if (CurrentI960Ip(ctx, liveIp) && liveIp != 0 && liveIp < m2ftg::ElfRom::PROGRAM_ROM_SIZE)
+		{
+			chain[frameCount++] = liveIp;
+		}
+		const uint32_t returnIntoCaller = *reinterpret_cast<const uint32_t*>(ctx + CTX_REG_R2_RIP);
+		if (returnIntoCaller != 0 && returnIntoCaller < m2ftg::ElfRom::PROGRAM_ROM_SIZE &&
+			(returnIntoCaller & 3) == 0)
+		{
+			chain[frameCount++] = returnIntoCaller;
+		}
+
+		if (framePtr == 0 && frameCount == 0)
 		{
 			ImGui::TextDisabled("No frame pointer.");
 			return;
@@ -422,9 +513,7 @@ namespace
 
 		// Walk until the chain terminates on a null previous-frame pointer. The DLL bounds the
 		// loop with its frame count instead, but that counter is part of the break state.
-		uint32_t chain[MAX_FRAMES];
-		int frameCount = 0;
-		for (int i = 0; i < MAX_FRAMES; i++)
+		for (int i = frameCount; i < MAX_FRAMES && framePtr != 0; i++)
 		{
 			framePtr &= I960_FRAME_ALIGN_MASK;
 
@@ -708,6 +797,7 @@ void m2ftg::DrawDebugWindows()
 			DrawItems(sub, base, booted);
 			if (strcmp(sub->title, "960STAT") == 0)
 			{
+				DrawDisasmPane(base, booted);
 				DrawCallStackPane(base, booted);
 				DrawProfilePane(base, booted);
 			}

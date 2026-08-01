@@ -1,5 +1,7 @@
 #include "YAMPSettings.h"
 
+#include "m2ftg/DisplayModes.h"
+
 #include "m2ftg/LJ/HleHooks.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -126,6 +128,14 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 
 		m_fullscreen = GetPrivateProfileIntW(SECTION_NAME, L"Fullscreen", 0, iniPath.c_str()) != 0;
 		m_enableFpsCap = GetPrivateProfileIntW(SECTION_NAME, L"FPSCap", 1, iniPath.c_str()) != 0;
+
+		// Stored as the module's own switch text, so reordering m2ftg::DISPLAY_MODES cannot
+		// silently change what an existing ini means. The launcher writes this same key.
+		wchar_t renderMode[64] {};
+		GetPrivateProfileStringW(SECTION_NAME, L"Model2RenderMode", L"", renderMode,
+			static_cast<DWORD>(std::size(renderMode)), iniPath.c_str());
+		m_m2RenderMode = static_cast<uint32_t>(m2ftg::DisplayModeFromArg(renderMode));
+		m_m2WindowMatchesRender = GetPrivateProfileIntW(SECTION_NAME, L"Model2WindowMatchesRender", 0, iniPath.c_str()) != 0;
 	}
 
 	{
@@ -220,6 +230,10 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"Graphics";
 		WritePrivateProfileIntW(SECTION_NAME, L"ResolutionX", m_resX, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"ResolutionY", m_resY, iniPath.c_str());
+		WritePrivateProfileStringW(SECTION_NAME, L"Model2RenderMode",
+			m2ftg::DISPLAY_MODES[m_m2RenderMode < m2ftg::DISPLAY_MODE_COUNT ? m_m2RenderMode : 0].arg,
+			iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Model2WindowMatchesRender", m_m2WindowMatchesRender, iniPath.c_str());
 	
 		WritePrivateProfileFloatW(SECTION_NAME, L"RefreshRate", m_refreshRate, iniPath.c_str());
 
