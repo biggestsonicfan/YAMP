@@ -1,4 +1,4 @@
-#include "Patch.h"
+﻿#include "Patch.h"
 
 #include "../../pxd/LJ/file_access.h"
 #include "../../pxd/LJ/pxd_types.h"
@@ -178,26 +178,21 @@ namespace m2ftg
 
 		// ---- Cabinet TEST / SERVICE switches --------------------------------------------
 		// The emulated Model 2 I/O board serves guest 0x01C00002 - the SYSTEM input port - out of
-		// one byte of its own state (io[9], the bank-0 copy; io[0x0A] is the DIP bank and is
-		// hard-wired to 0xFF here). It is active low and laid out exactly like the hardware:
+		// one byte of its own state (io[9], the bank-0 copy; io[0x0A] is the DIP bank, hard-wired
+		// to 0xFF). Active low, laid out like the hardware:
 		//
 		//     bit0 coin 1   bit1 coin 2   bit2 TEST   bit3 SERVICE   bit4 start 1   bit5 start 2
 		//
-		// read_sw folds that byte into the low 8 bits of the ROM's own flag longs at RAM 0x500700
-		// (held) / 0x500704 (momentary), inverted - which is why the DLL's ADV_DSP handler can
-		// fake "both players pressed Start" by writing 0x30 straight to 0x500704.
+		// read_sw folds that byte into the low 8 bits of the ROM's flag longs at RAM 0x500700
+		// (held) / 0x500704 (momentary), inverted - which is why the DLL's ADV_DSP handler fakes
+		// "both players pressed Start" by writing 0x30 straight to 0x500704.
 		//
-		// The DLL rebuilds io[9] from scratch once per emulated frame, at the top of the frame
-		// step, and drives only coin 1 (from the execute_info coin bit, via a one-shot flag at
-		// io+0x4098) and the two start bits. TEST and SERVICE have no host source anywhere in the
-		// module protocol - they are left permanently released - so the board's service menu, the
-		// operator's authoritative view of how each physical input reaches the game, was
-		// unreachable. That is what this restores.
-		//
-		// Nothing about io[9] survives a frame, so a host-side write between module_main calls is
-		// simply overwritten. Instead intercept the CALL to the refresh and pull the two lines low
-		// immediately after it, before the frame's first i960 instruction runs - the same moment,
-		// and the same order, the real board would see the switch close.
+		// The DLL rebuilds io[9] from scratch once per emulated frame and drives only coin 1
+		// (from the execute_info coin bit, via a one-shot flag at io+0x4098) and the two starts;
+		// TEST and SERVICE have no host source in the module protocol at all. Since nothing about
+		// io[9] survives a frame, a host write between module_main calls is simply overwritten -
+		// so intercept the CALL to the refresh and pull the two lines low immediately after it,
+		// before the frame's first i960 instruction runs.
 		namespace SystemSwitches
 		{
 			constexpr size_t IO_SYSTEM_PORT = 9;
@@ -221,9 +216,8 @@ namespace m2ftg
 			}
 
 			// The refresh function's first act is `MOV R10, [rip+disp32]` loading the I/O board
-			// pointer (StF +0x2B -> 0x1806C9B88, FV +0x2B -> 0x1806CC188). Reading the global out
-			// of that instruction rather than hardcoding an RVA per DLL keeps this correct under
-			// ASLR, which the FV module needs - it does not load at 0x180000000.
+			// pointer (StF +0x2B -> 0x1806C9B88, FV +0x2B -> 0x1806CC188). Decoding the global
+			// out of that instruction avoids a per-DLL RVA and survives ASLR, which FV needs.
 			static uint8_t* const* FindIoState(const uint8_t* refresh)
 			{
 				constexpr uint8_t MOV_R10_RIP[] = { 0x4C, 0x8B, 0x15 };
@@ -254,9 +248,9 @@ namespace m2ftg
 			}
 			if (SystemSwitches::ioState == nullptr)
 			{
-				// Not fatal, and expected on the modules that do not share this I/O core: the
-				// cabinet switches simply stay released, exactly as they were before.
-				DebugLog("[%s] No emulated I/O board found - Test / Service switches unavailable.\n",
+				// Expected on the modules that do not share this I/O core (MR, the YLAD VF2
+				// build): the cabinet switches just stay released.
+				DebugLog("[%s] No emulated I/O board - Test / Service switches unavailable.\n",
 					gGeneral.GetGameTag());
 				return;
 			}
@@ -265,8 +259,6 @@ namespace m2ftg
 			SystemSwitches::orgIoRefresh = refresh;
 			Trampoline* t = Trampoline::MakeTrampoline(dll);
 			Memory::InjectHook(callSite, t->Jump(&SystemSwitches::IoRefresh));
-			DebugLog("[%s] Test / Service switches wired to the I/O board system port (io @ %p).\n",
-				gGeneral.GetGameTag(), static_cast<const void*>(SystemSwitches::ioState));
 		}
 
 		void SetSystemSwitches(bool test, bool service)

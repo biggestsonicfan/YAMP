@@ -73,13 +73,11 @@ namespace pxd
                 m_y1 = 1.0f;
             }
 
-            // The player's stick also steers, like the cabinet lever - EXCEPT when they have
-            // bound their movement to axis directions. On a pad whose axes carry a real analog
-            // stick the two agree, but a DirectInput encoder is free to land its axes in
-            // DIJOYSTATE2 slots that do not match their meaning (the "USB Gamepad" encoder puts
-            // its vertical axis in the X slot). Feeding those raw values in alongside bindings
-            // that already say which way the player pushed would add deflection at ninety
-            // degrees to the input. Where the bindings are explicit, they are the authority.
+            // The stick also steers, like the cabinet lever - EXCEPT when movement is bound to
+            // axis directions. A DirectInput device may land its axes in DIJOYSTATE2 slots that
+            // do not match their meaning, so feeding the raw values in alongside bindings that
+            // already say which way the player pushed can add deflection at ninety degrees to
+            // it. Where the bindings are explicit, they are the authority.
             const auto& padBinds = gGeneral.GetSettings()->m_m2PadBinds[player];
             bool movementOnAxes = false;
             for (uint32_t action : { Input::Action_Up, Input::Action_Down,

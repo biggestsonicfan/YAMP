@@ -1,4 +1,4 @@
-#include "DirectInputPad.h"
+﻿#include "DirectInputPad.h"
 
 #include "Input.h"
 #include "../YAMPGeneral.h"
@@ -16,13 +16,12 @@ namespace Input::DI
 {
 	namespace
 	{
-		// Axes are rescaled to this range at open time so normalising is a plain divide and no
-		// device-specific calibration is needed.
+		// Requested at open time so normalising is a plain divide.
 		constexpr LONG AXIS_RANGE = 1000;
 		// Matches the XInput reader's radial deadzone, so both kinds of pad feel the same.
 		constexpr float DEADZONE = 0.25f;
-		// How far an axis must travel to count as a digital direction press. Well past the
-		// deadzone: a resting analog stick drifts, and a binding prompt must not catch that.
+		// How far an axis must travel to read as a digital press. Well past the deadzone, so a
+		// drifting analog stick cannot capture a binding prompt.
 		constexpr float AXIS_DIGITAL_THRESHOLD = 0.6f;
 
 		struct ComDeleter
@@ -31,10 +30,8 @@ namespace Input::DI
 		};
 		using DevicePtr = std::unique_ptr<IDirectInputDevice8W, ComDeleter>;
 
-		// A device that refuses DIPROP_RANGE keeps its own scale, which is usually 0..65535 with
-		// the rest position in the MIDDLE - normalising that as if it were centred on zero would
-		// peg the stick permanently in one corner. So the real range is read back per axis and
-		// used as-is, and only the requested range is assumed when even the query fails.
+		// A device may refuse DIPROP_RANGE and keep its own scale (usually 0..65535, resting in
+		// the MIDDLE), so the real range is read back per axis rather than assumed.
 		struct AxisRange
 		{
 			LONG min = -AXIS_RANGE;
@@ -70,8 +67,8 @@ namespace Input::DI
 			{
 				return true;
 			}
-			// No window yet means no legal cooperative level, so there is nothing useful to do -
-			// and no reason to latch a failure, since the window arrives moments later.
+			// No window yet = no legal cooperative level. Not latched as a failure: the window
+			// arrives moments later.
 			if (s_hwnd == nullptr || s_createFailed)
 			{
 				return false;
@@ -82,21 +79,18 @@ namespace Input::DI
 				IID_IDirectInput8W, reinterpret_cast<void**>(&di), nullptr);
 			if (FAILED(hr) || di == nullptr)
 			{
-				// Only DirectInput itself being missing lands here, which is permanent.
+				// Permanent: DirectInput itself is unavailable, so only XInput pads will list.
 				s_createFailed = true;
-				DebugLog("[input] DirectInput8Create failed (0x%08X) - only XInput pads will be listed.\n",
-					static_cast<unsigned>(hr));
+				DebugLog("[input] DirectInput8Create failed (0x%08X)\n", static_cast<unsigned>(hr));
 				return false;
 			}
 			s_di.reset(di);
 			return true;
 		}
 
-		// XInput pads are ALSO enumerated by DirectInput, where they show up as a generic
-		// controller with mangled triggers and no reliable names. Reading one twice would put a
-		// duplicate in the picker and let a player bind the same physical button under two
-		// identities. Microsoft's own marker for this is the device interface path: every XInput
-		// device's path contains "ig_", and nothing else does.
+		// XInput pads are also enumerated by DirectInput, as generic controllers with mangled
+		// triggers - listing them twice would let one physical button bind under two identities.
+		// The standard marker: every XInput device's interface path contains "ig_".
 		bool IsXInputDevice(IDirectInputDevice8W* device)
 		{
 			DIPROPGUIDANDPATH prop = {};
@@ -136,9 +130,9 @@ namespace Input::DI
 			range.lMax = AXIS_RANGE;
 			setup->device->SetProperty(DIPROP_RANGE, &range.diph);
 
-			// dwOfs is where DirectInput actually puts this axis in DIJOYSTATE2, which is the
-			// only thing the reader can trust: the slot an axis lands in does not have to agree
-			// with the name the device reports for it (and on some encoders it does not).
+			// dwOfs is where DirectInput actually puts this axis in DIJOYSTATE2 - the only thing
+			// the reader can trust, since the slot need not agree with the device's own name
+			// for it (on some encoders it does not).
 			const DWORD slot = obj->dwOfs / sizeof(LONG);
 			if (slot >= DI_AXIS_COUNT)
 			{
@@ -187,8 +181,8 @@ namespace Input::DI
 			{
 				return DIENUM_CONTINUE;
 			}
-			// BACKGROUND so the pad keeps working when YAMP is not the foreground window (the
-			// settings UI and the game both read it), NONEXCLUSIVE so nothing else loses the pad.
+			// BACKGROUND so the pad still reads when YAMP is not foreground; NONEXCLUSIVE so
+			// nothing else loses it.
 			if (FAILED(device->SetCooperativeLevel(s_hwnd, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)))
 			{
 				return DIENUM_CONTINUE;
@@ -205,7 +199,6 @@ namespace Input::DI
 			}
 			open.seen = true;
 			open.device = std::move(device);
-			DebugLog("[input] DirectInput pad: %s (%s)\n", open.name.c_str(), id.c_str());
 			s_devices.emplace(id, std::move(open));
 			return DIENUM_CONTINUE;
 		}
@@ -219,8 +212,8 @@ namespace Input::DI
 			return;
 		}
 		s_hwnd = wnd;
-		// The cooperative level is bound to the window, so everything opened against the old
-		// one has to be reopened. Dropping them is enough - the next rescan reopens.
+		// The cooperative level is bound to the window, so drop everything opened against the
+		// old one; the next rescan reopens.
 		s_devices.clear();
 	}
 
@@ -258,8 +251,8 @@ namespace Input::DI
 		HRESULT hr = device->Poll();
 		if (FAILED(hr))
 		{
-			// Losing acquisition is routine (another app took focus, the machine slept). Retry
-			// once here; a device that is genuinely gone fails GetDeviceState below instead.
+			// Losing acquisition is routine (focus change, sleep). A device that is genuinely
+			// gone fails GetDeviceState below instead.
 			hr = device->Acquire();
 			while (hr == DIERR_INPUTLOST)
 			{
@@ -289,9 +282,8 @@ namespace Input::DI
 			}
 		}
 
-		// POV hat. Centered is reported as -1 or with the low word set to 0xFFFF depending on the
-		// driver; anything else is an angle in hundredths of a degree, clockwise from up. Treat
-		// it as the eight-way switch it physically is, so diagonals set both directions.
+		// POV hat: centred is low word 0xFFFF (drivers vary between that and -1), otherwise an
+		// angle in hundredths of a degree clockwise from up. Diagonals set both directions.
 		const DWORD pov = js.rgdwPOV[0];
 		if (LOWORD(pov) != 0xFFFF)
 		{
@@ -314,9 +306,7 @@ namespace Input::DI
 			float f = half > 0.0f ? (static_cast<float>(*raw[i]) - centre) / half : 0.0f;
 			normalised[i] = f < -1.0f ? -1.0f : (f > 1.0f ? 1.0f : f);
 
-			// Each axis also reads as two digital directions, which is what makes a hat-less
-			// panel bindable at all. The threshold is deliberately well past the analog
-			// deadzone so half-resting an analog stick cannot capture a binding by accident.
+			// Two digital directions per axis - what makes a hat-less panel bindable at all.
 			if (normalised[i] <= -AXIS_DIGITAL_THRESHOLD)
 			{
 				state.buttons |= 1ull << (Pad_Axis1Minus + i * 2);
@@ -327,17 +317,15 @@ namespace Input::DI
 			}
 		}
 
-		// The analog lever. Slots 0 and 1 by convention; DirectInput y+ is down, which is
-		// already the sl convention.
+		// The analog lever: slots 0 and 1 by convention. DirectInput y+ is down, as sl expects.
 		float x = normalised[0];
 		float y = normalised[1];
 		if (x * x + y * y < DEADZONE * DEADZONE)
 		{
 			x = y = 0.0f;
 		}
-		// Encoders that report their stick ONLY as a hat leave the axes centered. Fall back to
-		// the hat so a plain arcade stick steers without the player binding anything first,
-		// exactly like the analog stick does on a pad.
+		// A stick reported only as a hat leaves the axes centred; fall back to it so such a
+		// panel steers without the player binding anything first.
 		if (x == 0.0f && y == 0.0f)
 		{
 			if (state.buttons & (1ull << Pad_HatLeft))  x = -1.0f;

@@ -1,4 +1,4 @@
-#include "../ImportSymbols.h"
+﻿#include "../ImportSymbols.h"
 #include "../../pxd/Imports.h"
 
 #include "../../Utils/Patterns.h"
@@ -82,13 +82,10 @@ namespace m2ftg
 				}
 			}
 
-			// Frame step: `push rbx / sub rsp,20 / mov rbx,rcx / call get_host_time / cmp
-			// composite_enable,0 / mov [rbx+60],rax / jz done / inc frame_counter / call io_refresh`.
-			// The pattern is anchored on the whole prologue because the I/O refresh call is the
-			// only interesting part of it, and the payload is match + 0x25 (the CALL itself).
-			// OPTIONAL, and unique where it exists: StF (0x180055760) and FV (0x180053DC0) share
-			// this shape, Motor Raid and the YLAD VF2 build do not. Absent symbol =>
-			// InstallSystemSwitches does nothing and the cabinet switches simply stay released.
+			// Frame step, anchored on its whole prologue; the payload is match + 0x25, the CALL
+			// to the I/O refresh. OPTIONAL and unique where it exists: StF (0x180055760) and FV
+			// (0x180053DC0) share this shape, Motor Raid and the YLAD VF2 build do not. Absent
+			// symbol => InstallSystemSwitches does nothing and the switches stay released.
 			{
 				hook::pattern frameStep(dll,
 					"40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 3D ? ? ? ? 00 48 89 43 60 0F 84 ? ? ? ? FF 05 ? ? ? ? E8");

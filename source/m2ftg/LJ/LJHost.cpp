@@ -608,18 +608,14 @@ namespace m2ftg
                 }
             }
 
-            // Cabinet service panel: the TEST and SERVICE switches on the emulated I/O board's
-            // system port (see InstallSystemSwitches). TEST opens the board's OWN service menu -
-            // the arcade operator's input test, and the authoritative answer to "which physical
-            // input does the game actually see here" - and SERVICE is the credit / navigate
-            // button beside it. Held lines, exactly like the panel: the ROM decides what latches.
+            // Cabinet service panel (see InstallSystemSwitches): TEST opens the board's own
+            // service menu - the operator's input test - and SERVICE is the credit / navigate
+            // button beside it. Held lines, like the panel; the ROM decides what latches. Either
+            // player's binding closes the one switch.
             //
-            // Either player's binding closes the switch, because there is only one panel. Both
-            // are suppressed while the pause menu is open, like every other input, and for the
-            // whole of a netplay session: they are not part of the transmitted pad, so honouring
-            // them would drop one machine into the operator's menu - or feed it a service credit -
-            // while the other carried on playing. TEST is the worst of the two, because the board
-            // menu it opens takes over the machine entirely.
+            // Suppressed while paused, and for the whole of a netplay session: neither is in the
+            // transmitted pad, so honouring them would drop one machine into the operator's menu
+            // (or feed it a service credit) while the other carried on playing.
             {
                 bool test = false;
                 bool service = false;

@@ -224,11 +224,10 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
-			// Controller identity moved from an XInput slot number to an Input::PadDevice id
-			// when DirectInput pads were added, because a bare index means nothing once the
-			// device list can contain both kinds. ControllerId wins; the old integer key is
-			// still honoured when it is the only one present, so existing setups migrate
-			// silently (and are rewritten in the new form on the next save).
+			// Controller identity is an Input::PadDevice id, not an XInput slot number - a bare
+			// index means nothing once the list holds both kinds. ControllerId wins; the old
+			// integer key is honoured when it is the only one present, so existing setups
+			// migrate silently and are rewritten in the new form on the next save.
 			wchar_t idBuf[128] = {};
 			swprintf_s(key, L"P%dControllerId", player + 1);
 			GetPrivateProfileStringW(SECTION_NAME, key, L"", idBuf,

@@ -1,4 +1,4 @@
-#include "Input.h"
+﻿#include "Input.h"
 #include "DirectInputPad.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -44,8 +44,7 @@ namespace Input
 		constexpr uint32_t RECONNECT_COOLDOWN_FRAMES = 60;
 		PadState s_xinputPads[XUSER_MAX_COUNT];
 
-		// Set from the Controls page's Rescan button (and on a device that stops answering);
-		// atomic only because it is trivially cheap to make it so.
+		// Set from the Controls page's Rescan button, and on a device that stops answering.
 		std::atomic<bool> s_rescanRequested{ true };  // true = enumerate on the first poll
 		uint32_t s_xinputMask = 0;                    // which XInput slots were connected last poll
 
@@ -208,10 +207,9 @@ namespace Input
 
 	void RefreshDevices()
 	{
-		// XInput first, so the slot numbering players already know stays at the top of the
-		// picker, then whatever DirectInput found. Only attached devices are listed; a pad that
-		// is configured but currently unplugged is the caller's business (the Controls page
-		// still shows it, so the binding is visibly intact rather than silently gone).
+		// XInput first so its familiar slot numbering stays at the top of the picker, then
+		// whatever DirectInput found. Attached devices only - the Controls page is what shows a
+		// configured-but-unplugged pad.
 		std::vector<PadDevice> devices;
 		std::vector<PadState> states;
 
@@ -238,8 +236,7 @@ namespace Input
 			dev.name = info.name;
 			dev.connected = true;
 			devices.push_back(std::move(dev));
-			// Carry the last poll over so a rescan does not blank the pad for a frame, which
-			// would read as a spurious button release mid-input.
+			// Carry the last poll over; a blank frame would read as a spurious button release.
 			const int old = FindDevice(info.id);
 			states.push_back(old >= 0 ? s_states[old] : PadState{});
 		}
@@ -278,10 +275,9 @@ namespace Input
 	{
 		PollXInput();
 
-		// The list is rebuilt only when it can actually have changed: the first poll, an XInput
-		// pad appearing or vanishing (which XInput tells us for free, as part of the poll), or
-		// an explicit request. Everything else just reads the devices already open, which is
-		// two microseconds. Rebuilding per frame was the lag spike.
+		// Rebuilt only when the list can actually have changed: first poll, an XInput pad
+		// appearing or vanishing (free - the poll above already told us), or an explicit
+		// request. Rebuilding per frame is what caused the lag spikes.
 		uint32_t xinputMask = 0;
 		for (uint32_t slot = 0; slot < XUSER_MAX_COUNT; slot++)
 		{
@@ -307,9 +303,7 @@ namespace Input
 			}
 			if (!DI::Poll(dev.id, s_states[i]))
 			{
-				// Stopped answering - unplugged, or lost for good. Drop its state now and let
-				// the next poll rebuild the list, which is the one case where a rescan is
-				// worth its cost without the player asking for it.
+				// Stopped answering: the one case where a rescan is worth its cost unprompted.
 				s_states[i] = PadState{};
 				RequestDeviceRescan();
 			}

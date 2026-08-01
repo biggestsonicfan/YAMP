@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <cstdint>
@@ -34,37 +34,29 @@ namespace Input
 		Action_KG,
 		Action_PKG,
 		Action_Back,
-		// The cabinet's SERVICE PANEL switches, wired to the emulated Model 2 I/O board's
-		// system port rather than to a player's buttons (m2ftg boards only - see
-		// m2ftg::InstallSystemSwitches). TEST opens the board's own service menu, which is
-		// where the operator checks how the panel is wired up, input by input; SERVICE is the
-		// credit / navigate button next to it. Per-player only because the bindings are stored
-		// per player - either player's binding closes the one cabinet switch.
+		// The cabinet's service-panel switches, wired to the emulated Model 2 I/O board's system
+		// port rather than to a player's buttons (m2ftg boards only - see
+		// m2ftg::InstallSystemSwitches). TEST opens the board's own service menu; SERVICE is the
+		// credit / navigate button next to it. Per-player only because bindings are stored that
+		// way - either player's binding closes the one cabinet switch.
 		Action_Test,
 		Action_Service,
 		Action_Count
 	};
 	inline constexpr uint32_t WIZARD_ACTION_COUNT = Action_Coin + 1;
 
-	// How many numbered buttons a DirectInput pad can bind. DIJOYSTATE2 reports up to 128, but
-	// nothing with a usable panel has more than this, and the whole set has to fit in the
-	// PadState::buttons mask alongside the XInput names and the axes.
+	// DIJOYSTATE2 reports up to 128 buttons; 24 is well past any real panel and keeps the whole
+	// set inside PadState::buttons. Six axes = the fixed X/Y/Z/Rx/Ry/Rz slots.
 	inline constexpr uint32_t DI_BUTTON_COUNT = 24;
-	// The six axes DIJOYSTATE2 has a fixed slot for (X, Y, Z, Rx, Ry, Rz). Each binds as two
-	// digital directions, because that is what an arcade panel actually wants out of them.
 	inline constexpr uint32_t DI_AXIS_COUNT = 6;
 
-	// Bindable controller inputs. Used both as binding values (0 = unbound) and as bit indices
-	// in PadState::buttons. The left stick is not bindable - it always drives movement,
-	// like the cabinet lever.
+	// Bindable controller inputs: binding values (0 = unbound) and bit indices in
+	// PadState::buttons. The left stick is not bindable - it always steers, like the lever.
 	//
-	// TWO DISJOINT RANGES, because YAMP reads two kinds of controller. An XInput pad has a known
-	// button contract, so its inputs keep their real names. A DirectInput pad - any other HID
-	// game controller Windows exposes: arcade encoders, fight sticks, adapters, third-party pads
-	// - has no such contract; its buttons are simply numbered, and calling button 1 "A" would be
-	// a guess. So those get their own range. The practical consequence is that a binding only
-	// fires on the KIND of pad it was made on, which is the honest behaviour: "A" on an Xbox pad
-	// and "Button 1" on an arcade stick are not the same input and should not silently alias.
+	// Two disjoint ranges, one per kind of controller. An XInput pad has a known button
+	// contract and keeps the real names; a DirectInput pad (arcade encoders, sticks, adapters)
+	// does not, so its inputs are simply numbered. A binding therefore only fires on the kind
+	// of pad it was made on, rather than "A" and "Button 1" silently aliasing.
 	enum PadButton : uint32_t
 	{
 		Pad_None = 0,
@@ -85,22 +77,19 @@ namespace Input
 		Pad_DPadDown,
 		Pad_DPadLeft,
 		Pad_DPadRight,
-		// DirectInput: numbered button n (1-based) is Pad_Btn1 + n - 1, then the POV hat's four
-		// directions, then each axis as a pair of digital directions. Only the first of each run
-		// is named; PadButtonName formats the rest.
+		// DirectInput: button n (1-based) = Pad_Btn1 + n - 1, then the POV hat, then each axis as
+		// a pair of digital directions (axis n = Pad_Axis1Minus + (n - 1) * 2, +1 for positive).
+		// Only the first of each run is named; PadButtonName formats the rest.
+		//
+		// Axes must bind: plenty of panels have no hat at all, and a stick reported purely as
+		// axes would otherwise have no bindable directions. They are numbered rather than named
+		// X/Y/Z because DirectInput does not guarantee an axis lands in the DIJOYSTATE2 slot
+		// matching its reported name - so a semantic label here would be wrong on some devices.
 		Pad_Btn1,
 		Pad_HatUp = Pad_Btn1 + DI_BUTTON_COUNT,
 		Pad_HatDown,
 		Pad_HatLeft,
 		Pad_HatRight,
-		// AXES BIND AS DIRECTIONS, and they have to: plenty of panels have no hat at all. The
-		// user's own encoder ("USB Gamepad", 2 axes / 9 buttons / 0 POVs) reports its stick
-		// purely as axes, so with only buttons and a hat bindable its directions were invisible.
-		// Axis n (1-based) is Pad_Axis1Minus + (n - 1) * 2, with +1 for the positive direction.
-		// Deliberately numbered rather than named X/Y/Z: DirectInput assigns this device's axes
-		// to the DIJOYSTATE2 slots in an order that does NOT match their reported names (its
-		// "Y Axis" lands in the X slot), so any semantic label here would be a lie half the time.
-		// The player pushes the stick and binds whatever lights up, which is always right.
 		Pad_Axis1Minus,
 		Pad_Axis1Plus,
 		Pad_Count = Pad_Axis1Minus + DI_AXIS_COUNT * 2,
@@ -112,11 +101,9 @@ namespace Input
 	using PadBinds = std::array<std::array<uint32_t, Action_Count>, 2>;
 
 	// Keyboard defaults keep the historical StF layout (WASD + K/L/J, F to start, Tab back;
-	// combo keys match the old fixed assigns: I=P+G, O=P+K, U=K+G, M=P+K+G). '5' inserts a
-	// coin, MAME-style, and F2 / F3 are the service panel's Test and Service switches - also the
-	// keys MAME uses for them, so anyone who has been inside a Model 2 test menu already knows
-	// them. The panel is one cabinet fixture, so only Player 1 gets it by default.
-	// Player 2 has no keyboard defaults - run the wizard to set them up.
+	// combo keys match the old fixed assigns: I=P+G, O=P+K, U=K+G, M=P+K+G). Coin and the two
+	// service-panel switches use MAME's keys ('5', F2, F3); the panel is one cabinet fixture, so
+	// only Player 1 gets it. Player 2 has no keyboard defaults - run the wizard to set them up.
 	inline constexpr KeyBinds DEFAULT_KEY_BINDS = { {
 		//  Up   Down  Left  Right  Punch Kick  Guard Start Coin  P+G  P+K  K+G  P+K+G Back               Test              Service
 		{ { 'W', 'S',  'A',  'D',   'K',  'L',  'J',  'F',  '5',  'I', 'O', 'U', 'M',  0x09 /* VK_TAB */, 0x71 /* VK_F2 */, 0x72 /* VK_F3 */ } },
@@ -136,29 +123,23 @@ namespace Input
 		    Pad_LT, Pad_RT, Pad_RB, Pad_LB, Pad_Back, Pad_None, Pad_None } },
 	} };
 
-	// execute_info.assign values (m2ftg assign_t), indexed by the module's SLOT, which is not
-	// the same thing as our button. Fixed table: Pad.cpp routes each action to the matching sl
-	// button, so this is the single source of truth for what each button bit means to the module.
+	// execute_info.assign values (m2ftg assign_t), indexed by the MODULE's slot, which is not the
+	// same thing as our button. Pad.cpp routes each action to the matching sl button, so this is
+	// the single source of truth for what each button bit means to the module. Net effect for the
+	// player: A=P, B=K, Y=G, X=P+G, LT=P+K+G, LB=P+K, RT=K+G, RB=none.
 	//
-	// assign_t -> M2 button code, from the module's own lookup (StF DLL 0x180177B90, consumed by
-	// FUN_180003AC0): 1=none, 2=p(0x07), 3=k(0x08), 4=g(0x09), 5=pg(0x6F), 6=pkg(0x72),
-	// 7=pk(0x71), 8=kg(0x70).
+	// Two module facts this table depends on, both from the StF DLL:
+	//  - assign_t -> M2 button code (lookup 0x180177B90, consumed by FUN_180003AC0): 1=none,
+	//    2=p(0x07), 3=k(0x08), 4=g(0x09), 5=pg(0x6F), 6=pkg(0x72), 7=pk(0x71), 8=kg(0x70).
+	//  - the slot table (0x180126770) keys each slot by a button mask in the MODULE's bit order,
+	//    and the engine's pad conversion (FUN_180062470, reading execute_info.pad[p] +0x00)
+	//    permutes the four face bits on the way in: our A(bit0)->module bit2, B(bit1)->bit1,
+	//    X(bit2)->bit3, Y(bit3)->bit0. So the slots run Y, B, X, A, LT, LB, RT, RB in OUR terms;
+	//    the shoulders pass through unpermuted. Reading the mask order as our own order is what
+	//    used to rotate Punch / Barrier / Punch+Barrier between each other.
 	//
-	// WHICH SLOT A BUTTON LANDS IN (corrected 2026-08-01 after a service-menu input test; the
-	// old table had Punch/Barrier/Punch+Barrier rotated between them). The module's slot table
-	// (StF DLL 0x180126770) keys each slot by a button MASK, in the order
-	// 0x01, 0x02, 0x08, 0x04, 0x40, 0x10, 0x80, 0x20 — and those masks are in the MODULE's own
-	// bit order, not ours. The engine's pad conversion (FUN_180062470, reading
-	// execute_info.pad[p] +0x00) permutes the four face bits on the way in:
-	//     our A (bit0) -> module bit2 (0x04)      our X (bit2) -> module bit3 (0x08)
-	//     our B (bit1) -> module bit1 (0x02)      our Y (bit3) -> module bit0 (0x01)
-	// so the slots run Y, B, X, A, LT, LB, RT, RB in OUR button terms. The shoulders pass
-	// through unpermuted and happen to line up already. Verified identical in the FV and both
-	// VF2 module builds (same mask order at DLL 0x123740 / 0x106860 / 0x10EB50); Motor Raid and
-	// Virtual On ship no table of this shape, so their slot meanings are still unconfirmed.
-	//
-	// Net effect for the player, which is what the Controls page promises:
-	// A=P, B=K, Y=G, X=P+G, LT=P+K+G, LB=P+K, RT=K+G, RB=none.
+	// Identical mask order in FV and both VF2 builds (DLL 0x123740 / 0x106860 / 0x10EB50). Motor
+	// Raid and Virtual On ship no table of this shape, so their slot meanings are unconfirmed.
 	inline constexpr uint8_t MODULE_ASSIGN[8] = {
 		4, // slot 0 (mask 0x01) <- our BUTTON_Y  = Guard      -> g
 		3, // slot 1 (mask 0x02) <- our BUTTON_B  = Kick       -> k
@@ -185,13 +166,9 @@ namespace Input
 		bool connected = false;
 	};
 
-	// One attached controller, XInput or DirectInput.
-	//
-	// IDENTITY IS `id`, NOT A LIST POSITION. The device list changes as things are plugged in
-	// and out, and an index would quietly hand a player whoever moved into that slot - the
-	// classic "my controls swapped after I unplugged the headset" bug. Ids are
-	// "xinput:<slot>" or "dinput:<instance guid>" and are what settings.ini stores, so a pad
-	// keeps its bindings across a replug and across other devices coming and going.
+	// One attached controller, XInput or DirectInput. Identity is `id` ("xinput:<slot>" or
+	// "dinput:<instance guid>"), never a list position - the list shifts as devices come and go,
+	// and an index would hand a player whoever moved into that slot. settings.ini stores the id.
 	struct PadDevice
 	{
 		std::string id;
@@ -199,19 +176,15 @@ namespace Input
 		bool connected = false;
 	};
 
-	// DirectInput needs a top-level window to set its cooperative level; RenderWindow hands its
-	// own over as soon as it has one. Until then only XInput pads are visible.
+	// DirectInput needs a top-level window for its cooperative level; until RenderWindow hands
+	// one over, only XInput pads are visible.
 	void SetWindow(void* hwnd);
 
-	// Rebuilds the device list, rescanning DirectInput. EXPENSIVE - measured at ~100 ms, because
-	// IDirectInput8::EnumDevices walks the whole HID stack (and a virtual-pad driver in it can
-	// dominate that). NOT something to call per frame, per second, or off a timer: at 60 fps
-	// that is six dropped frames every time it runs, which is exactly what it felt like.
-	//
-	// It runs at startup and then only when the player asks (the Controls page has a Rescan
-	// button). Deliberately NOT hooked to WM_DEVICECHANGE either: that fires for any device node
-	// on the system - a headset, a phone on a charger - so hot-plug detection would mean
-	// freezing a match for a tenth of a second because something unrelated was plugged in.
+	// Rebuilds the device list, rescanning DirectInput. ~100 ms - EnumDevices walks the whole HID
+	// stack. Never call it per frame or off a timer; at 60 fps that is six dropped frames each
+	// time. It runs at startup and from the Controls page's Rescan button. Deliberately not on
+	// WM_DEVICECHANGE, which fires for any device node on the system (a headset, a phone on a
+	// charger) and would stutter a match over something unrelated.
 	void RefreshDevices();
 	// Asks for a RefreshDevices at the next PollPads. Safe from any thread.
 	void RequestDeviceRescan();

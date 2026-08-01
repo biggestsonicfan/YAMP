@@ -788,10 +788,8 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 	// game loop's own per-frame poll has run (polling twice per frame is harmless).
 	Input::PollPads();
 
-	// The picker lists every ATTACHED controller - XInput pads and DirectInput ones alike (arcade
-	// encoders, fight sticks, adapters and third-party pads are DirectInput only, and used to be
-	// invisible here). A pad that is configured but currently unplugged still gets a row, so the
-	// player can see their bindings are intact rather than silently reassigned.
+	// Every attached controller, XInput and DirectInput alike. A configured but unplugged pad
+	// still gets a row, so its bindings look intact rather than silently reassigned.
 	const std::vector<Input::PadDevice>& devices = Input::Devices();
 	const int selected = Input::FindDevice(m_m2PadId[player]);
 	const bool selectedMissing = selected < 0 && !m_m2PadId[player].empty();
@@ -833,10 +831,8 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		ImGui::EndCombo();
 	}
 	ImGui::SameLine();
-	// Manual, because scanning for controllers is expensive enough to be felt (~100 ms - see
-	// Input::RefreshDevices) and there is no cheap way to be told about it. Doing it on a timer
-	// stuttered the game every couple of seconds; doing it on WM_DEVICECHANGE would stutter it
-	// whenever anything at all was plugged into the machine. A button costs nothing until asked.
+	// Manual: scanning costs ~100 ms (see Input::RefreshDevices) and there is no cheap way to be
+	// told about a new pad, so a button is the only way that does not stutter the game.
 	if (ImGui::Button("Rescan"))
 	{
 		Input::RequestDeviceRescan();
@@ -858,9 +854,8 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		m_pageModified = true;
 		m_m2KeyBinds[player] = Input::DEFAULT_KEY_BINDS[player];
 		m_m2PadBinds[player] = Input::DEFAULT_PAD_BINDS[player];
-		// The pad defaults are Xbox button names, so the matching default device is the
-		// player's XInput slot - keep whatever is selected if it is not an XInput pad, since
-		// resetting a DirectInput stick to "XInput Controller 1" would just unplug the player.
+		// The pad defaults are Xbox buttons, so the matching device is the player's XInput slot.
+		// A DirectInput pad is left selected - resetting it would just unplug the player.
 		if (m_m2PadId[player].empty() || m_m2PadId[player].compare(0, 7, "xinput:") == 0)
 		{
 			m_m2PadId[player] = "xinput:" + std::to_string(player);
@@ -1051,8 +1046,8 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	if (!advanced && (prompt.deviceMask & 2))
 	{
 		const std::vector<Input::PadDevice>& devices = Input::Devices();
-		// A device list that grew mid-prompt (someone plugged a pad in) would otherwise index
-		// past the primed edges; treat anything new as "nothing held" rather than skipping it.
+		// A list that grew mid-prompt would index past the primed edges; treat new entries as
+		// "nothing held".
 		m_stfCapturePrevPadButtons.resize(devices.size(), 0);
 		for (size_t i = 0; i < devices.size() && !advanced; i++)
 		{

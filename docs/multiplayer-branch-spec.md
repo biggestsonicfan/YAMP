@@ -1,0 +1,1119 @@
+# YAMP — `multiplayer` branch specification
+
+**Handoff document for reimplementation.**
+
+| | |
+|---|---|
+| Baseline commit | `45c0d9ae273096679833d540a3714399c8a1d6e0` — *"Update ModUtils to fix compilation under VS2022"*, 2024-05-12 |
+| Branch | `multiplayer` (tip `9baa02e`, *"Launcher: Escape/Exit quit path with a confirmation prompt"*) |
+| Delta | 21 commits, 152 files, **+46,745 / −4,637** lines (see §16 for the one change still outside git) |
+| Platform | Windows x64, MSVC (VS2022), C++17, premake5 |
+
+At the baseline, YAMP was a single-purpose launcher: it hosted **one** arcade module — Virtua Fighter 5: Final Showdown extracted from Yakuza 6 — with no audio, one hard-coded keyboard layout, and a DX11 render path. This branch turns it into a **multi-title, multi-engine-generation arcade module host** with audio, configurable input, integrity verification, a game launcher, homebrew ROM support and online play.
+
+---
+
+## Table of contents
+
+1. [What "hosting a module" means](#1-what-hosting-a-module-means)
+2. [Scope of the delta](#2-scope-of-the-delta)
+3. [Build system](#3-build-system)
+4. [Source layout](#4-source-layout)
+5. [Process entry & game selection](#5-process-entry--game-selection)
+6. [Cross-cutting services](#6-cross-cutting-services)
+7. [Presentation layer (`RenderWindow`)](#7-presentation-layer-renderwindow)
+8. [The `pxd` platform layer — three engine generations](#8-the-pxd-platform-layer--three-engine-generations)
+9. [The `m2ftg` host family (Model 2 arcade boards)](#9-the-m2ftg-host-family-model-2-arcade-boards)
+10. [The VF5FS hosts](#10-the-vf5fs-hosts)
+11. [CRIWARE audio](#11-criware-audio)
+12. [Homebrew Model 2B ROM hosting](#12-homebrew-model-2b-rom-hosting)
+13. [Debug tooling](#13-debug-tooling)
+14. [Netplay](#14-netplay)
+15. [Settings file reference](#15-settings-file-reference)
+16. [Working-tree state at hand-off](#16-working-tree-state-at-hand-off)
+17. [Suggested reimplementation order](#17-suggested-reimplementation-order)
+18. [Verification methodology used](#18-verification-methodology-used)
+
+---
+
+## 1. What "hosting a module" means
+
+Every game YAMP runs is a **DLL extracted from a retail Yakuza/Judgment game** (`*-pxd-w64-*.dll`). Inside the parent game those DLLs are driven by the host executable's own scene code. YAMP replaces that host: it builds the engine context structures the module expects, hands them to the module's `module_start`, then calls `module_main` once per frame and composites the module's output texture into its own swapchain.
+
+The protocol is not documented anywhere. **Every structure layout, symbol RVA and byte pattern in this branch was reverse-engineered** from the module DLLs and from the parent games' host code (Ghidra + live debugging). The governing engineering rule throughout the codebase, stated repeatedly in comments:
+
+> **Always find and port the game's own implementation. Never invent a YAMP-side approximation.**
+
+Practical consequences a reimplementer must respect:
+
+- Structure layouts are pinned by `static_assert` on `sizeof` and every meaningful `offsetof`. Those asserts are the specification — do not relax them.
+- Hosts resolve module symbols by **byte pattern scan**, not by export name (the modules export almost nothing). A wrong-build DLL therefore mis-patches *silently*; this is the reason §6.4 exists.
+- Some DLLs are ASLR'd (`DYNAMIC_BASE`) and some are not. **Never assume base `0x180000000`.** This was the cause of the Fighting Vipers black screen.
+
+---
+
+## 2. Scope of the delta
+
+### 2.1 Games supported
+
+| Switch | Game | Parent game | Engine gen. | Renderer | Host |
+|---|---|---|---|---|---|
+| *(default)* / `-stf` | Sonic the Fighters | Lost Judgment | LJ | DX12 | `m2ftg/LJ` |
+| `-fv` | Fighting Vipers | Lost Judgment | LJ | DX12 | `m2ftg/LJ` |
+| `-mr` | Motor Raid | Lost Judgment | LJ | DX12 | `m2ftg/LJ` |
+| `-vf2` | Virtua Fighter 2 | Yakuza: Like a Dragon | YLAD | DX11 | `m2ftg/YLAD` |
+| `-vf2-k2` | Virtua Fighter 2 | Yakuza Kiwami 2 (GOG) | K2 | DX11 | `m2ftg/K2` |
+| `-von-k2` | Virtual On (*"omg"* = Operation Moon Gate) | Yakuza Kiwami 2 (GOG) | K2 | DX11 | `m2ftg/K2` |
+| `-vf5fs` | VF5: Final Showdown | Yakuza 6 | Y6 | DX11on12 | `vf5fs/Y6` |
+| `-vf5fs-lj` | VF5: Final Showdown | Lost Judgment | LJ | DX12 | `vf5fs/LJ` |
+| `-vf5fs-ylad` | VF5: Final Showdown | Yakuza: Like a Dragon | YLAD | DX11 | `vf5fs/YLAD` |
+| *(no argument)* | Game-select launcher | — | — | — | `GameLauncher` |
+
+Only `-vf5fs` existed at the baseline. **Nine playable titles** exist at the tip.
+
+### 2.2 Feature areas added
+
+| Area | Files | Approx. size |
+|---|---|---|
+| CRIWARE audio (HCA + ADX decoders, Atom engine, XAudio2) | `source/criware/` | ~3,400 lines |
+| `pxd` platform layers ×3 generations | `source/pxd/` | ~5,300 lines + 12.8k vendored D3D12MA |
+| m2ftg host family (4 hosts) | `source/m2ftg/` | ~6,200 lines |
+| VF5FS hosts (3) | `source/vf5fs/` | ~2,500 lines |
+| Netplay plugin + loader + ABI | `plugin/yampnet/` (~3,980) + `source/net/` (~1,070) | ~5,050 lines |
+| Input binding layer | `source/input/` | ~1,100 lines |
+| Verification / launcher / settings / UI | `source/*.cpp` | ~5,000 lines |
+
+---
+
+## 3. Build system
+
+`premake5.lua` defines **two projects** in the `YAMP` workspace.
+
+### 3.1 `YAMP` (WindowedApp)
+
+```lua
+files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*",
+        "source/wil/*", "source/imgui/*", "source/Utils/*", "source/input/*",
+        "source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
+        "source/pxd/**.h",   "source/pxd/**.cpp",
+        "source/m2ftg/**.h", "source/m2ftg/**.cpp",
+        "source/vf5fs/**.h", "source/vf5fs/**.cpp" }
+links { "bcrypt", "dinput8", "dxguid" }
+```
+
+- `bcrypt` — SHA-256 for module integrity (`GameVerify.cpp`).
+- `dinput8` / `dxguid` — the non-XInput half of the controller layer.
+- The source list lives **in the project**, not in the shared `workspace "*"` block. Once the netplay plugin became a second project, a shared block made it inherit the entire emulator.
+
+### 3.2 `YampNet` (SharedLib → `yampnet.dll`)
+
+```lua
+files { "plugin/yampnet/**.h", "plugin/yampnet/**.cpp", "source/net/YampNet.h" }
+includedirs { "source/net", "source" }
+links { "ws2_32", "crypt32", "secur32" }
+```
+
+Deliberately a **separate project**. YAMP never links against it — it is `LoadLibrary`'d at runtime, so a release ships without netcode simply by omitting the DLL. `YAMP.vcxproj` has no dependency on it. It does include `source/m2ftg` + `source/pxd` headers because the plugin writes `execute_info.pad[]` directly; the `yampnet_layout` handshake (§14.2) converts that coupling from a corruption risk into a clean load-time refusal.
+
+### 3.3 Shared settings
+
+- `cppdialect "C++17"`, `staticruntime "on"`, `/sdl`, `warnings "Extra"`, `/permissive-`.
+- `disablewarnings { "4324" }` — "structure padded due to alignment specifier" fires ~130× because the RE'd structs use `alignas` deliberately; every one is pinned by `static_assert`, so the warning is never actionable and muting it keeps real warnings visible.
+- Configurations: `Debug`, `Release`, `Master`. `Master` adds `NDEBUG`, `RESULT_DIAGNOSTICS_LEVEL=0`, `symbols "Off"`. Non-Debug gets `optimize "Speed"` + LTO.
+- **Per-file override:** `HcaDecoder.cpp`, `AdxDecoder.cpp`, `AtomEngine.cpp` are compiled with `optimize "Speed"` even in Debug — they decode whole BGM streams at cue start, and an unoptimised build misses the chunked-start splice.
+
+### 3.4 Submodules
+
+| Path | Repo | Status |
+|---|---|---|
+| `source/Utils` | `CookiePLMonster/ModUtils` | Pre-existing and still the only submodule. Provides `MemoryMgr.h`, `Trampoline.h`, `Patterns.*`, `ScopedUnprotect.hpp`. See §16 for one uncommitted fix inside it that a fresh clone will need. |
+
+> **Build note.** `build/` is gitignored; premake is all a fresh clone has. `premake5.lua` is the source of truth — never hand-edit `build/YAMP.vcxproj`. Config names are `"Debug Win64"` / `"Master Win64"` etc. with platform `x64`.
+
+> **Historical trap, now fixed:** `DebugLog.{h,cpp}` originally lived inside `source/Utils`, a third-party submodule tracked by neither repo — so it existed on one machine only and a clone could not build. Moved to `source/` and tracked.
+
+---
+
+## 4. Source layout
+
+The tree was restructured twice (commits `b2c84a2`, `bc9bfaf`). The final rule: **platform layers, hosts, and cross-cutting services are separate, and nothing generation-specific sits in a folder implying it is shared.**
+
+```
+plugin/yampnet/        the netplay DLL (own project, plain-C ABI to YAMP)
+source/
+  *.cpp/h              process entry, window, UI, settings, verification, launcher, logging
+  criware/             CRI Atom reimplementation (HCA/ADX decoders, ACB/AWB, XAudio2)
+  imgui/  wil/  Utils/ vendored
+  input/               binding layer shared by EVERY game (keys, XInput, DirectInput, pad policy)
+  net/                 netplay plugin LOADER + the shared YampNet.h ABI. No netcode here.
+  pxd/                 the pxd PLATFORM layer, one folder per engine generation
+    (root)             generation-NEUTRAL only: Imports.h, pxd_shader.h
+    LJ/                Lost Judgment era: sl 0xF000 / gs 0x388A00 / ct 0x30, DX12 host cdevice
+    Y6/                Yakuza 6 era: its own sl/gs/file_access/async_request/cs_game/sys_util
+    K2/                Kiwami 2 era: sl 0xF3C0 (gs 0x202140 stays opaque)
+  m2ftg/               the Model 2 arcade host family
+    (root)             m2ftg.h (module protocol), ImportSymbols.h, ModuleArgs, DisplayModes,
+                       HostUI, file_access.cpp
+    ELF/               homebrew ROM support: ElfRom, CharRamFix
+    LJ/                StF / FV / MR host + Patch + HleHooks + DebugWindows
+    YLAD/              VF2 (Like a Dragon) host
+    K2/                VF2 + Virtual On (Kiwami 2) host
+  vf5fs/               VF5FS hosts ONLY (no platform code)
+    (root)             vf5fs.h — the shared module_start protocol
+    Y6/  LJ/  YLAD/    one host per build
+```
+
+Each move was verified **by include graph first**. `pxd/Y6` in particular looked like shared VF5FS code, but nothing outside `vf5fs/Y6` included any of it.
+
+> Older code comments and commit messages reference pre-restructure paths (`source/LJ`, `source/Y6`, `source/DX12`, `m2ftg/M2Input`). Map them onto the table above.
+
+---
+
+## 5. Process entry & game selection
+
+`source/Main.cpp` (`wWinMain`):
+
+1. Debug-only `SuppressDebugCrtAsserts()` — the pxd engine's trap/log path formats with exotic and often mismatched varargs. Under the debug UCRT this raises `_CrtDbgReport` assertions in a tight logging loop, which with a debugger attached becomes an inline `int3` and halts forever. Route CRT reports to the debugger and force `_CrtDbgReport` to return "continue" via `_CrtSetReportHook2`/`W2`.
+2. `TerminateProcess` scope-exit hack — shutdown crashes on mismatched allocators. **Known outstanding issue.**
+3. ImGui context creation; `io.IniFilename = nullptr`.
+4. Command-line parse. **Ordering matters**: `-vf2-k2` must be tested before `-vf2`; `-vf5fs-lj` and `-vf5fs-ylad` before `-vf5fs`. Each is a prefix of the shorter switch.
+5. `-frames N` → `gGeneral.SetFrameLimit(N)`. After N frames a host leaves its loop **normally** and shuts the module down. This exists because a killed process cannot be distinguished from a crashed one: terminating a debuggee mid-frame faults whichever worker thread was inside an allocator, which looks exactly like a real module bug. Smoke tests get a deterministic length *and* a real teardown path.
+6. No game argument → `Launcher::Run()`.
+7. Otherwise: `gGeneral.SetGameId(...)` → `<host>::LoadDLL()` (which runs the verification gate) → `<host>::PreInitialize()` → construct `RenderWindow` → `<host>::Run(window)`.
+8. The LJ m2ftg path additionally seeds settings before the DLL check (so the UI has something to read), then `net::ParseCommandLine()` + `net::Load()` before `Run`, and `net::Unload()` after.
+
+---
+
+## 6. Cross-cutting services
+
+### 6.1 `YAMPGeneral` (`source/YAMPGeneral.{h,cpp}`)
+
+Global singleton `gGeneral`. Added on this branch:
+
+- `enum class GameId { VF5FS, StF, VF2, FV, MR, VF5FS_LJ, VF2_K2, VON_K2, VF5FS_YLAD, Launcher }`.
+- `GetArcadeGameName()`, `GetParentGameName()`, `GetGameTag()` — display names and a short log prefix (`"StF"`, `"FV"`, `"VF5FS-LJ"`, …) so logs from shared code paths name the game actually running.
+- `IsModel2ArcadeGame()` — true only for StF/FV/MR/VF2/VF2_K2/VON_K2. These render a 4:3 240p-era image on a CRT cabinet, so aspect boxing and the CRT filter belong to them. Every VF5FS build is a modern widescreen game that must **not** get either treatment. The settings are shared (one `[StF]` section), so the presentation path gates on the *game*, not on the flag.
+- `SetDataPath()` — **portable mode**: user data (settings.ini + saves) lives next to `YAMP.exe`, shared by every game. Resolved from the module path, **not the CWD** — games booted from the launcher run with the game folder as CWD.
+- `GetFrameLimit()` / `SetFrameLimit()`.
+
+### 6.2 `DebugLog` (`source/DebugLog.{h,cpp}`)
+
+Unified diagnostics replacing ad-hoc `sprintf_s` + `OutputDebugStringA` pairs.
+
+- `DebugLog(fmt, ...)` → `OutputDebugStringA`.
+- `DebugLogFile(fmt, ...)` → same, plus appended and flushed per line to `d3d12_debug.log` in the CWD (survives a process death with no debugger).
+- `DebugLogV(fmt, va_list)` → forwarding entry for local variadic wrappers.
+
+Gate: `YAMP_DEBUG_LOGGING` is `1` iff `DEBUG || _DEBUG`. **Both** are tested deliberately: `DEBUG` is premake's own (tracks the configuration), `_DEBUG` is the MSVC debug CRT. Keying off `_DEBUG` alone would silently disable all logging if the Debug config were switched to the release runtime — a common speed tweak. In Release/Master the macros compile away entirely, arguments are not evaluated, and the log filenames do not survive into the binary. `RenderWindow.cpp`'s `pso_stream.log` / `heaps.log` dumps use the same gate.
+
+### 6.3 `GameLauncher` (`source/GameLauncher.{h,cpp}`, ~680 lines)
+
+The no-argument path. Full-screen ImGui window that:
+
+- Discovers which arcade modules are present, via `Verify::GameInstallRoots()` (below) plus the folders beside `YAMP.exe`.
+- Shows per-game verification status (module hash verdict + parent-game verdict).
+- Offers the Model 2 **Render resolution** picker and `Model2WindowMatchesRender` inline.
+- **Play** launches a *child process* — the same `YAMP.exe` with the game's switch and **CWD set to the game directory**.
+- `Rescan` re-runs discovery.
+- F1 opens the shared settings window.
+- **Escape / Exit quit path.** With the `Fullscreen` setting on, the launcher window is a borderless `WS_POPUP` — no title bar, no close button — and the launcher loop originally had no key handling at all, so the process could only be killed. Escape raises a *"Do you really want to quit?"* modal, with a matching `Exit` button beside Play/Rescan for mouse and pad users.
+
+  Escape's **precedence** matters, so it cannot quit out from under something else: the F1 settings window closes first (hence the `IsSettingsOpen()` / `CloseSettings()` accessors on `YAMPUserInterface`), then the prompt itself cancels on a second press, and any other open ImGui popup is left to ImGui's own Escape handling. That last step is needed because the key still reaches `WndProc` regardless; **the modal case is YAMP's own because this ImGui build's `NavCancel` only closes non-modal popups.** The modal's default nav focus is **Cancel** — the destructive button must never be one Enter away.
+
+### 6.4 `GameVerify` (`source/GameVerify.{h,cpp}`, ~740 lines)
+
+Two questions, answered with two **deliberately different** methods.
+
+**"Is this arcade module a build YAMP can host?"** → full **SHA-256** of the file against a known-build table. Because every host resolves symbols by byte pattern and hard-coded RVA, a DLL from a different build mis-patches silently instead of failing cleanly. An exact hash is the only honest answer. A non-matching DLL is **blocked before `LoadLibrary` ever runs its `DllMain`**.
+
+**"Does the user own the parent game?"** → **PE header identity** of the parent executable (`TimeDateStamp` + `SizeOfImage` + file size). Those executables are hundreds of megabytes; hashing them would add seconds to every boot for no extra certainty. A missing parent game **blocks**; a parent game of an unrecognised build only **warns** — the arcade DLL is the file compatibility actually depends on.
+
+Statuses: `ModuleStatus{Verified, UnknownBuild, OutdatedBuild, Unreadable, NotChecked}`, `ParentStatus{Verified, UnknownBuild, NotFound, NotChecked}`.
+
+Known-good module table (all values are load-bearing):
+
+| Game | SHA-256 | Size | TimeDateStamp | Build |
+|---|---|---|---|---|
+| StF | `DF7FE561ED3B2954066CC138C179B9DD5CE2F65D0EC4A4104A7AD161236A07BB` | 2,086,896 | `0x637B11A3` | Lost Judgment (2022-11-21) |
+| FV | `0F1DAD193533C4C250EDA54BD3C5D63751D1E3431E4DD8F702010777B9754EC0` | 2,078,704 | `0x637B119D` | Lost Judgment |
+| MR | `9FCBAE38DD7DC04DD2B29BF09576594FA0ED5A6089D82272E200E7A1C59A9623` | 2,699,248 | `0x637B1190` | Lost Judgment |
+| VF5FS-LJ | `2A83D302768D7AFA5F2EF0B0D0481CF281F081FCE1D9CCFF3CA34EE94358E36B` | 6,152,688 | `0x637B1259` | Lost Judgment |
+| VF2 (YLAD) | `3B3AF23E2075C84F996F7194BE477600C1D887965311702272A324FCBE7B1818` | 1,648,128 | `0x601763D1` | Like a Dragon (2021-02-01) |
+| VF5FS-YLAD | `A022DDD4185489146B9D757B8E8590467C5B1F18A1139144FCCA3676DB359B69` | 5,946,880 | `0x601766BE` | Like a Dragon |
+| VF5FS (Y6) | `48787216D767F3566ACA129D848A7931E6D2797A59D01216D6F92C24702ED654` | 5,389,312 | `0x60AB8422` | Yakuza 6 (2021-05-24) |
+| VF2-K2 | `4D9473F052822CFA1EA621F7C10D0CE46A0B18178533EFCB325B13E0C03DCB6A` | 1,614,848 | `0x5D91BBC9` | Kiwami 2 GOG (2019-09-30) |
+| VON-K2 | `99AD0D31AE5949F6C5F521119FC9E26FF5CA602B1629583CBF478D1FCDC4D39C` | 4,734,976 | `0x5D91BBCA` | Kiwami 2 GOG |
+
+Explicitly-rejected pre-update builds, recognised by timestamp alone (they get "update your game" rather than the generic unknown-build text): `0x603E22E3`, `0x606D6969`, `0x6075A65A`.
+
+Known parent executables: `LostJudgment.exe` (`0x641412B9` / `0x1AE88000` / 422,131,184), `YakuzaLikeADragon.exe` (`0x6141B906` / `0x18C91000` / 387,532,936), `YakuzaKiwami2.exe` (`0x644A6712` / `0x0416A000` / 44,795,392), `Yakuza6.exe` (`0x60AB8368` / `0x039DC000` / 38,833,000). LJ and YLAD keep theirs in `runtime/media/`; Yakuza 6 and Kiwami 2 at the install root.
+
+`Verify::GameInstallRoots()` — **shared** by launcher discovery and the ownership search: every Steam library's `steamapps/common/*` (registry + `libraryfolders.vdf`), every GOG game from the registry, plus `YAMP.exe`'s own folder and each folder beside it (one level, directories only). A source missing here makes its games both undiscoverable *and* unverifiable.
+
+### 6.5 Input layer (`source/input/`)
+
+Shared by **every** game (all four m2ftg boards and all three VF5FS builds). Moved up out of `source/m2ftg` because it was never m2ftg-specific — `YAMPSettings.h` itself includes it.
+
+**`Input.h` — actions.** `Action_{Up,Down,Left,Right,Punch,Kick,Guard,Start,Coin,PG,PK,KG,PKG,Back,Test,Service}`. The first `WIZARD_ACTION_COUNT` (= `Action_Coin + 1` = 9) are what the "Program All Inputs" wizard walks through, in that prompt order. `Action_Test` / `Action_Service` are the **cabinet service-panel switches**, wired to the emulated I/O board's system port rather than to a player's buttons (m2ftg boards only). They are per-player only because bindings are stored that way — either player's binding closes the one cabinet switch.
+
+**Two disjoint controller ranges.** `PadButton` values 1..16 are XInput and are **frozen** (settings.ini stores them by number). DirectInput inputs occupy their own range: `Pad_Btn1 + n - 1` for numbered buttons (24 of them), then the POV hat's four directions, then each of 6 axes as a pair of digital directions (`Pad_Axis1Minus + (n-1)*2`, +1 for positive). `Pad_Count <= 64` — `PadState::buttons` is a 64-bit mask.
+
+Rationale: an XInput pad has a known button contract and keeps real names; a DirectInput pad (arcade encoders, fight sticks, PSX/Saturn adapters, most third-party pads) does not, so its inputs are numbered. A binding therefore only fires on the *kind* of pad it was made on — "A" and "Button 1" must not silently alias. Axes must be bindable because plenty of panels have no hat at all; they are numbered rather than named X/Y/Z because DirectInput does not guarantee an axis lands in the `DIJOYSTATE2` slot matching its reported name.
+
+**Defaults.** Keyboard keeps the historical StF layout — WASD, K/L/J = P/K/G, F = Start, Tab = Back, I/O/U/M = P+G / P+K / K+G / P+K+G; Coin/Test/Service use MAME's `5`, F2, F3, **Player 1 only** (one cabinet fixture). Player 2 has no keyboard defaults — run the wizard. Pad defaults follow the module's own slot template: A=P, B=K, Y=G, LT=P+G, LB=P+K+G, RT=P+K, RB=K+G; X free.
+
+**`MODULE_ASSIGN[8]` — the module-facing table.** This is the single source of truth for what each button bit *means* to the module, and it is fixed: remapping is entirely host-side. Two module facts it depends on, both read out of the StF DLL:
+
+- `assign_t` → M2 button code (lookup `0x180177B90`, consumed by `FUN_180003AC0`): 1=none, 2=p(0x07), 3=k(0x08), 4=g(0x09), 5=pg(0x6F), 6=pkg(0x72), 7=pk(0x71), 8=kg(0x70).
+- The slot table (`0x180126770`) keys each slot by a button mask **in the module's bit order**, and the engine's pad conversion (`FUN_180062470`) *permutes* the four face bits on the way in: our A(bit0)→module bit2, B(bit1)→bit1, X(bit2)→bit3, Y(bit3)→bit0. So the slots run **Y, B, X, A, LT, LB, RT, RB** in our terms; shoulders pass through unpermuted.
+
+```cpp
+inline constexpr uint8_t MODULE_ASSIGN[8] = { 4, 3, 5, 2, 6, 7, 8, 1 };
+//  slot0 mask0x01 <- our Y  = Guard -> g       slot4 mask0x40 <- LT = P+K+G -> pkg
+//  slot1 mask0x02 <- our B  = Kick  -> k       slot5 mask0x10 <- LB = P+K   -> pk
+//  slot2 mask0x08 <- our X  = P+G   -> pg      slot6 mask0x80 <- RT = K+G   -> kg
+//  slot3 mask0x04 <- our A  = Punch -> p       slot7 mask0x20 <- RB = none
+```
+
+Reading the mask order as our own order is what used to rotate Punch / Barrier / Punch+Barrier between each other. Identical mask order confirmed in FV and both VF2 builds (`0x123740` / `0x106860` / `0x10EB50`). Motor Raid and Virtual On ship no table of this shape — their slot meanings are unconfirmed.
+
+**Device identity.** A `PadDevice` is identified by `id` — `"xinput:<slot>"` or `"dinput:<instance guid>"` — **never a list position**. The list shifts as devices come and go, and an index would hand a player whoever moved into that slot. settings.ini stores the id; the old integer key migrates silently.
+
+**Polling economics.** `RefreshDevices()` costs ~100 ms (`IDirectInput8::EnumDevices` walks the whole HID stack, dominated by any installed virtual-pad driver) — that is six dropped frames at 60 fps. It runs at startup, from the Controls page's **Rescan** button, on an XInput slot appearing/vanishing (free — the poll already reports it), and when a device stops answering. **Deliberately not** on `WM_DEVICECHANGE`, which fires for any device node on the system (a headset, a phone charging) and would stutter a match over something unrelated. Per-frame `PollPads()` of already-open devices costs ~0.005 ms.
+
+**`DirectInputPad.cpp`.** Cooperative level `DISCL_BACKGROUND | DISCL_NONEXCLUSIVE`. XInput pads are *also* enumerated by DirectInput as generic controllers with mangled triggers — filtered out via the Microsoft-standard marker: every XInput device's interface path (`DIPROPGUIDANDPATH`) contains `"ig_"`. Axes: `DIPROP_RANGE` is requested at ±1000, but a device may refuse it and keep its own scale (usually 0..65535 **resting in the middle**) — normalising that as if centred on zero would peg the stick in a corner, so the real range is read back per axis. `dwOfs / sizeof(LONG)` is the authoritative `DIJOYSTATE2` slot. Deadzone 0.25 radial (matching the XInput reader); digital-direction threshold 0.6, well past the deadzone so a drifting stick cannot capture a binding prompt. POV hat treated as the 8-way switch it physically is (diagonals set both directions); centred is reported as `-1` or low word `0xFFFF` depending on driver. A stick reported *only* as a hat falls back to the hat for steering.
+
+**`Pad.cpp` — `pxd::csl_pad::set_state(index)`.** The policy that turns active bindings into engine pad state. Notable rule: the analog stick also steers, like the cabinet lever — **except** when movement is bound to axis directions. A DirectInput encoder may land its axes in slots that do not match their meaning (one tested "USB Gamepad" encoder puts its vertical axis in the X slot), so feeding raw values in alongside explicit bindings can add deflection at ninety degrees. **Where the bindings are explicit, they are the authority.**
+
+---
+
+## 7. Presentation layer (`RenderWindow`)
+
+`RenderWindow.cpp` grew from ~380 to 1,902 lines.
+
+**Device model.** `RenderWindow` **always** creates a D3D12 device and drives the swapchain from the D3D12 queue; the `ID3D11Device` it hands out is the **11-on-12** one. (This was clarified in `de7796c`, which removed unreachable DX11 branches from the LJ pxd layer that could never win against the always-present D3D12 device.)
+
+**Threading.** The window runs on its own thread; `m_shuttingDownWindow` is an atomic. `RequestResize(w,h)` is called from `WndProc` on `WM_SIZE` and applied by the render thread at the top of `BeginFrame` (packed `(w<<32)|h` atomic). Without this the swapchain stayed at creation size forever — DXGI stretched the stale backbuffer (breaking aspect) and ImGui rendered at backbuffer scale while the mouse reported window coordinates.
+
+**The 11-on-12 backbuffer barrier.** `d3d11on12` only emits the *Release*-side barrier (`RENDER_TARGET → PRESENT`); it never transitions the backbuffer **into** `RENDER_TARGET` on Acquire (confirmed via `ResourceBarrier` trace). The backbuffer stays `COMMON`, the composite/ImGui draws are dropped, and a black frame is presented. A small dedicated D3D12 command list issues the missing `COMMON → RENDER_TARGET` barrier each frame before the blit.
+
+**Blit / compositing.**
+
+- `BlitGameFrame(SRV, alphaBlend)` — the game frame.
+- `BlitDX12Texture(ID3D12Resource*)` — composites a DX12-native texture (StF's output RT) via 11on12 wrap → D3D11 SRV → `BlitGameFrame`.
+- `ClearBackbuffer()` — clear + bind for ImGui-only frames (the launcher).
+- `SetGameAspectRatio(ar)` — the *game's* native aspect. Model 2 titles are 496×384 internal upscaled to a 1024×768 display texture = 4:3, and must be **pillarboxed** in a widescreen window, not stretched.
+- `SetGameStretchToFill(bool)` — "Fill Window" mode.
+- `SetModuleSourceRect(w,h)` — **critical for render-resolution support.** The m2ftg modules always render into a 1024×768 texture but lay their viewport out at whatever their own `-model2`/`-vga`/… option selected, leaving a smaller picture in the top-left corner with the remainder black. Sampling the full texture would stretch that black in with it; this restricts the blit triangle's UVs to the drawn sub-rect, and the existing aspect-corrected viewport then scales and centres it as before.
+
+**CRT filter.** An **exact port of Lost Judgment's own PSO 9775 pixel shader**, compiled at runtime on first use, latching off for the session if compilation ever fails. Like LJ, the shader evaluates into a **window-sized intermediate** target (LJ's pause-menu captures prove its target follows the window), clamped up to ≥1080p tall so small windows don't alias the 384 scanlines into broken segments.
+
+Two fixes the source sub-rect exposed:
+1. The CRT's **second pass samples the full-size intermediate**, not the module's output — so it needs an unscaled vertex buffer (`m_vbFull`) or it magnifies a corner of the finished frame over the whole window.
+2. Its scanline/grille ramps are anchored to the **picture**, so they now work in normalised picture space with only the fetch scaled back.
+3. LJ's 16 px side crop is **dropped** — it only makes sense for LJ's own 1024-wide layout, and once render resolution became selectable it ate into the picture instead of the padding.
+
+**Descriptor-heap plumbing (free functions, for the DX12 hosts).** `GetDllRingCbvSrvHeap()`, `GetDllRingSamplerHeap()`, `GetCapturedRootSignature()`. The StF DLL creates its own large shader-visible heaps (CBV/SRV/UAV ~1M + SAMPLER 2048) and binds them; `PatchGs` wires the `gs+0x7550` descriptor rings to reference **these** (captured by the device `CreateDescriptorHeap` hook) so the DLL's root-table GPU handles resolve into the bound heap. The DLL never calls `SetGraphicsRootSignature` — the host must, re-binding after each `SetPipelineState` in the command-list hook.
+
+**Per-frame COM churn removed** (`de7796c`): RTVs over wrapped backbuffers are now built once alongside the wrappers in `CreateWrappedBackbuffers` (and dropped with them in `ResizeOn12`, which must not hold references across `ResizeBuffers`); `IDXGISwapChain3` is queried once at creation instead of twice per frame.
+
+---
+
+## 8. The `pxd` platform layer — three engine generations
+
+`pxd` is the SEGA engine the modules run on. YAMP reimplements the parts of it a host must provide.
+
+### 8.1 Generation-neutral (`source/pxd/`)
+
+**`Imports.h` — `pxd::ImportsT<SymbolT>`.** The resolved-symbol map every host builds by pattern-scanning its module DLL. The *container* is generic; the *set* of symbols is per-DLL-family, so this is a template over the host's own enum. Each host writes its own `enum class ImportSymbol`, `using Imports = pxd::ImportsT<ImportSymbol>`, and `Imports BuildSymbolMap(void* dll)`. Backed by a `std::multimap`. `GetSymbol` asserts on absence; **`TryGetSymbol` returns null** for symbols that exist only in some DLLs (e.g. `I960_FETCH_EXEC`).
+
+**`pxd_shader.h`** — shared by both `gs.h` variants.
+
+### 8.2 Generation comparison
+
+| | **Y6** (Yakuza 6) | **LJ** (Lost Judgment) | **YLAD** (Like a Dragon) | **K2** (Kiwami 2 GOG) |
+|---|---|---|---|---|
+| `sl` context | own | **0xF000** | 0xF000 | **0xF3C0** |
+| `gs` context | own | **0x388A00** | 0x3820C0 | **0x202140** |
+| `ct` context | — | 0x30 | 0x30 | 0x30 |
+| Renderer | DX11 | DX12 | DX11 | DX11 |
+| Folder | `pxd/Y6` | `pxd/LJ` | *(uses `pxd/LJ` sl)* | `pxd/K2` (sl only) |
+
+### 8.3 `pxd/LJ` — the Lost Judgment generation (largest)
+
+Files: `sl.{h,cpp}` (1,117 lines), `gs.{h,cpp}` (1,063), `pxd_types.h` (454), `file_access.h`, `async_request.{h,cpp}`, `cs_game.{h,cpp}`, `sys_util.{h,cpp}`, `sl_internal.h`, plus the host-side bring-up: `PatchGs.{h,cpp}` (632), `HostCdevice.{h,cpp}` (1,117), `DllMutex.h`, and vendored `D3D12MemAlloc.{h,cpp}` (12,792).
+
+Used by: the m2ftg LJ hosts, the LJ VF5FS host, and (sl only) the YLAD hosts.
+
+**`csl_pad`** — the engine pad: `m_now/m_push/m_pull/m_prev` bitfields, `m_x1/m_y1/m_x2/m_y2` floats, `int m_button_frame[32]`, `uint8_t m_buttons[32]`, `uint8_t m_prev_buttons[32]`, `m_port`, `m_user_id`, `m_is_connected`, `m_is_remote`, tail gap. `sizeof == 0x170`. `set_state(index)` is implemented in `source/input/Pad.cpp`.
+
+**`pxd::lj_pad_t`** — the LJ-era *extended* pad, `sizeof == 0x190`, `m_buttons` at `+0xA0`, `m_port` at `+0xE0`. This is what m2ftg's `execute_info.pad[]` holds and what the netplay pad codec encodes.
+
+**`PatchGs(gs::context_t*, const RenderWindow&)`** — fills in everything the LJ host normally puts into a fresh `gs::context_t` before the module renders: the descriptor blocks and shader-visible copy rings, the tex-id tables, the device context, and the host cdevice behind `cdevice_common::g_pD3DDevice`.
+
+**`ResetCbvSrvRingCursors(gs::context_t*)`** — call at the start of each frame. The CBV/SRV descriptor-copy ring cursors are per-frame transient; without the reset they grow past the heap and `CopyDescriptors` access-violates (issue id 646).
+
+**`HostCdevice.cpp` — `BuildHostCdevice(device, queue, cdeviceCtor)`.** Builds the pxd host "cdevice" object the DX12 modules expect behind `cdevice_common::g_pD3DDevice`. Layout reverse-engineered from a live Lost Judgment dump:
+
+```
++0x08   ID3D12Device*
++0x38   intermediate-buffer freelist head (packed: lo48 = node, hi16 = ABA)
++0x40   { 0x20, 0x20, 0x20, 0x08 } metadata
++0x68   allocator object (vtable alloc/free)
++0x16e0 0x20-block node pool (deferred; not on the boot path)
++0x17b0 embedded resource factory (vf+8 = create ID3D12Resource)
++0x18d8 / +0x18dc  rwspinlocks (zeroed)
+```
+
+The DLL's **own** constructor (`CDEVICE_CTOR`) is called on our buffer so the pxd engine initialises every field, including the real `cd3d12_mem_allocator` resource factory at `+0x17b0`. `gs::initialize_module` copies `context->export_context.sbgl_context.p_value[0]` into `g_pD3DDevice`, so `PatchGs` must place **this** pointer there, not the D3D11 device.
+
+Also here: `BuildRenderCommandContext()` (a dedicated 0x280-layout pxd command context for the `cgs_device_context+0xC8` "command recording" slot, left recording) and **`SetGameDllRange(void* dllBase)`** — registers the loaded module's real base+size for the "did this call come from the module?" return-address checks in the hooks. **This was the Fighting Vipers black screen**: StF loads at its fixed preferred base `0x180000000`, but FV is built `DYNAMIC_BASE` and relocates, so hardcoded range checks never matched and every RA-gated hook (shadow-copy list, resolve-dst tracking, exec-caller attribution) silently did nothing.
+
+Per-frame host duties exported as free functions and called by the DX12 hosts:
+
+- `SetModuleRenderActiveNow(bool)` — marks the DLL's render window so the `ResourceBarrier` hook only corrects the module's own `StateBefore` values, not d3d11on12's blit barriers.
+- `SubmitModuleFrameListNow()` — close + `ExecuteCommandLists` the lists the module recorded into and left **open**. `module_main` only *records*; in Lost Judgment the engine's render-system loop submits, and YAMP does not run that loop.
+- `AdvanceFrameStampNow()` — advance the upload-frame stamp (`cdevice+0x58` → `+0x67D8`) and recycle the upload-buffer pool's in-use nodes back to available. Fixes a pool-exhaustion crash.
+- `ModuleExecDisabledNow()` — true once a submit hung or removed the device (stop the loop; DRED already dumped).
+
+**Command-list vtable hooks (post-`c24cbd1` — only 7 load-bearing slots remain).** Previously YAMP patched **17 slots** of the process-wide `ID3D12GraphicsCommandList` vtable, so every draw, viewport, scissor, topology, IB/VB bind, RTV clear and render-target bind **in the whole process** — including d3d11on12's own blit lists — routed through a YAMP thunk that did nothing in a shipping build. (`DebugLog` compiles away; the *hooks feeding it* did not.) What is kept:
+
+| Slot | Why it is load-bearing |
+|---|---|
+| `Reset` | Clears a list's module flag |
+| `DrawInstanced` / `DrawIndexedInstanced` | Flag the list for the frame submit |
+| `CopyBufferRegion` | Shadow-copy replay |
+| `ResolveSubresource` | 3D-layer display source |
+| `SetPipelineState` | Heap + root-signature injection |
+| `ResourceBarrier` | `StateBefore` correction + render-target catalog |
+
+`Close` is now *read*, not replaced. Removed: `SetDescriptorHeaps`, `SetGraphicsRootSignature`, `SetGraphicsRootDescriptorTable`, `RSSetViewports`, `RSSetScissorRects`, `IASet*`, `OMSetRenderTargets`, `ClearRenderTargetView`, `CopyResource`, the queue-level `ExecuteCommandLists` hook, and the device-level `CreateGraphicsPipelineState` / `CreateConstantBufferView` hooks — all diagnostic-only.
+
+**`DllMutex.h` — `StfDllMutex`.** The StF DLL statically links the **VS2019 STL** and its embedded D3D12MA locks `std::mutex` objects that live *inside* the `D3D12MA::Allocator` YAMP builds and hands it at `cdevice+0x17B8`. It locks them with its own baked-in `mtx_do_lock` / `_Mtx_unlock`, which expect the classic `_Mtx_internal_imp_t` layout:
+
+```
++0x00 int _Type (std::mutex == _Mtx_try == 2)
++0x08 polymorphic _Stl_critical_section — first qword is a VTABLE POINTER
++0x10 SRWLOCK
++0x48 long _Thread_id (-1 = none)
++0x4C int  _Count
+```
+
+Verified: `mtx_do_lock @0x1800C7304` calls `cs->vtable[0]` and `cs->vtable[0x10]`; `_Mtx_unlock @0x1800C7478` calls `cs->vtable[0x18]`; the icall goes through `0x1800D02D0` → a bare `jmp rax` (no CFG), so our callbacks are fine. **VS2022 17.10+ replaced that polymorphic critical section with an inline SRWLOCK**, so a `std::mutex` *we* construct stores a null where the DLL expects a vtable pointer and the DLL crashes at `stfDLL+0xC7378`. `StfDllMutex` reproduces the VS2019 layout with a 5-slot critical-section vtable backed by an SRWLOCK. No external dependency.
+
+**Struct transcription bugs fixed in `de7796c`** (present identically in the LJ *and* Y6 copies):
+- `cgs_shader_uniform::initialize` assigned `m_clip_far` twice; the first was meant for `m_clip_near`. `PatchGs` builds these with plain `new cgs_shader_uniform`, which does not value-initialise, so `m_clip_near` held allocator garbage (`0xCD` fill under the debug CRT).
+- `ccontext_native::desc_st::reset` stored `0` into `m_height` instead of its `height` argument. Latent only — the sole caller passes 0.
+
+### 8.4 `pxd/Y6` — the Yakuza 6 generation
+
+`sl`, `gs`, `file_access`, `async_request`, `cs_game`, `sys_util`, `pxd_types`, `Imports.h`. Moved out of `source/vf5fs/Y6` where it *looked* like shared VF5FS code — the LJ and YLAD VF5FS hosts include none of it. Largely the baseline code, relocated and namespaced (`pxd`).
+
+### 8.5 `pxd/K2` — the Kiwami 2 generation (sl only)
+
+`pxd/K2/sl.h` is the authoritative layout, every offset pinned by `static_assert` and read out of the module's own accessors.
+
+**The layout rule:** K2's sl context is **LJ's with `0x3C0` bytes inserted immediately before `handle_free_queue`**. Every field up to and including `sz_fs_root` sits at exactly the LJ offset; everything from `handle_free_queue` onward shifts by `+0x3C0` as one block. Three independent landmarks pin the delta, each read out of this DLL's own code:
+
+| Landmark | LJ | K2 |
+|---|---|---|
+| `handle_create_internal` (`FUN_180066710`) free-queue pop | `sl+0x6C0` | `sl+0xA80` |
+| `file_handle_create` (`FUN_180064550`) spinlock | `sl+0x1C00` | `sl+0x1FC0` |
+| …file handle pool | `sl+0x1C08` | `sl+0x1FC8` |
+| archive condvar | `0x1C20` | `0x1FE0` |
+| per-type handle counters | `0x1800` | `0x1BC0` |
+| heap | `0xEFD0` | `0xF390` |
+| `size_of_struct` | `0xF000` | `0xF3C0` |
+
+`0xF3C0 − 0xF000 == 0x6C0→0xA80 == 0x1C00→0x1FC0 == 0x3C0`.
+
+**Why this needed its own header:** reusing `pxd::sl::context_t` for K2 does **not** crash — it fails *silently*, which is worse. The module's `file_handle_create` finds a pool the host filled `0x3C0` bytes too low, sees a zero count, returns a null handle, and every file open fails; resource loads come back as null blobs and the module faults far away (`DLL+0x6D190`, reading the SLLZ magic of a null buffer).
+
+The **primitives** (`handle_t`, `file_handle_internal_t`, `t_locked_queue`, `t_fixed_deque`, the `csl_file_access` family) are byte-identical to LJ's and are reused, not cloned. `pxd::sl` gained **`p_sync_archive_condvar`** so a host can point `csl_archive::create_instance` at its own generation's lock word — K2 predates YLAD's recursive archive lock.
+
+The K2 **gs** context (`0x202140`) does **not** carry over and is kept as an opaque block, with only the individual fields the module reads filled in.
+
+---
+
+## 9. The `m2ftg` host family (Model 2 arcade boards)
+
+"m2ftg" = the module family name used by the parent games ("Model 2 fighting game"). Six modules across three engine generations share one protocol.
+
+### 9.1 The module protocol (`source/m2ftg/m2ftg.h`)
+
+Layouts reverse-engineered from LJ's host driver `FUN_142494450` and confirmed line-for-line against YLAD's symbolized `cscene_minigame_m2ftg::method_pre_render (0x1426a78b0)` + `cgame_module<m2ftg_module_t, …>`.
+
+**`m2ftg_config_t`** — `module_start` copies `0x100C` bytes from `params+0x38` into its config global (`DAT_1801ed490`). Field names from YLAD's symbolized scene ctor; byte offsets corrected against the StF DLL's actual field readers (the settings fields are `u8` each, so `country` is `+0x05`, **not** `+0x08`):
+
+| Off | Field | Meaning |
+|---|---|---|
+| `+0x00` | `uint32 kind` | `{0=vf2, 1=fv, 2=stf, 3=omg, 4=mr}` (LJ table order) — also selects `"%s/rom/%s_rom.par"` |
+| `+0x04` | `difficulty` | 1 = normal → `FUN_1800529d0` → backup SRAM `0x1D03342` |
+| `+0x05` | `country` | `{0=JAPAN, 1=USA "Sonic Championship", 2=EXPORT}` → game-assignments image: SRAM `0x1D03352` + working RAM `0x59C352` (both user-verified live) |
+| `+0x06` | `is_acf_skip` | gates the `rom/sound/stf.acf` load |
+| `+0x07` | `is_vf20` | VF2-only, zero readers in StF |
+| `+0x08` | `is_disable_pepsi` | VF2-only |
+| `+0x09` | `is_freeplay` | |
+| `+0x0A` | `is_vs_mode` | LJ's "2P quick match": `FUN_180052ec0` force-inserts 5 credits into **both** coin counters (game RAM `+0x500248` / `+0x50024C` \|= 5) and skips the normal boot flow; `FUN_180052e50` picks a random stage 0..8; `FUN_1800529d0` writes SRAM mode byte 3 instead of 2. Clear = authentic arcade boot (attract, coin/start, 1P ladder). |
+| `+0x0B` | `is_sram_restore` | `FUN_1800529d0` copies the `+0x0C` blob into emu SRAM`+0x3000` |
+| `+0x0C` | `settings[0x1000]` | SRAM settings image (all zero in live LJ captures) |
+
+**`m2ftg_execute_info_t`** — embedded at LJ scene`+0x13A0`; every offset verified there. **Must persist across frames** — the module keeps state in it.
+
+```
++0x00   size_of_struct      (must be 0x1760)
++0x08   cgs_device_context*
++0x10   status
++0x14   result              (host presets 0x80004005)
++0x18   output_texid        (host zeroes)
++0x1C   sound_volume        (float; 0.0f mutes ALL audio)
++0x20   pad[0]              (m2ftg_pad_t = pxd::lj_pad_t, 0x190 each)
++0x1B0  pad[1]
++0x340..+0x1660             module-visible workspace, never host-written
++0x1660 work_kind           (indexes host volume table; LJ trophy code switches on it)
++0x1664 assign[2][8]        (host writes from settings; StF FUN_180003ac0 consumes)
++0x167C event_param         (rob id / stage id, alongside status event bits)
+        sizeof == 0x1760
+```
+
+**`status` bits:** host→module bit0 = **pause**, bit5 (`0x20`) = **coin inserted this frame**. Module→host bit6 (`0x40`) = "insert coin / press start" screen active (`m_is_coin_wait`); bits `0x100`/`0x200`/`0x400`/`0x1000` = game events with payloads in the work block.
+
+`assign_t`: `invalid=0, none=1, p=2, k=3, g=4, pg=5, pkg=6, pk=7, kg=8`.
+
+**Generation deltas to this struct:** K2's `execute_info` is **`0x16E0`** with **plain `csl_pad` at `+0x20`, stride `0x170`** (not LJ's extended `0x190`), assigns at `+0x15E0`. Volume is still the `+0x1C` float in *both* — Lost Judgment's VF5FS module is the odd one out with a `0..20` byte at `+0x663`. Getting that wrong mutes every cue while the rest of the audio path works.
+
+### 9.2 Symbol resolution (`m2ftg/ImportSymbols.h`, `m2ftg/LJ/ImportSymbols.cpp`)
+
+One pattern table serves all four LJ/YLAD modules. Symbols:
+
+`SL_CONTEXT_INSTANCE`, `GS_CONTEXT_INSTANCE`, `GS_CONTEXT_PTR`, `D3DDEVICE`, `SL_KERNEL_CALLOC`, `SL_FILE_{CREATE,OPEN,READ,CLOSE}` (file **write** is YAMP's own — deliberate), `SL_HANDLE_CREATE`, `SL_FILE_HANDLE_DESTROY`, `PRJ_TRAP`, `ARCHIVE_LOCK_{WLOCK,WUNLOCK}`, `DEVICE_CONTEXT_RESET_STATE_ALL`, `VB_CREATE`, `IB_CREATE`, `TRAP_ALLOC_INSTANCE_TBL`, `CDEVICE_CTOR`, plus:
+
+- **`STF_FRAME_SUBMIT`** (`FUN_18003b530` = `FUN_18003a1e0` + tail-jmp `FUN_18003a540`) — `module_main` only *records*; in handler mode its inline submit stage is a no-op and **this** is the real submit, normally driven by the engine's render-system loop that YAMP doesn't run.
+- **`STF_RENDER_EXECINFO`** (`DAT_1801ee4a0`) — the "live execute_info" global. `module_main` sets it on entry and clears it on return; `STF_FRAME_SUBMIT` dereferences it, so the host restores it around the call.
+- **`I960_FETCH_EXEC`** (`FUN_1800255F0`) — the i960 CPU core's fetch/decode dispatcher. Its fetch is hard-wired to the program-ROM host buffer (`ctx->codeBase + IP`, no memory map), so code executing from emulated RAM — which the ROM's own debug menu does via a trampoline at `0x59F270` — reads past the 1 MB ROM image and crashes. Optional (`TryGetSymbol`).
+- **`I960_IO_REFRESH_CALL`** — the CALL to the emulated Model 2 I/O board's per-frame refresh, at the top of the frame step (StF `FUN_180055760+0x25` → `FUN_18004D840`; FV `FUN_180053DC0+0x25`). Anchored on the whole prologue; payload is `match + 0x25`. **Optional and unique where it exists**: StF and FV share this shape; Motor Raid and the YLAD VF2 build do not.
+
+### 9.3 `m2ftg/LJ` — the StF / FV / MR host
+
+`GameDesc` in `LJHost.h` holds everything that differs between the three games; the entire hosting path is otherwise shared (the DLLs are near-identical builds of the same emulator: same protocol, same context sizes sl `0xF000` / gs `0x388A00` / ct `0x30`, same `execute_info` `0x1760`, same byte patterns — all re-verified against MR's own `initialize_module` checks).
+
+```cpp
+struct GameDesc {
+    const wchar_t* dll_name;  const wchar_t* subdir;  const char* display_name;
+    uint32_t kind;                       // m2ftg_config_t.kind
+    const char* rom_archive_name;        // loose-ROM debug feature
+    const wchar_t* const* rom_files;  size_t rom_file_count;
+    uintptr_t rva_cpu_ctx_ptr, rva_opcode_table, rva_ram_base_ptr;  // i960 globals
+};
+```
+
+| | StF | FV | MR |
+|---|---|---|---|
+| DLL | `stf-pxd-w64-d3d12_retail.dll` | `fv-pxd-w64-d3d12_retail.dll` | `mr-pxd-w64-d3d12_retail.dll` |
+| `kind` | 2 | 1 | 4 |
+| Archive | `stf_rom.par` | `fv_rom.par` | `mr_rom.par` |
+| ROM images | `rom_code1, rom_data, rom_ep, rom_pol, rom_tex` | `rom_code1, rom_data, rom_ep1, rom_ep2, rom_pol, rom_tex` | `rom_code_tw, rom_ep1, rom_ep2, rom_data, rom_pol, rom_tex, rom_cop` (the DLL's own 7-entry `{path,size}` table order at `0x1802771A0`) |
+| `rva_cpu_ctx_ptr` | `0x58A960` | `0x58CF60` | **0** |
+| `rva_opcode_table` | `0x168630` | `0x166720` | **0** |
+| `rva_ram_base_ptr` | `0x8F7CC8` | `0x8FA2C8` | **0** |
+
+MR's RVAs are zero **on purpose**: its CPU core inlines fetch/decode into its execution *loop* (`FUN_18002CAC0`) instead of shipping the single-instruction dispatcher StF and FV have, so there is no equivalent hook point — and the RAM-exec patch only exists for StF's ROM debug menu. All-zero means the patch is skipped entirely.
+
+**`Patch.cpp` responsibilities:**
+- `ReinstateLogging` — `prj_trap` replacement. The pxd trap/log uses custom format directives (`%~`, `%(`) the CRT formatter rejects; in a Debug build `vsprintf_s` would raise "Incorrect format specifier" and kill the process. Format leniently (swallow invalid-parameter asserts via `_set_thread_local_invalid_parameter_handler`, fall back to the raw string) and **never** `__debugbreak`.
+- `InjectTraps`, `Patch_SysUtil`, `Patch_CsGame`, `Patch_Misc`.
+- `InstallRamExecFetch` — YAMP's region-aware reimplementation of the i960 fetch/decode dispatcher, so code in emulated work RAM can execute. Also the hook point for HLE hit counting and the i960 profiler.
+- **`InstallSystemSwitches` / `SetSystemSwitches(test, service)`** — the cabinet TEST/SERVICE switches. The emulated I/O board keeps one byte of state (`io[9]`, the bank-0 copy; `io[0x0A]` is the DIP bank, hard-wired `0xFF`), **active low**, laid out like the hardware. `read_sw` folds that byte into the low 8 bits of the ROM's flag longs at RAM `0x500700` (held) / `0x500704` (momentary), inverted — which is why the DLL's `ADV_DSP` handler can fake "both players pressed Start" by writing `0x30` straight to `0x500704`. The DLL rebuilds `io[9]` from scratch once per emulated frame and drives only coin 1 (from the `execute_info` coin bit, via a one-shot flag at `io+0x4098`) and the two Start bits; TEST and SERVICE have **no host source anywhere in the module protocol**. Since nothing about `io[9]` survives a frame, a host write between `module_main` calls is simply overwritten — so YAMP intercepts the CALL to the refresh and pulls the two lines low **immediately after it**, before the frame's first i960 instruction runs. The I/O-state global is decoded out of the instruction at `match+0x2B` (StF → `0x1806C9B88`, FV → `0x1806CC188`) rather than hardcoded per DLL, which is what keeps it correct under ASLR.
+
+**Presentation helpers (`m2ftg/HostUI.h`)**, shared with the VF2 host: `ApplyAspectSetting(window, mode)` (0 = 4:3 pillarboxed, 1 = 16:9 stretched, 2 = fill window; applied live) and `DrawPauseMenu(window, menuOpen)` mirroring Lost Judgment's — the host draws the menu shell while the module's own pause path (`execute_info` status bit0) freezes emulation. Returns false on Quit.
+
+### 9.4 `ModuleArgs` + `DisplayModes` — Model 2 render resolution
+
+Every m2ftg module carries pxd's own command-line option parser, reachable from `module_start` via the app module's init:
+
+```
+module_start -> AppModule::vftable[0] -> AppInit -> ParseArgs(argc, argv)
+```
+
+`module_start` **hardcodes `argc = 0` / `argv = nullptr`** into the globals `AppInit` forwards, so the parser's first test (`if (argv != nullptr)`) fails and no option was ever read. The params block YAMP fills has no argv field — the DLL simply never asks the host for one.
+
+`ModuleArgs::Install(dll)` re-points that one call at YAMP.exe's own `argv`, anchored on the instruction pair that presets the default display mode (**unique in `.text` in all five modules**: stf/fv/mr/vf2/omg). Call after `LoadLibrary`, before `module_start`. Idempotent. Returns false when there is no parser call site, which leaves the module at its default 1024×768.
+
+`ModuleArgs::ResolvedRenderSize(w,h)` reads the module's **own** resolved display-mode global after `module_start`, not the YAMP setting — so an explicit switch on the command line is reflected.
+
+Only the resolution switches still drive anything in a retail module; `-debug`, `-m`, `-s`, `-ve`, `-fs`, `-aa`, `-ss`, `-ss4x` parse into globals with no reader left (the same stripping that hollowed out the dw debug menu's handlers).
+
+**`DisplayModes.h`** mirrors the module's 17-entry table (byte-identical in all five modules). Critically: **the mode does not change the output texture** — measured live at modes 2, 6, 15 and 16, the composited texture is 1024×768 every time. The mode only moves the *viewport* the module draws with inside that fixed target. Therefore:
+
+- Smaller than 1024×768 → picture in the top-left sub-rect → `RenderWindow::SetModuleSourceRect` restricts the blit UVs.
+- **Larger than 1024×768 → draws past the target and is clipped, losing the right and bottom of the frame permanently.** Checked rather than assumed: `-wxga/-wxga_dbd/-wxga2/-sxga/-uxga` were briefly added back and run, and they do crop — the module clips, it does not rescale its projection. Those rows are **not offered**.
+
+Offered modes: `""` (module default 1024×768), `-model2` (496×384), `-model2x2` (992×768), `-vga` (640×480), `-svga` (800×600), `-wvga` (800×480), `-wsvga` (1024×600).
+
+Persisted as the **switch text**, not an index, so reordering the list cannot silently change what an existing ini means. An unknown switch (including an oversized mode left in an old ini) falls back to the module default. `IntendedDisplayMode(settingIndex)` resolves the mode **before** the module is loaded (explicit command-line switch wins over the setting), because the window has to be sized from it and the window exists long before `module_start` runs the parse.
+
+`Model2WindowMatchesRender` sizes the window to the picture — the render height at the board's 4:3 display aspect, so 496×384 gives a 512×384 window and the ordinary aspect-correct viewport fills it. Ignored in fullscreen and for the VF5FS builds.
+
+### 9.5 `m2ftg/YLAD` — Virtua Fighter 2 (Like a Dragon, DX11)
+
+Module `vf2-pxd-w64-retail.dll` from `runtime/media/m2ftg`. The DX11 build of the same emulator family, hosted with the same m2ftg protocol. The sl layer matches Lost Judgment exactly (tag `'LBsl'`, version `0x40601`, size `0xF000`), so the sl reconstruction is reused wholesale.
+
+Key DLL facts (base `0x180000000`):
+- `module_start @0x18005d500`, `module_stop @0x18005d780`, `module_main = 0x18005d8a0`
+- `sl init FUN_180065e00`: needs `{size 0x10, ctx+8 == 0xF000}`; embedded sl ctx `@+0x187100`
+- `ct init FUN_1800afad0`: needs `{size 0x10, ctx+8 == 0x30}`
+- `gs init FUN_180089220`: needs `{size 0x58, ctx+8 == 0x3820C0}`; embedded gs ctx `@+0x196a40`, then `import_shared_symbols(ctx+0x20) = FUN_180092440` consuming **six** slots (named via YLAD's `sbgl::cdevice::export_shared_symbols @0x140245e70`):
+
+```
+[0] g_pD3DDevice (ID3D11Device*)   [1] g_p_device_native (sbgl cdevice)
+[2] g_p_swap_chain                 [3] g_FeatureSupport (dword, BY VALUE)
+[4] g_p_num_swap_chains (int*)     [5] g_p_allocator (pxd allocator object)
+```
+
+### 9.6 `m2ftg/K2` — Virtua Fighter 2 + Virtual On (Kiwami 2 GOG, DX11)
+
+Two modules built **one second apart** on 2019-09-30 — the same engine build, so they share one host and differ only in `GameDesc`:
+
+| | VF2 | "omg" = Virtual On |
+|---|---|---|
+| DLL | `vf2-pxd-w64-gog_retail.dll` | `omg-pxd-w64-gog_retail.dll` |
+| `kind` | 0 | 3 |
+
+The ROM-name table `module_start` indexes with `config.kind` is at `0x18015DF9C..` and reads `{0:"vf2", 1:"vf", 2:"stf", 3:"omg", 4:"mr"}` — **a different order from the Lost Judgment table** (where 1=fv). Combined with `"%s/rom/%s..."` it picks `m2ftg/rom/<name>_rom.par`, which is what Kiwami 2 ships.
+
+Host-relevant differences from LJ and YLAD, each found by **running and reading the actual fault** rather than extrapolating:
+
+- `module_main` is neither exported nor returned through params — YAMP **pattern-scans** it. (The only difference between the two modules is one spill-slot byte in `module_main`'s prologue, now wildcarded.)
+- `module_start` is handed **only** `params+0x20` (ICriWare) and `params+0x38` (the `0x100C` config). No sl/gs/ct module blocks — the module owns its own contexts.
+- `execute_info` is `0x16E0`; volume is the `+0x1C` **float**.
+- The **sbgl shadow block**, attached to the `ID3D11DeviceContext` by `SetPrivateData`.
+- `cgs_device_context` `+0x28`/`+0x30` cb/up pools and `+0x38` render-state block.
+- `p_ib_quad` / `p_ib_fan` at `gs+0x1418` / `gs+0x1420` — `primitive_initialize` is the host's job here too.
+- The archive rwspinlock pair (this generation predates YLAD's recursive one — hence `pxd::sl::p_sync_archive_condvar`).
+- Input: plain `csl_pad` at `execute_info+0x20`, stride `0x170`, assigns at `+0x15E0` — all read out of the module's own pad reader `FUN_18005E410`. Size gate verified both statically (`CMP RCX, 0x16E0` at the top of `module_main`) and live under x64dbg.
+
+---
+
+## 10. The VF5FS hosts
+
+`source/vf5fs/vf5fs.h` holds the **shared** module_start protocol; each host keeps only its own generation's structures.
+
+**`game_config_t`** (`params+0x38`, 8 bytes shared core):
+
+```cpp
+uint16_t energy; int8_t round, time, diff;
+int8_t game_mode;   // +0x05. LJ: 0/1/2, drives two derived globals in module_start
+int8_t lang;
+bool is_triangle_start : 4;  bool is_dural_unlocked : 4;
+```
+
+LJ's `module_start` loads **16** bytes (one `VMOVUPS` of `params+0x38` into its config global `0x18054D4A0`) but decodes only the same first 8. The upper 8 (`lj_game_config_t::unknown`) are copied through but have no decoder — unknown-but-preserved.
+
+**`module_params_t`** — templated over the config and module-block types; identical in both generations otherwise:
+
+```
++0x00 size    +0x08 sl module   +0x10 gs module   +0x18 ct module
++0x20 ICriWare implementation   +0x28 root path (UTF-8, copied out, max 0x103 bytes)
++0x30 out: module_main pointer  +0x38 config
+```
+
+Each `*_module` block is `{size_t size; context*}` and is size-checked by the module's own `initialize`. LJ: sl `0x10`/ctx `0xF000`, gs `0x58`/ctx `0x388A00`, ct `0x10`/ctx `0x30` — the same values the m2ftg LJ modules require.
+
+**Shared `execute_info` header** (the pxd `base_execute_info_t`):
+
+```
++0x00 size (module rejects a mismatch: Y6 0x320, LJ 0x690, m2ftg 0x1760)
++0x08 cgs_device_context*   +0x10 status   +0x14 result   +0x18 output_texid
++0x1C sound_volume   (0.0f mutes ALL audio — this was the VF5FS mute bug)
+status bit0 = pause (host -> module)
+```
+
+| Host | DLL | Location | Generation | Notes |
+|---|---|---|---|---|
+| `vf5fs/Y6` | `vf5fs-pxd-w64-Retail Steam.dll` | `<install>/vf5fs/` (flat) | Y6 | DX11on12; the baseline host, moved + namespaced |
+| `vf5fs/LJ` | `vf5fs-pxd-w64-d3d12_retail.dll` | `runtime/media/vf5fs/` | LJ | DX12. `module_start @0x1EDEF0`, `module_main @0x1EDCC0`, `module_stop @0x1EE3D0`. Uses `pxd/LJ` in full (`PatchGs`, `HostCdevice`, per-frame submit/frame-stamp). `execute_info` `0x690`; **volume is a 0..20 byte at `+0x663`**, not the `+0x1C` float. |
+| `vf5fs/YLAD` | `vf5fs-pxd-w64-retail.dll` | `runtime/media/vf5fs/` | YLAD | DX11. **VF2's engine generation running the LJ module protocol.** Uses `pxd/LJ`'s *sl* only; its gs context is the module's own embedded `0x3820C0` template, handled as an opaque block (`FillSharedSymbols`). `ct init FUN_1802297E0` checks only `{0x10, ctx+8 == 0x30}`. |
+
+**Both LJ and YLAD DLLs are built `DYNAMIC_BASE` (ASLR)** — resolve everything against the runtime module base.
+
+All three VF5FS hosts share the m2ftg titles' P/K/G control scheme, so they share `source/input` bindings; the YLAD one additionally reuses `m2ftg/HostUI` for pause/aspect rather than duplicating it. The VF5FS modules do their own remap of the same button bits, so `MODULE_ASSIGN` does not apply to them.
+
+---
+
+## 11. CRIWARE audio
+
+Replaces the baseline's `CriStub` (which returned success and did nothing). ~3,400 lines across `source/criware/`.
+
+### 11.1 `Cri.{h,cpp}` — the `icri` implementation
+
+Implements the full `icri` vtable the modules call (the `criAtomEx*` player/ACB surface, plus the `criMana*` movie surface which remains stubbed). Hands allocation through to `cri::atom::Alloc/Free`, which **must return real memory** — the game builds player and ACB work buffers with it.
+
+### 11.2 `AtomEngine.{h,cpp}` (1,542 lines) — clean-room CRI Atom playback
+
+Scope: the cue-based path StF/VF2/FV/MR actually uses —
+`criAtomExAcb_LoadAcbData` → player `SetCueName(acb-or-NULL, name)` → `Start`/`GetStatus`/`SetVolume`/`Pause`/`Stop` — with HCA waveforms resolved from the ACB's `@UTF` tables: in-memory SFX from the ACB's internal `"AwbFile"` AFS2 blob, streamed BGM from the sibling `.awb` on disk (located by matching the loaded ACB bytes against `rom/sound/*.acb`).
+
+Semantics follow the CRI runtime in Yakuza 6: **registry insertion order** for NULL-acb cue lookup, synth `ReferenceItems` fallback list, first non-zero wins.
+
+Also supports the VF5FS non-cue path: `PlayerSetFile(path)` / `PlayerSetData(blob)` with ADX-or-HCA auto-detection (the file's own header is authoritative over the game's format/channel/rate hints).
+
+Output: **XAudio2**, one mastering voice, one source voice per player (recreated on format change). Waveforms are **fully decoded to PCM16 at `Start()`** — the largest BGM is ~25 MB of PCM and the decoder does ~6k frames in well under a second. HCA loop points map to the `XAUDIO2_BUFFER` loop region. *Known limitation:* encoder delay is not trimmed, so loops are accurate to within the ~45 ms delay.
+
+### 11.3 `HcaDecoder.{h,cpp}` + `HcaTables.h` (~1,225 lines)
+
+Clean-room HCA (CRI ADX2 "High Compression Audio") decoder. Originally reconstructed from the CRI runtime statically linked into Yakuza 6 (Ghidra, image base `0x140000000`, per-stage source functions cited in the .cpp), then finished and validated **stage-for-stage against the ClHcaSharp reference decoder**. Constants in `HcaTables.h` are bit-exact.
+
+Format facts verified against the shipped stf/vf2/fv/mr AWB assets:
+- Container: AFS2 (`.awb`) or the in-ACB `"AwbFile"` blob; each entry is a standalone HCA stream.
+- Header: `'HCA\0'` + chunk list; **all tags compared with the high bit masked off (`0x7F`)** so the header survives header-encryption. CRC16 over the header must be 0.
+- Frames: fixed `blockSize` bytes, `blockCount` total, 1024 samples/channel per frame (8 sub-frames × 128), CRC16 over the frame must be 0.
+- All shipped data is **ciph type 0** (unencrypted) — no key handling implemented. All streams are v1.03 `dec` / v2.00 `comp` with zero stereo bands, no HFR groups, `minResolution` 1 — so the intensity/MS-stereo, high-frequency and noise-substitution stages are implemented but never exercised.
+
+### 11.4 `AdxDecoder.{h,cpp}`
+
+CRI ADX, standard 4-bit ADPCM (encoding type 3) — the format VF5FS streams its BGM and voice in. Big-endian header; each 18-byte block holds a 16-bit scale plus 32 4-bit deltas for one channel, blocks alternating channels; the two prediction coefficients derive from the header's highpass cutoff. Encrypted files (flags `0x08`/`0x09`) are rejected. **Validated sample-exact against ffmpeg's decoder** on the shipped VF5FS files.
+
+### 11.5 Status
+
+Audio is **solved and user-verified in both StF and VF5FS**: HCA 173/173 and ADX 632/632 bit-exact against the oracles. `sound_volume` being left at `0.0f` was the VF5FS mute bug.
+
+---
+
+## 12. Homebrew Model 2B ROM hosting
+
+Lets the Lost Judgment m2ftg module run a homebrew i960 program instead of Sonic the Fighters.
+
+### 12.1 `m2ftg/ELF/ElfRom` — ELF program-ROM override
+
+Drop **`game.elf`** beside the loose ROM images and it replaces `rom_code1.bin`; the `.bin` need not exist.
+
+- `PT_LOAD` segments are flattened by **`p_paddr`, NOT `p_vaddr`** — `.data`'s initial image lives in ROM and is copied to RAM at boot — with `0xFF` fill, padded to `PROGRAM_ROM_SIZE = 0x100000` (StF, FV and MR all give the i960 a 1 MB image and the DLL reads exactly that much).
+- Verified byte-exact against a toolchain-produced cart image (`roms/bin/apps/pengo`).
+- Served through the module's existing file path via a `RomOverride` check at the top of `csl_file_access` (`m2ftg/file_access.cpp`), so the DLL's loader and boot state machine are untouched. Memory-backed handles use a sentinel `HANDLE` of `-2`, distinct from `INVALID_HANDLE_VALUE` (`-1`), so existing "is this handle usable" tests keep working.
+- Symbols are parsed too: `ResolveSymbol("sym+0x1c")` and the reverse `SymbolizeAddress(addr, name, off)` for the 960STAT call stack.
+
+**Gating fix** (`1796401`): `game.elf` is parsed **only when loose ROM files are enabled**. It reaches the i960 solely through the loose-ROM path, so loading it regardless left `ElfRom::IsLoaded()` true while the game ran from the `.par` — which relabelled Sonic the Fighters' own ROM with a homebrew's symbols in the 960STAT panes (every address past its `_etext` collapsing onto that one marker) and pointed the HLE retarget at a program that was not executing.
+
+### 12.2 `m2ftg/LJ/HleHooks` — the 76 HLE ROM hooks
+
+Sonic the Fighters' module **does not run the arcade ROM unmodified**. During board bring-up it overwrites **76 individual i960 instructions** in the program ROM image with a trap word, each dispatching to a native x64 handler inside the DLL.
+
+The installer (`FUN_18004B070`, board bring-up stage 2) does, for every record whose `romOffset < 0x200000`:
+
+```c
+savedWords[i] = *(uint64*)(romBase + romOffset);        // original instruction(s)
+*(uint32*)(romBase + romOffset) = 0x4000000 | (i * 4);  // trap word
+```
+
+The trap word's low bits are the record index. Restoring the ROM word from `savedWords` therefore un-does a hook completely and reversibly, **at any time**.
+
+Key RVAs (StF, fixed base `0x180000000`): table `0x1E8870` (76 × `{u32 romOffset, u32 pad, u64 handler}`, in `.data` — writable, no `VirtualProtect`), saved words `0x68E540`, ROM base `0x9F7CD0`, boot state `0x6B9300` (2 = booted), ROM size `0x100000`, trap opcode `0x4000000`. Handler tails: `0x39D0` = "execute the saved original", `0x3A70` = "return only its length" (skip it). Sites symbolised with the module's own 800-entry ROM symbol table at `DLL+0x1742D0` (AM2's naming).
+
+**Classification** (`HleHooks::Kind`):
+
+| Kind | Meaning | Safe to disable? |
+|---|---|---|
+| `Core` | Frame yield, vsync wait, render sync, self-test bypass, texture-upload timeout | **No** — hangs or black-screens |
+| `Host` | Audio bridging, input, backup RAM / arcade settings, progress reporting | Boots, but loses the feature |
+| `Content` | Hidden character select, Honey's portraits and head tilt, VS-mode rules, attract timings | Yes — gives plain arcade behaviour |
+| `Removed` | Handler is the bare "skip original" tail — the instruction is deleted | Yes |
+| `Inert` | Handler is a bare jump to "execute original" — debug probes compiled out of retail | Yes (changes nothing) |
+
+`MODDING_KINDS = Content | Removed` is the preset a ROM modder wants. **`SESSION_ONLY_KINDS = Core`**: disabling a Core hook hangs the board, and the hang takes the settings UI with it — a Core bit that survived into settings.ini would make YAMP unbootable with no way back. Core bits are therefore stripped on both save *and* load, so they can be ticked live but a restart always recovers.
+
+`HleHooks::Update()` is called once per frame; it restores or re-applies each hook to match the setting, working live off the DLL's own save area.
+
+### 12.3 Pre-install retargeting
+
+For a program ROM that is **not** Sonic the Fighters, the installer still stamps all 76 traps at StF's addresses — 36 of them land in live code and corrupt it before the i960 executes a single instruction. `Update()` cannot undo that in time: it runs from the UI draw, a full `module_main` behind the first frame.
+
+The fix is to change **what the installer is told to patch, before it runs**. The `.data` table is rewritten ahead of `module_start`; the installer skips any record with `romOffset >= 0x200000`, so a rewrite either drops a hook or moves it. Nothing is corrupted and there is no race, because the trap for a suppressed hook is never written at all.
+
+Per-hook retarget values: `0` = leave the DLL's own offset alone (offset 0 doubles as "no change" because it is the i960 initial boot record, never a hook site); `RETARGET_SUPPRESS` (`0xFFFFFFFF`) = never install; anything else = install at that ROM offset.
+
+`ResolveRetarget(text, i)` accepts: `""` → 0; `"off"`/`"none"`/`"-"` → suppress; `"1A2B"`/`"0x1A2B"` → that offset; `"geo_wait"`/`"geo_wait+8"` → ELF symbol + hex offset. An unknown name is **reported and treated as "leave it alone"** — guessing an address would corrupt the ROM.
+
+**The convention: a ROM that declares its own hook sites.** Hand-written `[HleRetarget]` offsets rot on every relink and fail *silently* — hook 1 on no site at all is a black screen with every counter healthy; hook 2 on an init-only site is a 98 % spin at 2 fps with no error anywhere. A homebrew ELF can instead name its sites:
+
+```cpp
+{ "__yamp_hook_composite_enable", 1,  0 },
+{ "__yamp_hook_frame_yield",      2,  0 },
+{ "__yamp_hook_geo_wait",         3,  0 },
+{ "__yamp_hook_geo_wait",         4,  8 },
+{ "__yamp_hook_vblank",           5,  0 },
+{ "__yamp_hook_vblank",           6,  8 },
+{ "__yamp_hook_vblank",           7, 16 },
+{ "__yamp_hook_rand",            33,  0 },
+```
+
+**These byte offsets are the handlers' wire contract, not decoration:**
+
+- `frame_yield` **replaces** its instruction and returns the real length → needs a sacrificial 4-byte instruction on a site reached **every frame**.
+- `geo_wait` hook 4 returns a hardcoded `8` → must be followed by exactly two 4-byte instructions it can skip (`+0` is the 8-byte MEMB load for hook 3).
+- `vblank` hooks 5/6 write `g0` and `r3` specifically, 8-byte MEMB loads apiece, with hook 7 on the 4-byte compare that closes the spin.
+- `composite_enable` is **additive** (the original still runs) → no sacrificial slot; any instruction executed once at the end of init will do.
+- `rand` is **whole-function HLE**: the handler writes the host RNG into `g0` and performs the i960 `ret` itself — unwinding the register frame through PFP/FP — then returns 0 as its IP delta because it has already set the IP. Its site must therefore be the **first instruction of a real, called function** (a bare `ret` body suffices), and it must not be inlined away: with no `call` there is no frame for the handler's return to unwind.
+
+Resolution order: an explicit `[HleRetarget]` line always wins; otherwise the convention symbol. When the ELF declares **any** convention symbol it is taken as opting in, and every hook it did not name is **suppressed** rather than left at StF's address. An ELF with no convention symbols behaves exactly as before.
+
+### 12.4 Invocation counters
+
+Whether a retargeted hook actually *runs* is the hardest thing to observe from outside — the flags its handler sets are consumed and cleared within the frame. The count is taken in `RamExecFetch::FetchExec` (YAMP's own reimplementation of the fetch dispatcher), so nothing in the module is patched to get it. Only a trap word reaches the counter, and trap words are only fetched when the CPU really executes one — a `0x04` byte in a data table is never fetched as an instruction and cannot inflate the count. Motor Raid has no dispatcher to reimplement, so counts stay at 0 there.
+
+Health checks in the settings pane catch the two otherwise-invisible failures: **hook 1 never firing** (composite disabled — black screen, every counter healthy) and **hook 2 below frame rate** (yield not on a per-frame path — the board spins).
+
+### 12.5 `m2ftg/ELF/CharRamFix`
+
+The module's 16-bit char-RAM write handler **nibble-reverses each halfword** on ingest (`0xABCD → 0xDCBA` at `DLL+0x508B8`) — the hardware byte-lane + nibble convention baked into the write path, matched by a linear left-pixel-low-nibble decoder (`FUN_180036060`). Its **8-bit handler stores bytes plain**, with no transform. Sonic the Fighters only ever writes char RAM with 16-bit stores, so the 8-bit path was never exercised and never right; a homebrew ROM using byte stores (the SDK's `m2_loadfont` / `tfb_putpixel`) gets every 4-pixel group rendered mirrored (`x → 3-x`).
+
+Per byte the w16 transform is `internal[i] = nibble_swap(guest[i ^ 1])`. So the corrected 8-bit **write** forwards to the DLL's own handler at `offset^1` with swapped nibbles, and the corrected 8-bit **read** undoes the same (the guest does read-modify-write) — keeping the DLL's bounds checks, buffer mapping and dirty flags in play rather than reimplementing them.
+
+Install after `module_start` (the memory-map table must exist). Idempotent. **StF-safe by construction**: only the 8-bit slots change. Verified end to end — both guests' char data decodes clean under the hardware convention; StF's w16 data is transformed on ingest, pengo's w8 data is not.
+
+### 12.6 Loose ROM loading
+
+The `LoadLooseRomFiles` debug toggle bypasses `rom/<game>_rom.par`: YAMP hides the archive from the DLL so its mount fails and the engine's **own archive-miss fallback** opens `rom/<archive stem>/*.bin` as plain files. Only honoured when all the game's extracted ROM images are present on disk. Live-verified.
+
+---
+
+## 13. Debug tooling
+
+### 13.1 `m2ftg/LJ/DebugWindows` — the DLL's own dw debug menu
+
+`DrawDebugWindows()` renders the StF DLL's own **DEBUG MENU / CONFIG / PERFORMANCE / 960STAT** windows as ImGui windows. The window layout, item labels, bound variables and action handlers **all come from the descriptor tree inside the game DLL itself** — YAMP only interprets that data. (The menu is dead code in retail; the descriptors survive, most handlers were compiled out.) No-op unless the game is StF, the DLL is loaded and booted, and "Display debugging features" is enabled.
+
+`FUN_18004b070` is the combined ROM load + i960 DEBUG MENU init.
+
+**960STAT fixes (`1796401`).** The i960 register file is embedded in the CPU context at `+0x58` as 64 u32 slots, indexed straight off the instruction's register field. By the i960 ABI that makes `+0x58` = r0/pfp, `+0x5C` = r1/**sp**, `+0x60` = r2/rip and `+0xD4` = g15/fp — all confirmed against the DLL's own call/ret pair. `+0x5C` had been used as the *frame* pointer; it is the **stack** pointer. The pane now seeds the walk with the running procedure and its caller, which live in registers and are not yet in any frame save area — so both were missing from every stack. **DISASM** is a real pane instead of a stub: the IP is at `ctx+0x08`, bank-relative, reconstructed the way the DLL's own call handler does.
+
+### 13.2 `I960Profile` — sampling profiler for the emulated i960
+
+The call-stack pane can only read the machine **between** frames, and once the module yields per frame the board is always parked in the yield handler — so there is never a live call frame to walk. The work happens *inside* `module_main`.
+
+`RamExecFetch::FetchExec` runs for every instruction executed, which is exactly the inside view. Sampling the IP there and bucketing it profiles where the program actually spends its frame — which is what identifies a per-frame code path a between-frames sample can never see.
+
+64-byte buckets over the 1 MB ROM (`BUCKET_COUNT = 16384`, 64 KB table, hot path is one increment); one sample every 1024 instructions (`SAMPLE_MASK = 0x3FF`). Symbolised via the ELF. **A spin shows as one symbol above 90 %, which is the fastest triage available for a homebrew bring-up.**
+
+### 13.3 Other
+
+- `UpdateGameDebugFlag()` — keeps the game's own debug flag in emulated RAM (dword at `0x508000`, flipped by XOR with `0x24`) in sync with the setting, writing through the DLL's own memory-map dispatch. Once per frame.
+- `ReadEmulatedRam32(addr, out)` — reads 32 bits of emulated i960 memory through the DLL's own memory-map dispatch; false if the address has no reader in the map.
+- **Hidden character select** (Honey / Metal / Eggman): 6 HLE traps on `select_pl` re-enable the ROM's dormant `bbs`-bit3 path; a DLL array copy at `0x1801742C8` overrides `0xDACAC`. Honey's VS portrait needs traps 68–75 on `rm_*` / `MES_ROUND_MASK_DSP` forcing `g0 = 0x19A / 0x19C / 0x96 / 0x98`.
+- Diagnostic log files `d3d12_debug.log`, `pso_stream.log`, `heaps.log` all gate on `YAMP_DEBUG_LOGGING`.
+
+---
+
+## 14. Netplay
+
+The headline feature of the branch. **Delay-based lockstep modelled directly on the Sonic the Fighters PS3 port (NPUB30927)** — reverse-engineered from that build, not invented. An earlier GGPO attempt was abandoned and wiped.
+
+### 14.1 Architecture
+
+```
+YAMP.exe                                     yampnet.dll (optional)
+  source/net/NetPlugin.cpp   ── LoadLibrary ──►  plugin/yampnet/Plugin.cpp
+  source/net/YampNet.h  ◄──── shared plain-C ABI ────►
+  m2ftg/LJ/LJHost.cpp        ── step(frame, &execute_info) ──►  Lockstep + PadCodec
+  m2ftg/LJ/DebugWindows.cpp  (determinism helpers)               RpcnTransport → RPCN
+```
+
+**Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
+
+### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 5`)
+
+Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exported symbol**, `YampNet_GetApi(uint32_t requested_abi)`, returning a `yampnet_api` function table, so the loader does exactly one `GetProcAddress` and every later addition is a version bump rather than a new symbol.
+
+**Layout handshake.** The plugin writes `execute_info.pad[]` directly (a deliberate scope choice, keeping pad conversion out of YAMP). `yampnet_layout` carries `execute_info_size` (0x1760), `pad_size` (0x190), `pad0_offset` (0x20), `pad1_offset` (0x1B0), `pad_buttons_offset` (0xA0), `pad_port_offset` (0xE0). YAMP fills every field from `offsetof`/`sizeof` on its own headers; the plugin compares against what it was built with. **A mismatch fails the load loudly instead of silently writing at the wrong offsets.**
+
+**States:** `IDLE → CONNECTING → ONLINE → IN_ROOM → SYNCING → IN_MATCH`, plus `FAILED`.
+
+**The hot path:** `yampnet_step step(session, frame, execute_info)` returns `READY` / `WAIT` / `TIMEOUT` / `DISCONNECTED`. **YAMP must not advance the emulator unless it is `READY`.** On `WAIT` nothing is written and the caller re-polls. `execute_info` must be the same object across the whole match.
+
+**ABI evolution:**
+- ABI 2 added `get_room_id()` — the lobby needs it because there is no room browser on this transport, and before that the id existed only as a line in `yampnet.log`.
+- ABI 3 added **desync detection**: `submit_state_check(session, frame, value)` and `get_desync(session, &frame, &local, &remote)`. Lockstep guarantees identical *inputs*; it cannot guarantee the two emulators agree on what those inputs produced. The value YAMP submits is the ROM's own `frame_counter` at emulated `0x500020`, which advances exactly once per emulated frame and is therefore free of timing noise. The plugin carries the most recent one on every input packet. `get_desync` is **latched** — only the *first* disagreement is reported, because everything after it is a consequence rather than a cause.
+
+Other notable config: `yampnet_rpcn_config::cert_fingerprint` (see §14.6), `yampnet_room_config::forced_seed` (0 = plugin generates and distributes; non-zero forces one, for replay/debug), `yampnet_match_config{frame_delay, input_redundancy, stall_timeout_ms}`.
+
+### 14.3 `plugin/yampnet/Lockstep.{h,cpp}` — the core
+
+Deliberately free of Windows, sockets and m2ftg types so it can be reasoned about and unit-tested on its own.
+
+| Constant | Value | Rationale |
+|---|---|---|
+| `kRingSize` | 1024 | As on PS3 (~17 s at 60 Hz). Power of two — ring index is `frame & kRingMask`. |
+| `kRedundancy` | 10 | The PS3 value; the loss burst absorbable without stalling. |
+| `kMaxPlayers` | 2 | This build is 1v1. The PS3 relay walked 8 slots. |
+
+Four load-bearing properties:
+
+1. **Delay-based lockstep.** Inputs keyed by **absolute frame number** into a per-player ring. The sim may advance frame N only once every player's input for N is known. **No rollback and no state snapshotting** — the PS3 had none, so none is modelled.
+2. **Redundancy.** Every packet re-carries the last `kRedundancy` frames of that player's input, so a dropped datagram is repaired by the next one rather than stalling the round. This is why the transport may be lossy and unordered and still never desync.
+3. **Newest-wins insertion.** A ring slot is overwritten only when the incoming frame is newer, making ingest idempotent and safe against duplicates and reordering — the property that makes the redundancy free.
+4. **Generation.** A 5-bit round counter fences off inputs belonging to a previous round, so late packets from the round that just ended cannot poison the new one.
+
+**Wire format** (little-endian, memcpy'd straight into the datagram):
+
+```c
+struct PacketHeader {          // 8 bytes
+    uint8_t type;              // 0 = input, 1 = announce
+    uint8_t player, generation, reserved;
+    uint32_t session;          // low 32 bits of the room id
+};
+struct InputRecord {           // 8 + 10*4
+    uint32_t frame;            // newest frame carried
+    uint32_t packed;           // player << 29 | generation << 24
+    uint32_t inputs[10];       // [0] = frame, [1] = frame-1, ... [9] = frame-9
+};
+struct InputPacket { PacketHeader header; InputRecord record;
+                     uint32_t check_frame, check_value; };   // kNoCheck = 0xFFFFFFFF
+struct AnnouncePacket { PacketHeader header; uint32_t seed; };
+```
+
+The `session` field exists because game traffic is plain P2P between two addresses: a **leftover process from a previous test** — same machines, same port, same player ids, same generation — was indistinguishable from the real peer and could join a session it was never in. Stamping the room makes cross-room traffic self-identifying and free to drop.
+
+The **announce packet doubles as seed distribution**: the host's announce carries the authoritative match seed and the guest adopts it.
+
+### 14.4 `plugin/yampnet/PadCodec.{h,cpp}` — the determinism rule
+
+> **Every byte written into a pad must be a pure function of (player index, input words). Nothing may depend on "am I the local player" or on data only the local machine has.**
+
+That is why `DecodePad` is applied to **both** players — *including our own* — rather than leaving the local pad as the input layer produced it. The local machine has richer information (true analog axes, per-button pressure, real controller ids) than it transmits; if it fed that to the module while the peer fed a reconstruction, the two simulations would drift apart within a few frames even though both "had the same inputs". Round-tripping our own pad through the same lossy encode/decode keeps the machines bit-identical.
+
+Fields deliberately **not** derived from local state: `m_is_remote` forced false on both machines (if the module ever branched on it, a true/false split would be an instant desync); `m_user_id` = player index; `m_port` = player index.
+
+`kInputMask = 0x00FFFFFF` — the transmitted bits of `lj_pad_t::m_now`: face/shoulder/start (`0x0-0xB`), d-pad (`0xC-0xF`), digitised stick directions (`0x10-0x17`). **Analog axes are re-derived from these bits rather than sent**, so both machines compute them identically. `PadHistory` (held-frame counters + previous word) is cleared at the start of every round.
+
+### 14.5 `plugin/yampnet/RpcnClient` + `RpcnTransport` — the RPCN protocol
+
+Verified **against the RPCN server source** (`RipleyTom/rpcn`), not guessed.
+
+**Header, 15 bytes, little-endian:**
+
+```
+[0]      u8  packet_type    Request=0 Reply=1 Notification=2 ServerInfo=3
+[1..3]   u16 command
+[3..7]   u32 packet_size    TOTAL, INCLUDING this header
+[7..15]  u64 packet_id      echoed back on the reply
+```
+
+A Reply carries `u8 ErrorType` at `[15]`, then payload. Strings in payloads are NUL-terminated raw bytes. **Unauthenticated clients are dropped after 10 s** — log in promptly.
+
+Commands used (values match the server's `CommandType` enum by declaration order): `Login=0`, `Terminate=1`, `Create=2`, `GetServerList=12`, `GetWorldList=13`, `CreateRoom=14`, `JoinRoom=15`, `LeaveRoom=16`, `SearchRoom=17`, `GetRoomDataInternal=20`, `SetRoomDataInternal=21`, `SetRoomMemberDataInternal=23`, `RequestSignalingInfos=27`.
+
+Ports: TLS `31313` (default), UDP signaling helper `3657`, **P2P game traffic `3658`**.
+
+**Room commands** are framed as `[12-byte ComId][u32 LE protobuf length][protobuf]`. The ComId's first 9 bytes must be ASCII uppercase/digits (e.g. `NPWR02113_00`), and the **(comId, worldId) pair must exist in the server's `servers.cfg`** or the server answers `InvalidInput` — it looks the pair up in its `world` table and does not invent defaults. Hence the discovery order `GetServerList → GetWorldList → CreateRoom`; with the server's `CreateMissing=true` these also *register* a previously unknown title.
+
+**Account creation rules** (worth knowing before calling `Create`): npid and online_name must be 3–16 chars of `[A-Za-z0-9_-]`; **none** of the five fields may be empty (the server reads them all with `get_string(false)`, so an empty avatar_url alone is rejected as `Malformed`); email must parse as a real address even when validation is disabled.
+
+**`Protobuf.{h,cpp}`** — a minimal wire-format reader/writer rather than a vendored protobuf runtime (RPCN's room commands use prost; it is only varints and length-delimited blobs). **One trap:** `np2_structs.proto` defines `uint8` and `uint16` as **messages** (`message uint16 { uint32 value = 1; }`, kept from the flatbuffers port), not scalars — so a field declared `uint16 serverId = 1` is a length-delimited *submessage* containing a varint. `WriteWrapped`/`ReadWrapped` exist for exactly that.
+
+**Connection model, and why it is asymmetric:** the **guest** resolves the host through `RequestSignalingInfos` and **transmits first**; the **host** learns the guest's address from the first datagram it receives. That avoids parsing room notifications to discover a join, and it is also what makes NAT traversal work at all — the guest's outbound packet opens the return path.
+
+**Game traffic deliberately shares the signaling socket.** That socket's NAT mapping is the one the server observed and advertised to peers; a second socket would get a different mapping no peer could reach. (Corollary: overriding `local_p2p_port` is for same-process tests only — RPCN hardcodes 3658 when handing out a peer's *local* address.)
+
+`RPCN never relays game data` — it is pure P2P with no relay fallback.
+
+`RoomListing::has_password` is **derived from `privateSlotNum`**: RPCN has no "has password" flag, but a room created with a password marks its slots private, and a joiner without the password can only take a public slot — so private slots *are* the lock.
+
+`Transport.h` keeps `UdpTransport` (a direct address:port link, no matchmaking) as a dependency-free LAN/loopback dev backend behind the same `ITransport`; swapping backends changes only the member type in `yampnet_session`.
+
+### 14.6 `plugin/yampnet/TlsClient` — Schannel TLS
+
+Built on Schannel/SSPI because it is what Windows already ships — the plugin needs no vendored crypto and links only `secur32`/`crypt32`, which matters for a DLL meant to be dropped next to YAMP.exe and updated on its own.
+
+**Two trust modes, chosen by whether a fingerprint is configured:**
+
+- **VALIDATED (no fingerprint)** — full chain + host-name validation against the system trust store, as any HTTPS client. This is the mode for a server with a real certificate on a real domain.
+- **PINNED (fingerprint given)** — RPCN's own `--cert-gen` produces a **self-signed certificate with `CN="RPCN"` and no subjectAltName**, which ordinary validation can never accept. The certificate's SHA-256 is compared against the configured value instead.
+
+**Never pin a publicly issued certificate** — it is reissued at every renewal (~60 days for Let's Encrypt) and the pin would then reject the very server it protects. Connecting unpinned to a self-signed server fails *with the fingerprint named in the error*, which is how you obtain the value to pin.
+
+Schannel's own validation stays **off** in both cases (`SCH_CRED_MANUAL_CRED_VALIDATION`) — doing the check in-process is what lets a failure say which mode was in force and what to fix.
+
+### 14.7 `source/net/NetPlugin.{h,cpp}` — the YAMP-side loader and lobby
+
+Loads `yampnet.dll` from the YAMP.exe directory, negotiates the ABI, builds the layout struct and creates the session. Never throws; failures are logged and leave the plugin unavailable. **`IsAvailable()` is the only thing the rest of YAMP should test.**
+
+**Two drive paths, sharing one session** (only one may be in use at a time — the UI refuses to act while `Config().enabled` is set):
+
+1. **Command line** — the two-machine regression harness, deliberately hands-free and auto-starting:
+   `-net-host`, `-net-join <roomId>`, `-net-server <host>`, `-net-user <npid>`, `-net-pass <secret>`, `-net-fp <64 hex>`, `-net-comid <id>`. One of `-net-host`/`-net-join` arms the path. Keeping this means adding the lobby cannot silently break the only test that proves the netcode end to end.
+2. **Lobby** (Settings → Netplay) — the same steps under explicit control, one click at a time. Sits in the lobby until the host presses Start (`RequestStartRound()`).
+
+`DriveSession()` (connect → discovery → host/join, idempotent, called every frame), `Connect/Disconnect/HostRoom/JoinRoom/RefreshRooms/GetRooms/LeaveRoom`, and a flattened `Status` struct so the UI never touches the plugin ABI directly (state, room id, local player, stall count, `peer_lost` + reason, `desynced` + frame/local/remote, status text, error text).
+
+**`SessionInProgress()` — the feature kill-switch.** True while this machine is in a netplay room (lobby, barrier or live match).
+
+> **Any feature that can touch the emulated board, the frame pacing or the HLE hook table must be inert while this holds.** The two peers stay in step only because they run identical code over identical inputs, so a local board reset (the DLL's DEBUG MENU has one), a locally paused emulator, or a hook toggled on one side is an instant desync that looks like a network fault. There is no way to make these safe per-feature: the answer is to switch them off for the duration.
+
+Concretely suppressed for the whole of a session: **coin insert, TEST/SERVICE, pause, the DLL's debug windows, the HLE hook mask, and the game debug flag.** Players use START, which travels in the synchronised pad.
+
+`net::Logf()` appends one line to `yampnet.log` next to the CWD, **opened and closed per line** so it can be read live over a share while YAMP runs — unlike `d3d12_debug.log`, which `DebugLogFile` holds open exclusively for the whole process.
+
+### 14.8 Determinism — the part that actually keeps two machines in sync
+
+**None of this is in the netcode.** All of it lives in `m2ftg/LJ/DebugWindows.cpp` and the host loop.
+
+Every helper is gated on **`IsBoardBooted()`** (the DLL's phase dword at `+0x6B9300` reaching 2) and quietly returns false before it, so **a netplay round must not begin until it is true**. A guest joining an already-waiting host reaches the barrier within a couple of hundred milliseconds of launching — long before its board is up — and would then start a match with no reset, no shared seed and no budget pin while the host applied all three. The result is an emulated CPU rolling its own random numbers on one side only: an AI desync that looks like a network fault and is not one.
+
+| Helper | What it does |
+|---|---|
+| **`ResetBoard()`** | Re-runs the DLL's own i960 CPU/board initialisation — the DEBUG MENU's `RESET` item (handler `DLL+0x4C840`), which unlike STEP/GO is *not* a stub in retail. Lockstep keeps two emulators in step only if they **start** in the same state; beginning to exchange inputs at the same moment does nothing if one side has already run attract mode for thirty seconds. Resetting both at the barrier makes "frame 0" mean the same thing. |
+| **`SeedHostRng(seed)`** | The ROM's `rand` is HLE'd: handler `DLL+0x53070` calls the DLL's generator `DLL+0x8D40` and writes the result into i960 `g0`. That generator is a **Mersenne Twister** (N=624, M=397, standard tempering) whose state object lives at `*(*(DLL+0x68BB88) + 0x20)`: `u32 state[624]` at `+0x08`, circular index at `+0x9C8`. Normally seeded per process, so two machines roll different numbers. This re-runs the standard `init_genrand` with the shared match seed. |
+| **`SetTextureBudgetDeterministic(bool)`** | Four Core HLE hooks (all sharing handler `DLL+0x52FD0`) answer the ROM's "have 9 ms elapsed?" question by reading a **wall clock** and writing the boolean into `g0`. The unpack loop yields on that answer, so a fast machine and a slow one do different amounts of work in the same emulated frame — a desync no amount of input synchronisation can fix, because the divergence is not in the inputs. Enabling repoints those entries at a wrapper that runs the original handler (for its length return value) then overwrites `g0` with a constant "budget not expired". Costs smoothness during big uploads; buys a reproducible simulation. |
+
+**Round-start state machine** (`LJHost.cpp`), which anchors both peers to the same ROM state rather than to wherever the reset happened to land:
+
+```
+Idle      -> (IN_ROOM && ShouldStartRound() && IsBoardBooted())
+             ResetBoard() + SetTextureBudgetDeterministic(true)
+Resetting -> wait for ROM frame_counter to restart (proving the reset landed)
+Settling  -> wait for frame_counter to reach ANCHOR — the same value on both peers
+(barrier) -> announce; on release seed the RNG (instantaneous, needs no settling)
+IN_MATCH  -> frame 0
+```
+
+The generation counter wraps at 32 (5 bits). If **RNG seeding fails on this peer**, the round is *refused* rather than played — an unseeded generator is guaranteed to diverge. On round end (peer lost, timeout, or desync) the budget pin is released and the host returns to local play.
+
+---
+
+## 15. Settings file reference
+
+`settings.ini` next to `YAMP.exe` (portable mode; `SetDataPath()` resolves from the module path, not the CWD). One file, per-game sections; save files carry the game tag, so one folder holds them all.
+
+| Section | Key | Type | Default | Notes |
+|---|---|---|---|---|
+| `General` | `Version` | int | — | Mismatch discards the whole file |
+| | `Disclaimer` | int | 0 | Build that last showed it |
+| `Graphics` | `ResolutionX` / `ResolutionY` | int | 1280 / 720 | Window + swapchain size |
+| | `RefreshRate` | float | 60.0 | |
+| | `Fullscreen` | 0/1 | 0 | Borderless `WS_POPUP` |
+| | `FPSCap` | 0/1 | 1 | |
+| | `Model2RenderMode` | **switch text** | `""` | `-model2`, `-vga`, … (§9.4) |
+| | `Model2WindowMatchesRender` | 0/1 | 0 | |
+| `Audio` | `Volume` | int 0..100 | 100 | Applied through each module's **own** volume mechanism, never by scaling samples host-side |
+| `VF5FS` | `ArcadeMode` | 0/1 | 0 | |
+| | `CircleConfirm` | 0/1 | 0 | |
+| | `Language` | int | 1 (English) | |
+| `StF` | `AspectRatio` | 0/1/2 | 0 | 4:3 / 16:9 / fill. Live |
+| | `CRTFilter` | 0/1 | 0 | Live |
+| | `Difficulty` | 0..3 | 1 | Restart |
+| | `Country` | 0/1/2 | 0 | Japan / USA / Export. Restart |
+| | `FreePlay` | 0/1 | 1 | Restart |
+| | `VersusMode` | 0/1 | 0 | Restart |
+| | `P<n>ControllerId` | string | `xinput:0` / `xinput:1` | `Input::PadDevice::id` |
+| | `P<n>Controller` | int | — | **Legacy** XInput slot; honoured only when the id key is absent, rewritten in the new form on the next save |
+| | `P<n>Key<Action>` | int (VK) | see `DEFAULT_KEY_BINDS` | Live |
+| | `P<n>Pad<Action>` | int (`PadButton`) | see `DEFAULT_PAD_BINDS` | Live |
+| `VF2` | `Version20` | 0/1 | 0 | `is_vf20`. Restart |
+| | `DisablePepsi` | 0/1 | 0 | Restart |
+| `Debug` | `DoNotApplyPatches` | 0/1 | 0 | |
+| | `UseDebugD3D` | 0/1 | 0 | |
+| | `ShowDLLDebugFeatures` | 0/1 | 0 | dw debug windows |
+| | `LoadLooseRomFiles` | 0/1 | 0 | Also gates `game.elf` parsing |
+| | `SetGameDebugFlag` | 0/1 | 0 | Live |
+| | `DisabledHleHooksLo` / `...Hi` | hex u64 | 0 | Bit i = hook i. **Core bits stripped on save and load** |
+| `HleRetarget` | `Hook<i>` | text | `""` | Per-hook site: literal offset, `off`/`none`/`-`, or `symbol[+hexoff]`. Read once before `module_start`; **never written back**, so a hand-authored section survives Apply |
+| `Netplay` | `Server` | string | `""` | RPCN host |
+| | `Npid` | string | `""` | |
+| | `Token` | string | `""` | Account **password** — RPCN's Login takes (npid, password, token) and the token is only used with email validation enabled, which is off by default |
+| | `CertFingerprint` | 64 hex | `""` | **Leave empty** unless the server is self-signed (§14.6) |
+| | `CommunicationId` | string | `NPWR02113_00` | Any well-formed comm id works with `CreateMissing` on |
+| | `FrameDelay` | int | 3 | Higher hides more latency; too low stalls rather than desyncs |
+
+---
+
+## 16. Working-tree state at hand-off
+
+The branch tip is otherwise clean. **One uncommitted change remains, and a fresh clone will need it to build:**
+
+| Path | Change |
+|---|---|
+| `source/Utils/Patterns.h` | Adds `#include <string>`. This is a one-line fix **inside the `ModUtils` submodule**, so it cannot be recorded by this repository — the gitlink only stores a commit SHA, and there is no upstream commit containing it. It must be pushed to `CookiePLMonster/ModUtils` (or a fork) and the submodule pointer then bumped here. Until that happens the file shows as `Submodule source/Utils contains modified content` and a fresh clone gets the unfixed header. |
+
+The Escape / Exit launcher work described in §6.3 and the `IsSettingsOpen()` / `CloseSettings()` accessors landed in commit `9baa02e`; there is no separate uncommitted delta for them.
+
+---
+
+## 17. Suggested reimplementation order
+
+Ordered so each stage is independently runnable and verifiable.
+
+**Stage 0 — foundation (no game runs yet)**
+1. `premake5.lua` two-project layout, `Debug`/`Release`/`Master`, warning policy, per-file audio optimisation.
+2. `DebugLog` + the `YAMP_DEBUG_LOGGING` gate.
+3. `YAMPGeneral` `GameId` machinery, portable `SetDataPath`, `IsModel2ArcadeGame`.
+4. `YAMPSettings` load/save incl. all sections in §15.
+5. `RenderWindow`: D3D12 device + queue, 11-on-12 bridge, the missing `COMMON → RENDER_TARGET` barrier, threaded window + deferred resize, blit with aspect/fill/source-rect, `ClearBackbuffer`.
+
+**Stage 1 — one game end to end (VF5FS/Y6)**
+6. `pxd/Y6` (largely the baseline, relocated into `namespace pxd`).
+7. `vf5fs/vf5fs.h` shared protocol + `vf5fs/Y6` host. **Set `sound_volume` non-zero.**
+8. `GameVerify` + the module/parent tables. Gate `LoadDLL`.
+
+**Stage 2 — audio** *(independently testable against the oracles)*
+9. `AdxDecoder` → validate sample-exact vs ffmpeg on shipped VF5FS files.
+10. `HcaDecoder` + `HcaTables` → validate stage-for-stage vs ClHcaSharp.
+11. `AtomEngine` (ACB `@UTF` tables, AFS2, XAudio2) + `Cri`.
+
+**Stage 3 — the DX12 platform and the first Model 2 board**
+12. `pxd/LJ` sl/gs/pxd_types/file_access/async_request/sys_util/cs_game.
+13. `DllMutex` (VS2019 `std::mutex` shim) + vendored `D3D12MemAlloc`.
+14. `HostCdevice` — `BuildHostCdevice`, `SetGameDllRange` (**do this before touching FV**), the 7 command-list hooks, per-frame submit / frame-stamp.
+15. `PatchGs` + `ResetCbvSrvRingCursors`.
+16. `m2ftg.h` protocol, `m2ftg/ImportSymbols`, `m2ftg/LJ/{LJHost,Patch}`. Ship StF first, then FV and MR via `GameDesc`.
+
+**Stage 4 — input and UI**
+17. `source/input` (Input, DirectInputPad, Pad) with `MODULE_ASSIGN`.
+18. `YAMPUserInterface` pages: Graphics, Game, Controls (+ wizard + capture), Debug, About.
+19. `m2ftg/HostUI` aspect + pause menu. The CRT filter port.
+
+**Stage 5 — the remaining titles**
+20. `ModuleArgs` + `DisplayModes` + `SetModuleSourceRect`.
+21. `m2ftg/YLAD` (VF2), `vf5fs/LJ`, `vf5fs/YLAD`.
+22. `pxd/K2` sl + `m2ftg/K2` (VF2 + Virtual On).
+23. `GameLauncher` + `Verify::GameInstallRoots()`.
+
+**Stage 6 — homebrew ROM hosting** *(StF only; optional)*
+24. `ElfRom` + the `RomOverride` hook in `file_access`.
+25. `HleHooks` table, `Update()`, `ApplyRetarget`, the convention symbols, hit counters.
+26. `CharRamFix`. `DebugWindows` + `I960Profile`.
+
+**Stage 7 — netplay** *(everything above must be stable first)*
+27. `YampNet.h` ABI + `NetPlugin` loader + layout handshake.
+28. `Lockstep` + `PadCodec` + `UdpTransport`. **Prove it over loopback with the command-line harness before writing a line of RPCN.**
+29. `TlsClient`, `Protobuf`, `RpcnClient`, `RpcnTransport`.
+30. The determinism helpers (`ResetBoard`, `SeedHostRng`, `SetTextureBudgetDeterministic`) and the anchored round-start state machine.
+31. `SessionInProgress()` and the suppression of every non-transmitted input.
+32. The lobby UI + overlay + desync/peer-lost dialogs.
+
+### Risk register
+
+| Risk | Mitigation |
+|---|---|
+| A module DLL of a different build | `GameVerify` blocks before `LoadLibrary`. Do not skip it — silent mis-patching is the failure mode. |
+| Assuming base `0x180000000` | FV, and both VF5FS LJ/YLAD modules, are ASLR'd. Always resolve against the runtime base; call `SetGameDllRange`. |
+| Reusing an sl/gs layout across generations | K2's `+0x3C0` displacement fails **silently** (null file handles, fault far away). One header per generation, every offset `static_assert`ed. |
+| MSVC STL version drift | `StfDllMutex` exists because VS2022 17.10+ changed `std::mutex`'s internals. Re-check this if the toolchain moves. |
+| Netplay determinism | Not a netcode problem. The three helpers in §14.8 plus the `IsBoardBooted` gate and the frame-counter anchor are what make it work. |
+| Intel integrated GPU | StF's `CreatePipelineState` `E_FAIL`s on Intel iGPUs — force the NVIDIA adapter. (RDP forces Intel.) |
+| Shutdown | `wWinMain` still ends in `TerminateProcess` because clean shutdown crashes on mismatched allocators. **Outstanding.** |
+
+---
+
+## 18. Verification methodology used
+
+Worth mirroring, because most of the facts in this document were *measured*, not derived:
+
+- **Automated smoke runs.** `-frames N` gives a deterministic run length **and** exercises the real teardown path. The standard regression is a **StF 2000-frame** and an **FV 600-frame** run under `cdb`, checked for exit 0, `module_stop -> 0x0`, no device removal, and matching draw counts, render-target catalogs and CRI cue sets against a baseline. `de7796c` records FV as **byte-identical** to its pre-change run.
+- **Live capture over static reading.** Several K2 facts (execute_info size, pad stride, host-provided gaps) were found by *running and reading the actual fault* rather than extrapolating from another generation. The `0x16E0` size gate was confirmed both statically (`CMP RCX, 0x16E0`) and live under x64dbg.
+- **Checking negative results.** The oversized display modes were added back and run to confirm they crop; the mode's effect on the output texture was measured at four different modes.
+- **Decoder oracles.** HCA against ClHcaSharp, ADX against ffmpeg — 173/173 and 632/632 bit-exact, then listener-verified.
+- **Include-graph-first restructuring.** Every folder move in `bc9bfaf` was justified by the include graph before any file was touched.
+- **Remote second box.** A second test machine (`DESKTOP-GHRIIHN`) driven by PsExec + cdb over a share, with token-filter and first-chance-AV traps — which is also the two-machine netplay harness the `-net-*` switches exist for.
+
+---
+
+*Generated from the `multiplayer` branch at `9baa02e`, 2026-08-01.*
