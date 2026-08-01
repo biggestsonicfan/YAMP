@@ -1,5 +1,6 @@
 #include "YAMPSettings.h"
 
+#include "YAMPGeneral.h" // UTF8ToWchar / WcharToUTF8, for the string-valued settings
 #include "m2ftg/DisplayModes.h"
 
 #include "m2ftg/LJ/HleHooks.h"
@@ -75,6 +76,25 @@ static std::string GetHleRetargetEntryW(LPCWSTR lpAppName, LPCWSTR lpKeyName, LP
 	return result;
 }
 
+// Reads a UTF-8 string setting. Netplay credentials and host names are ASCII in practice, so the
+// narrow profile API is used directly rather than round-tripping through wide strings.
+static std::string GetPrivateProfileStdStringA(LPCSTR section, LPCSTR key, LPCSTR def,
+                                               const std::wstring& iniPathW)
+{
+	const std::string iniPath(iniPathW.begin(), iniPathW.end());
+	char buf[256] = {};
+	GetPrivateProfileStringA(section, key, def ? def : "", buf, static_cast<DWORD>(std::size(buf)),
+	                         iniPath.c_str());
+	return std::string(buf);
+}
+
+static void WritePrivateProfileStdStringA(LPCSTR section, LPCSTR key, const std::string& value,
+                                          const std::wstring& iniPathW)
+{
+	const std::string iniPath(iniPathW.begin(), iniPathW.end());
+	WritePrivateProfileStringA(section, key, value.c_str(), iniPath.c_str());
+}
+
 static void WritePrivateProfileHex64W(LPCWSTR lpAppName, LPCWSTR lpKeyName, uint64_t value, LPCWSTR lpFileName)
 {
 	wchar_t buf[32];
@@ -145,6 +165,18 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_stfShowDebugFeatures = GetPrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", 0, iniPath.c_str()) != 0;
 		m_stfLooseRomFiles = GetPrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", 0, iniPath.c_str()) != 0;
 		m_stfGameDebugFlag = GetPrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", 0, iniPath.c_str()) != 0;
+		// Netplay lives in its own ini section: it is host configuration, not per-title state,
+		// and keeping it separate means a credential never lands in a game's settings block.
+		m_netServer = GetPrivateProfileStdStringA("Netplay", "Server", "", iniPath);
+		m_netNpid = GetPrivateProfileStdStringA("Netplay", "Npid", "", iniPath);
+		m_netToken = GetPrivateProfileStdStringA("Netplay", "Token", "", iniPath);
+		m_netCertFingerprint = GetPrivateProfileStdStringA("Netplay", "CertFingerprint", "", iniPath);
+		m_netComId = GetPrivateProfileStdStringA("Netplay", "CommunicationId", "NPWR02113_00", iniPath);
+		m_netFrameDelay = GetPrivateProfileIntW(L"Netplay", L"FrameDelay", 3, iniPath.c_str());
+		if (m_netFrameDelay < 0 || m_netFrameDelay > 20)
+		{
+			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
+		}
 		// 76 bits, so it does not fit the profile API's integer reads - stored as hex text.
 		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksLo", 0, iniPath.c_str());
 		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksHi", 0, iniPath.c_str());
@@ -192,9 +224,28 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
-			swprintf_s(key, L"P%dController", player + 1);
-			int padIndex = static_cast<int>(GetPrivateProfileIntW(SECTION_NAME, key, m_m2PadIndex[player], iniPath.c_str()));
-			m_m2PadIndex[player] = (padIndex >= -1 && padIndex < 4) ? padIndex : -1;
+			// Controller identity moved from an XInput slot number to an Input::PadDevice id
+			// when DirectInput pads were added, because a bare index means nothing once the
+			// device list can contain both kinds. ControllerId wins; the old integer key is
+			// still honoured when it is the only one present, so existing setups migrate
+			// silently (and are rewritten in the new form on the next save).
+			wchar_t idBuf[128] = {};
+			swprintf_s(key, L"P%dControllerId", player + 1);
+			GetPrivateProfileStringW(SECTION_NAME, key, L"", idBuf,
+				static_cast<DWORD>(std::size(idBuf)), iniPath.c_str());
+			if (idBuf[0] != L'\0')
+			{
+				m_m2PadId[player] = WcharToUTF8(idBuf);
+			}
+			else
+			{
+				swprintf_s(key, L"P%dController", player + 1);
+				const int padIndex = static_cast<int>(
+					GetPrivateProfileIntW(SECTION_NAME, key, player, iniPath.c_str()));
+				m_m2PadId[player] = (padIndex >= 0 && padIndex < 4)
+					? "xinput:" + std::to_string(padIndex)
+					: std::string();
+			}
 
 			for (uint32_t action = 0; action < Input::Action_Count; action++)
 			{
@@ -248,6 +299,12 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", m_stfShowDebugFeatures, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", m_stfLooseRomFiles, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", m_stfGameDebugFlag, iniPath.c_str());
+		WritePrivateProfileStdStringA("Netplay", "Server", m_netServer, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "Npid", m_netNpid, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "Token", m_netToken, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "CertFingerprint", m_netCertFingerprint, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "CommunicationId", m_netComId, iniPath);
+		WritePrivateProfileIntW(L"Netplay", L"FrameDelay", m_netFrameDelay, iniPath.c_str());
 		// Core hooks stay session-only, so a restart always gets back to a bootable state.
 		uint64_t persisted[2] = { m_stfHleDisableMask[0], m_stfHleDisableMask[1] };
 		m2ftg::HleHooks::MaskStripKinds(persisted, m2ftg::HleHooks::SESSION_ONLY_KINDS);
@@ -278,8 +335,9 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
-			swprintf_s(key, L"P%dController", player + 1);
-			WritePrivateProfileIntW(SECTION_NAME, key, m_m2PadIndex[player], iniPath.c_str());
+			swprintf_s(key, L"P%dControllerId", player + 1);
+			WritePrivateProfileStringW(SECTION_NAME, key,
+				UTF8ToWchar(m_m2PadId[player]).c_str(), iniPath.c_str());
 
 			for (uint32_t action = 0; action < Input::Action_Count; action++)
 			{

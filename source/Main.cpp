@@ -9,6 +9,7 @@
 #include "m2ftg/K2/K2Host.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "imgui/imgui.h"
+#include "net/NetPlugin.h"
 
 #ifdef _DEBUG
 #include <crtdbg.h>
@@ -208,9 +209,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
             return 0;
         }
 
+        // Optional netplay plugin. Absent yampnet.dll = netplay simply does not exist; nothing
+        // else in YAMP depends on it, which is what lets a release ship without any netcode.
+        net::ParseCommandLine();
+        net::Load();
+
         // DLL is present: wire the window to the module and run the real game
         RenderWindow window(hInstance, stfDll, nShowCmd);
         m2ftg::Run(window);
+        net::Unload();
         ImGui::DestroyContext();
         return 0;
     }

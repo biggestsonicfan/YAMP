@@ -20,6 +20,7 @@
 #include "LJHost.h" // GameDesc / CurrentGame()
 
 #include <d3d12.h>
+#include <atomic>
 #include <vector>
 #include <cstdint>
 #include <cstring>
@@ -173,6 +174,106 @@ namespace m2ftg
 			RamExecFetch::dllBase = static_cast<uint8_t*>(dll);
 			Trampoline* t = Trampoline::MakeTrampoline(dll);
 			Memory::InjectHook(fetchExec, t->Jump(&RamExecFetch::FetchExec), Memory::HookType::Jump);
+		}
+
+		// ---- Cabinet TEST / SERVICE switches --------------------------------------------
+		// The emulated Model 2 I/O board serves guest 0x01C00002 - the SYSTEM input port - out of
+		// one byte of its own state (io[9], the bank-0 copy; io[0x0A] is the DIP bank and is
+		// hard-wired to 0xFF here). It is active low and laid out exactly like the hardware:
+		//
+		//     bit0 coin 1   bit1 coin 2   bit2 TEST   bit3 SERVICE   bit4 start 1   bit5 start 2
+		//
+		// read_sw folds that byte into the low 8 bits of the ROM's own flag longs at RAM 0x500700
+		// (held) / 0x500704 (momentary), inverted - which is why the DLL's ADV_DSP handler can
+		// fake "both players pressed Start" by writing 0x30 straight to 0x500704.
+		//
+		// The DLL rebuilds io[9] from scratch once per emulated frame, at the top of the frame
+		// step, and drives only coin 1 (from the execute_info coin bit, via a one-shot flag at
+		// io+0x4098) and the two start bits. TEST and SERVICE have no host source anywhere in the
+		// module protocol - they are left permanently released - so the board's service menu, the
+		// operator's authoritative view of how each physical input reaches the game, was
+		// unreachable. That is what this restores.
+		//
+		// Nothing about io[9] survives a frame, so a host-side write between module_main calls is
+		// simply overwritten. Instead intercept the CALL to the refresh and pull the two lines low
+		// immediately after it, before the frame's first i960 instruction runs - the same moment,
+		// and the same order, the real board would see the switch close.
+		namespace SystemSwitches
+		{
+			constexpr size_t IO_SYSTEM_PORT = 9;
+			constexpr uint8_t BIT_TEST = 0x04;
+			constexpr uint8_t BIT_SERVICE = 0x08;
+
+			static void (*orgIoRefresh)() = nullptr;
+			static uint8_t* const* ioState = nullptr;   // the DLL's own I/O board pointer
+			// Written by the host thread each frame, read by the module thread inside the hook.
+			static std::atomic<uint8_t> heldMask{ 0 };
+
+			static void IoRefresh()
+			{
+				orgIoRefresh();
+				uint8_t* const io = *ioState;
+				if (io != nullptr)
+				{
+					// Active low: a closed switch is a CLEARED bit.
+					io[IO_SYSTEM_PORT] &= static_cast<uint8_t>(~heldMask.load(std::memory_order_relaxed));
+				}
+			}
+
+			// The refresh function's first act is `MOV R10, [rip+disp32]` loading the I/O board
+			// pointer (StF +0x2B -> 0x1806C9B88, FV +0x2B -> 0x1806CC188). Reading the global out
+			// of that instruction rather than hardcoding an RVA per DLL keeps this correct under
+			// ASLR, which the FV module needs - it does not load at 0x180000000.
+			static uint8_t* const* FindIoState(const uint8_t* refresh)
+			{
+				constexpr uint8_t MOV_R10_RIP[] = { 0x4C, 0x8B, 0x15 };
+				constexpr size_t SEARCH_BYTES = 0x40;
+				for (size_t i = 0; i + sizeof(MOV_R10_RIP) + 4 <= SEARCH_BYTES; i++)
+				{
+					if (memcmp(refresh + i, MOV_R10_RIP, sizeof(MOV_R10_RIP)) != 0)
+					{
+						continue;
+					}
+					uint8_t* const* global = nullptr;
+					Memory::ReadOffsetValue(refresh + i + sizeof(MOV_R10_RIP), global);
+					return global;
+				}
+				return nullptr;
+			}
+		}
+
+		void InstallSystemSwitches(void* dll, const Imports& symbols)
+		{
+			void* const callSite = symbols.TryGetSymbol(ImportSymbol::I960_IO_REFRESH_CALL);
+			void (*refresh)() = nullptr;
+			if (callSite != nullptr)
+			{
+				Memory::ReadCall(callSite, refresh);
+				SystemSwitches::ioState =
+					SystemSwitches::FindIoState(reinterpret_cast<const uint8_t*>(refresh));
+			}
+			if (SystemSwitches::ioState == nullptr)
+			{
+				// Not fatal, and expected on the modules that do not share this I/O core: the
+				// cabinet switches simply stay released, exactly as they were before.
+				DebugLog("[%s] No emulated I/O board found - Test / Service switches unavailable.\n",
+					gGeneral.GetGameTag());
+				return;
+			}
+
+			// A direct rel32 from the module to YAMP's own code is not guaranteed to be in range.
+			SystemSwitches::orgIoRefresh = refresh;
+			Trampoline* t = Trampoline::MakeTrampoline(dll);
+			Memory::InjectHook(callSite, t->Jump(&SystemSwitches::IoRefresh));
+			DebugLog("[%s] Test / Service switches wired to the I/O board system port (io @ %p).\n",
+				gGeneral.GetGameTag(), static_cast<const void*>(SystemSwitches::ioState));
+		}
+
+		void SetSystemSwitches(bool test, bool service)
+		{
+			const uint8_t mask = static_cast<uint8_t>((test ? SystemSwitches::BIT_TEST : 0)
+				| (service ? SystemSwitches::BIT_SERVICE : 0));
+			SystemSwitches::heldMask.store(mask, std::memory_order_relaxed);
 		}
 
 		static void assign_helper_enable_shared_from_this(...)

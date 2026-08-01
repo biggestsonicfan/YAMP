@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <optional>
@@ -30,10 +30,16 @@ private:
 	void DrawStfBindingCapture();
 	void StartStfCapture(int player, bool wizard, uint32_t action, uint32_t deviceMask);
 	void AssignStfKey(int player, uint32_t action, uint32_t vk);
-	void AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex);
+	void AssignStfPadButton(int player, uint32_t action, uint32_t button, const std::string& padId);
 	void DrawDebug();
 	// StF only: per-hook control over the module's 76 HLE ROM patches (see m2ftg::HleHooks).
 	void DrawStfHleHooks();
+	// The netplay page: persisted RPCN account settings on top, the live lobby below.
+	void DrawNetplay();
+	// The lobby's status line as an in-game overlay, so a connecting/waiting session is visible
+	// with the settings window closed. A stalled or pre-match frame renders nothing new, which
+	// looks exactly like a hang without this.
+	void DrawNetplayOverlay();
 	void DrawAbout();
 	bool DrawSettingsConfirmation();
 
@@ -85,11 +91,28 @@ private:
 	bool m_m2VersusMode = false;
 	Input::KeyBinds m_m2KeyBinds = Input::DEFAULT_KEY_BINDS;
 	Input::PadBinds m_m2PadBinds = Input::DEFAULT_PAD_BINDS;
-	int32_t m_m2PadIndex[2] = { 0, 1 };
+	std::string m_m2PadId[2] = { "xinput:0", "xinput:1" };
 
 	// Virtua Fighter 2 (see YAMPSettings for field semantics)
 	bool m_vf2Version20 = false;
 	bool m_vf2DisablePepsi = false;
+
+	// Netplay (see YAMPSettings for field semantics). Char buffers rather than std::string:
+	// this ImGui build ships no std::string InputText helper, and the sizes double as the limits
+	// the RPCN protocol imposes anyway.
+	char m_netServer[64] = {};
+	char m_netNpid[24] = {};
+	char m_netToken[64] = {};
+	char m_netFingerprint[72] = {};
+	char m_netComId[16] = {};
+	int m_netFrameDelay = 3;
+	// Lobby-only state: never persisted, never part of the Apply flow.
+	bool m_netShowToken = false;
+	char m_netJoinRoomId[24] = {};
+	// RPCN passwords are a fixed 8 bytes (SceNpMatching2SessionPassword); anything longer is
+	// truncated on the wire, so the field says so rather than silently losing characters.
+	char m_netRoomPassword[9] = {};
+	unsigned long long m_netSelectedRoom = 0;
 
 	// Debug settings
 	bool m_dontApplyPatches = false;
@@ -112,7 +135,9 @@ private:
 	int m_stfCapturePlayer = 0;
 	bool m_stfCaptureOpenPopup = false;
 	std::array<bool, 256> m_stfCapturePrevKeys{};
-	uint32_t m_stfCapturePrevPadButtons[4] = {};
+	// Edge detectors for the capture popup, one per attached controller (Input::Devices()
+	// order), so an input already held when the prompt opens is not read as a press.
+	std::vector<uint64_t> m_stfCapturePrevPadButtons;
 
 	// Volatile state
 	bool m_settingsOpen = false, m_pageModified = false, m_showRestartWarning = false;

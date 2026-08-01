@@ -8,6 +8,21 @@ project "YAMP"
 	include "source/VersionInfo.lua"
 	files { "**/MemoryMgr.h", "**/Trampoline.h", "**/Patterns.*" }
 
+	-- YAMP's own sources. These used to live in the shared `workspace "*"` block below, but that
+	-- block applies to EVERY project in the workspace - once the netplay plugin became a second
+	-- project it started inheriting the whole emulator, so the list moved here where it belongs.
+	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*",
+			"source/imgui/*", "source/Utils/*", "source/input/*",
+			"source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
+			"source/pxd/**.h", "source/pxd/**.cpp",
+			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
+			"source/vf5fs/**.h", "source/vf5fs/**.cpp" }
+
+	-- bcrypt: SHA-256 for the arcade module integrity check (source/GameVerify.cpp).
+	-- dinput8/dxguid: the non-XInput half of the controller layer (source/input/DirectInputPad.cpp)
+	-- — arcade encoders, fight sticks and most third-party pads are HID-only and invisible to XInput.
+	links { "bcrypt", "dinput8", "dxguid" }
+
 
 workspace "*"
 	configurations { "Debug", "Release", "Master" }
@@ -37,14 +52,9 @@ workspace "*"
 	-- out of YAMPSettings) and M2Pad (pxd::csl_pad::set_state, the policy that turns those bindings
 	-- into engine pad state). Moved up out of source/m2ftg on 2026-07-30: all three VF5FS hosts use
 	-- it too, and YAMPSettings.h itself includes it, so it was never m2ftg-specific.
-	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*",
-			"source/imgui/*", "source/Utils/*", "source/input/*",
-			"source/pxd/**.h", "source/pxd/**.cpp",
-			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
-			"source/vf5fs/**.h", "source/vf5fs/**.cpp" }
-
-	-- bcrypt: SHA-256 for the arcade module integrity check (source/GameVerify.cpp).
-	links { "bcrypt" }
+	-- source/net = the netplay PLUGIN LOADER only (NetPlugin.cpp + the shared YampNet.h ABI). The
+	-- netcode itself is a separate DLL project (see "YampNet" at the bottom of this file) so it can
+	-- be rebuilt, replaced or omitted entirely without touching YAMP.
 
 	cppdialect "C++17"
 	staticruntime "on"
@@ -95,5 +105,41 @@ filter { "toolset:not *_xp"}
 -- in the tens of milliseconds and the chunked-start tail never misses its splice.
 filter { "files:**HcaDecoder.cpp or **AdxDecoder.cpp or **AtomEngine.cpp" }
 	optimize "Speed"
+
+filter {}
+
+-- ------------------------------------------------------------------------------------------------
+-- YampNet - the OPTIONAL netplay plugin, built as its own DLL.
+--
+-- Kept a separate project on purpose: the netcode is expected to churn long after the rest of YAMP
+-- is stable, and a release must be able to ship with no netplay in it at all. YAMP never links
+-- against this - it LoadLibrary's it at runtime (source/net/NetPlugin.cpp) and disables netplay
+-- when it is absent - so simply not shipping yampnet.dll is the "exclude it" switch. Building this
+-- project is likewise optional; YAMP.vcxproj does not depend on it.
+--
+-- It lands in the same output directory as YAMP.exe, which is where the loader looks.
+--
+-- NOTE it includes source/m2ftg + source/pxd headers: the plugin writes execute_info.pad[] itself
+-- (that was a deliberate scope choice), so it is coupled to those layouts. The yampnet_layout
+-- handshake in YampNet.h is what turns a stale-layout plugin into a clean refusal at load instead
+-- of silent memory corruption - keep it honest.
+-- ------------------------------------------------------------------------------------------------
+workspace "YAMP"
+
+project "YampNet"
+	kind "SharedLib"
+	language "C++"
+	targetname "yampnet"
+
+	files { "plugin/yampnet/**.h", "plugin/yampnet/**.cpp",
+			"source/net/YampNet.h" }
+
+	includedirs { "source/net", "source" }
+
+	-- ws2_32: the UDP/TCP transport. crypt32/secur32: TLS to the RPCN server.
+	links { "ws2_32", "crypt32", "secur32" }
+
+	vpaths { ["Headers/*"] = { "plugin/yampnet/**.h", "source/net/*.h" },
+			["Sources/*"] = "plugin/yampnet/**.cpp" }
 
 filter {}

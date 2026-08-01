@@ -65,5 +65,65 @@ namespace m2ftg
 		// through the DLL's own memory-map dispatch. Call once per frame; no-op unless the
 		// game is StF and the board has booted.
 		void UpdateGameDebugFlag();
+
+		// Reads 32 bits of emulated i960 memory through the DLL's own memory-map dispatch.
+		// Returns false (leaving `out` untouched) if the module is not loaded or the address
+		// has no reader in the map.
+		bool ReadEmulatedRam32(uint32_t address, uint32_t& out);
+
+		// True once the emulated board has finished booting (the DLL's own phase dword
+		// +0x6B9300 reaches 2, which only happens after module_main has run for a while).
+		//
+		// EVERY determinism helper below is gated on this and quietly returns false before it,
+		// so a netplay round MUST NOT begin until it is true. A guest that joins an already
+		// waiting host reaches the barrier within a couple of hundred milliseconds of launching
+		// - long before its board is up - and would then start a match with no reset, no shared
+		// RNG seed and no texture-budget pin, while the host (which had been waiting, booted)
+		// applied all three. The result is an emulated CPU rolling its own random numbers on one
+		// side only: an AI desync that looks like a network fault and is not one.
+		bool IsBoardBooted();
+
+		// Re-runs the DLL's own i960 CPU/board initialisation - the DEBUG MENU's "RESET" item
+		// (handler at DLL+0x4C840), which unlike STEP/GO is NOT a stub in retail.
+		//
+		// Netplay uses this to give both machines an identical starting state. Lockstep keeps two
+		// emulators in step only if they START in the same state; merely beginning to exchange
+		// inputs at the same moment does nothing if one side has already been running attract mode
+		// for thirty seconds. Resetting both at the barrier makes "frame 0" mean the same thing.
+		//
+		// Returns false if the game is not StF or the board has not booted (dword +0x6B9300 != 2),
+		// in which case nothing was called.
+		bool ResetBoard();
+
+		// Seeds the host RNG that the ROM's `rand` HLE hook draws from, so both machines in a
+		// netplay match produce identical "random" values.
+		//
+		// The ROM's rand is HLE'd: handler DLL+0x53070 calls the DLL's own generator
+		// (DLL+0x8D40) and writes the result into i960 g0. That generator is a MERSENNE TWISTER
+		// (N=624, M=397, the standard tempering shifts) whose state object lives at
+		// *(*(DLL+0x68BB88) + 0x20): u32 state[624] at +0x08, circular index at +0x9C8.
+		// Normally it is seeded per-process, so two machines roll different numbers - which is
+		// exactly what makes the CPU behave differently on each client in a netplay match.
+		//
+		// This re-runs the standard MT init_genrand with the shared match seed. Returns false if
+		// the game is not StF, the board has not booted, or the state object fails a sanity check
+		// (in which case nothing was written).
+		bool SeedHostRng(uint32_t seed);
+
+		// Makes the ROM's texture-upload budget deterministic, which netplay requires.
+		//
+		// Four Core HLE hooks (all sharing handler DLL+0x52FD0) answer the ROM's "have 9 ms
+		// elapsed?" question by reading a WALL CLOCK and writing the boolean into i960 g0. The
+		// unpack loop yields on that answer, so a fast machine and a slow one do different amounts
+		// of work in the same emulated frame and their states diverge - a desync that no amount of
+		// input synchronisation can fix, because the divergence is not in the inputs.
+		//
+		// Enabling this repoints those table entries at a wrapper that runs the original handler
+		// (for its instruction-length return value) and then overwrites g0 with a constant "budget
+		// not expired", so the loop always completes the same work on both machines. The cost is
+		// smoothness during big uploads; the benefit is a reproducible simulation.
+		//
+		// Returns false if the game is not StF, the board has not booted, or no entries matched.
+		bool SetTextureBudgetDeterministic(bool enable);
 	}
 

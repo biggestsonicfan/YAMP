@@ -19,6 +19,7 @@
 
 #include "YAMPGeneral.h"
 #include "DebugLog.h"
+#include "input/Input.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3d12.lib")
@@ -655,7 +656,13 @@ static LRESULT WINAPI WindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPar
 		break;
 	case WM_KEYDOWN:
 	case WM_SYSKEYDOWN:
-		gGeneral.SetKeyPressed(wParam, true);
+		// While an ImGui text field has focus the keystroke is text, not game input: typing a
+		// server name into the netplay lobby must not also throw punches. Key-UP is still always
+		// recorded, so a key held as a field takes focus cannot stick down.
+		if (!ImGui::GetIO().WantTextInput)
+		{
+			gGeneral.SetKeyPressed(wParam, true);
+		}
 		break;
 	case WM_KEYUP:
 	case WM_SYSKEYUP:
@@ -867,6 +874,11 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 		ShowWindow(window.get(), cmdShow);
 		UpdateWindow(window.get());
 		m_window = std::unique_ptr<std::remove_pointer_t<HWND>, hwnd_deleter>(window.release());
+		// DirectInput needs a top-level window to set a cooperative level against; until it has
+		// one, only XInput pads are visible (see source/input/DirectInputPad.cpp). This is the
+		// window thread, but it runs before startupEvent below, which the thread that actually
+		// polls waits on — so the handover is ordered and the input layer stays lock-free.
+		Input::SetWindow(m_window.get());
 
 		CreateRenderResources();
 		EnumerateDisplayModes();
@@ -900,6 +912,9 @@ RenderWindow::RenderWindow(HINSTANCE instance, HINSTANCE dllInstance, int cmdSho
 
 RenderWindow::~RenderWindow()
 {
+	// The DirectInput devices hold a cooperative level against this window, so they have to go
+	// before it does — and doing it here covers every host, not just the ones with a tidy exit.
+	Input::ShutdownPads();
 	PostMessage(m_window.get(), WM_CLOSE, 0, 0);
 	m_windowThread.join();
 }

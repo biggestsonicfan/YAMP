@@ -1,4 +1,4 @@
-// The pad-fill policy for the shared pxd sl pad type — used by EVERY game YAMP hosts: the four
+﻿// The pad-fill policy for the shared pxd sl pad type — used by EVERY game YAMP hosts: the four
 // m2ftg boards (StF/FV/MR/VF2) and all three VF5FS builds, which share the same P/K/G scheme.
 //
 // pxd::csl_pad is declared in source/pxd/LJ/sl.h and is engine layout, but WHAT fills it is host
@@ -73,14 +73,31 @@ namespace pxd
                 m_y1 = 1.0f;
             }
 
-            const Input::PadState& pad = Input::GetPadState(gGeneral.GetSettings()->m_m2PadIndex[player]);
-            if (m_x1 == 0.0f)
+            // The player's stick also steers, like the cabinet lever - EXCEPT when they have
+            // bound their movement to axis directions. On a pad whose axes carry a real analog
+            // stick the two agree, but a DirectInput encoder is free to land its axes in
+            // DIJOYSTATE2 slots that do not match their meaning (the "USB Gamepad" encoder puts
+            // its vertical axis in the X slot). Feeding those raw values in alongside bindings
+            // that already say which way the player pushed would add deflection at ninety
+            // degrees to the input. Where the bindings are explicit, they are the authority.
+            const auto& padBinds = gGeneral.GetSettings()->m_m2PadBinds[player];
+            bool movementOnAxes = false;
+            for (uint32_t action : { Input::Action_Up, Input::Action_Down,
+                                     Input::Action_Left, Input::Action_Right })
             {
-                m_x1 = pad.x;
+                movementOnAxes = movementOnAxes || padBinds[action] >= Input::Pad_Axis1Minus;
             }
-            if (m_y1 == 0.0f)
+            if (!movementOnAxes)
             {
-                m_y1 = pad.y;
+                const Input::PadState& pad = Input::GetPadState(gGeneral.GetSettings()->m_m2PadId[player]);
+                if (m_x1 == 0.0f)
+                {
+                    m_x1 = pad.x;
+                }
+                if (m_y1 == 0.0f)
+                {
+                    m_y1 = pad.y;
+                }
             }
 
             m_push = ~m_prev & m_now;

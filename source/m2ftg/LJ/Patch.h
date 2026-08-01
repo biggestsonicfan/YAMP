@@ -20,6 +20,13 @@ namespace m2ftg
 		// emulated work RAM (the ROM debug menu's trampoline at 0x59F270) can execute.
 		void InstallRamExecFetch(void* dll, const Imports& symbols);
 
+		// Wires the cabinet's TEST and SERVICE switches into the emulated Model 2 I/O board, so
+		// the board's own service menu (and with it the arcade input test) is reachable. Install
+		// once at patch time; SetSystemSwitches is then the per-frame switch position, and does
+		// nothing at all if the install found no hook site.
+		void InstallSystemSwitches(void* dll, const Imports& symbols);
+		void SetSystemSwitches(bool test, bool service);
+
 		void Patch_SysUtil(void* dll, const Imports& symbols);
 		void Patch_CsGame(void* dll, const Imports& symbols);
 		void Patch_Misc(void* dll, const Imports& symbols);

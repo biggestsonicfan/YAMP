@@ -59,6 +59,13 @@ namespace m2ftg
 			// 0x59F270 — reads past the 1MB ROM image and crashes. YAMP replaces it with a
 			// region-aware reimplementation (see InstallRamExecFetch).
 			I960_FETCH_EXEC,
+
+			// The CALL to the emulated Model 2 I/O board's per-frame refresh, at the top of the
+			// module's frame step (StF FUN_180055760+0x25 -> FUN_18004D840; FV FUN_180053DC0+0x25).
+			// That refresh rebuilds the board's input ports from the host pad words and is the
+			// last thing to touch them before the i960 runs, so it is the only place a switch the
+			// module protocol has no field for can be closed. See InstallSystemSwitches.
+			I960_IO_REFRESH_CALL,
 		};
 
 		using Imports = pxd::ImportsT<ImportSymbol>;

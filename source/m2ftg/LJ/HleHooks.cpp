@@ -4,6 +4,7 @@
 #include "../../YAMPSettings.h"
 #include "../../DebugLog.h"
 #include "../ELF/ElfRom.h"
+#include "../../net/NetPlugin.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -243,7 +244,20 @@ void m2ftg::HleHooks::Update()
 	{
 		return;
 	}
-	const uint64_t* wanted = settings->m_stfHleDisableMask;
+	// DURING NETPLAY THE MASK IS IGNORED and every hook is restored, whatever the ini says.
+	//
+	// This mask rewrites the emulated ROM IMAGE. Two machines with different masks are running
+	// different programs, so lockstep faithfully feeds identical inputs into two different games -
+	// a guaranteed desync that no amount of input synchronisation can reach, and one that would be
+	// invisible until someone wondered why their opponent's fighter did something impossible.
+	// Rather than exchange masks and negotiate, both peers simply run the UNMODIFIED ROM, which is
+	// a state both are guaranteed to agree on without any protocol at all.
+	//
+	// It costs nothing to reverse: the reconciler runs every frame, so leaving a room restores the
+	// player's own mask on the next one.
+	static const uint64_t NETPLAY_MASK[2] = { 0, 0 };
+	const bool netplayLocked = net::SessionInProgress();
+	const uint64_t* wanted = netplayLocked ? NETPLAY_MASK : settings->m_stfHleDisableMask;
 
 	const auto* table = reinterpret_cast<const HleTableEntry*>(base + RVA_HLE_TABLE);
 	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + RVA_SAVED_WORDS);

@@ -55,13 +55,16 @@ public:
 	// is_vs_mode: LJ's 2P-quick-match boot (auto-credits both players, random stage).
 	// Off = authentic arcade boot (attract mode, single-player ladder).
 	bool m_m2VersusMode = false;
-	// Per-player input bindings (see Input.h): a keyboard key and/or an XInput button
-	// per action, plus which XInput controller each player reads (-1 = keyboard only).
+	// Per-player input bindings (see Input.h): a keyboard key and/or a controller button
+	// per action, plus which controller each player reads (empty = keyboard only).
 	// The game loop re-reads these every frame, so they apply live. The module-facing
 	// execute_info.assign table is fixed (Input::MODULE_ASSIGN) - remapping is host-side.
 	Input::KeyBinds m_m2KeyBinds = Input::DEFAULT_KEY_BINDS;
 	Input::PadBinds m_m2PadBinds = Input::DEFAULT_PAD_BINDS;
-	int32_t m_m2PadIndex[2] = { 0, 1 };
+	// Input::PadDevice::id, NOT a list index: "xinput:0".."xinput:3" or "dinput:{guid}".
+	// Stored as an id so a pad keeps its bindings when other devices are plugged in or out.
+	// Defaults to the first two XInput slots, which is what the old integer setting meant.
+	std::string m_m2PadId[2] = { "xinput:0", "xinput:1" };
 
 	// Virtua Fighter 2 (YLAD m2ftg module) — the module's own VF2-only config switches
 	// (m2ftg_config_t is_vf20 / is_disable_pepsi), read once at module_start (restart to change).
@@ -92,6 +95,30 @@ public:
 	// the accepted forms. Read from the ini's [HleRetarget] section and applied once, before
 	// module_start; never written back, so a hand-authored section survives Apply.
 	std::string m_stfHleRetarget[m2ftg::HleHooks::COUNT];
+
+	// --- Netplay (RPCN) ---------------------------------------------------------------------
+	// Persisted so a session can be resumed without retyping. m_netToken is the account
+	// password: RPCN's Login takes (npid, password, token) and the token is only used when the
+	// server has email validation enabled, which it is not by default.
+	//
+	// NOTE the fingerprint: leave it EMPTY for a server with a real certificate on a real domain,
+	// which the plugin then validates (chain + host name) like any HTTPS client. It exists for
+	// SELF-SIGNED servers only: RPCN's own `--cert-gen` produces a certificate with CN="RPCN" and
+	// no subjectAltName, which ordinary validation can never accept, so it is pinned by SHA-256
+	// instead. Connecting to such a server unpinned fails with the fingerprint named in the error
+	// (and in yampnet.log), which is where the value to paste here comes from. Never pin a
+	// publicly issued certificate - it is reissued at every renewal and the pin would then reject
+	// the very server it protects.
+	std::string m_netServer;
+	std::string m_netNpid;
+	std::string m_netToken;
+	std::string m_netCertFingerprint;
+	// Title id the rooms are scoped to. Any well-formed comm id works (9 uppercase/digits, '_',
+	// 2 digits) because the server auto-registers unknown titles when CreateMissing is on.
+	std::string m_netComId = "NPWR02113_00";
+	// Frames of input delay. Higher hides more latency at the cost of feel; the lockstep engine
+	// stalls rather than desyncs if this is too low for the link.
+	int m_netFrameDelay = 3;
 
 	// Misc
 	uint32_t m_buildLastShowedDisclaimer = 0;

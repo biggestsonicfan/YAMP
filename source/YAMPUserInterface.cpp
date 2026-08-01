@@ -1,4 +1,4 @@
-#include "YAMPUserInterface.h"
+﻿#include "YAMPUserInterface.h"
 
 #include "m2ftg/DisplayModes.h"
 
@@ -9,12 +9,15 @@
 #include "m2ftg/LJ/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 
+#include "net/NetPlugin.h"
+
 #include "imgui/imgui.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 static const ImVec4 WARNING_COLOUR { 1.000f, 1.000f, 0.000f, 1.000f };
 
@@ -40,6 +43,15 @@ static bool IsM2ftgGame()
 {
 	return IsLJm2ftgGame() || IsKiwami2Game()
 		|| gGeneral.GetGameId() == YAMPGeneral::GameId::VF2;
+}
+
+// Netplay hangs off the LJ m2ftg host loop, but holding two emulators in lockstep needs the
+// determinism work as well (board reset, host-RNG seeding, the texture-budget pin) — and all
+// three of those are reconstructed from StF's DLL. So StF is the only game that can currently
+// sustain a session, and it is the only one that gets the page.
+static bool IsNetplayGame()
+{
+	return gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
 }
 
 // The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
@@ -91,9 +103,23 @@ void YAMPUserInterface::Draw()
 	}
 
 	// The game DLL's own debug windows are independent of the F1 settings window.
-	m2ftg::DrawDebugWindows();
+	//
+	// HIDDEN DURING NETPLAY: the reconstructed DEBUG MENU drives the DLL's own handlers, and one
+	// of them is a REAL board reset (DLL+0x4C840 - the same call the round-start sequence uses).
+	// Running it on one machine mid-match re-initialises that i960 and nothing else, which is an
+	// instant, unrecoverable desync. Single-stepping and the other CPU controls are the same class
+	// of hazard, so the whole set goes away while a session is up rather than being audited item
+	// by item.
+	if (!net::SessionInProgress())
+	{
+		m2ftg::DrawDebugWindows();
+	}
 	m2ftg::UpdateGameDebugFlag();
 	m2ftg::HleHooks::Update();
+
+	// Likewise the netplay status: it has to be visible while the settings window is CLOSED,
+	// which is where a session spends all of its time once it is running.
+	DrawNetplayOverlay();
 
 	if (!ProcessF1Key())
 	{
@@ -116,7 +142,7 @@ void YAMPUserInterface::Draw()
 	if (ImGui::Begin("YAMP Settings", &m_settingsOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
 		// Helper variables
-		int graphics_id, game_id, debug_id, about_id, controls_id;
+		int graphics_id, game_id, debug_id, about_id, controls_id, netplay_id;
 
 		static int selectedTab = 0;
 		static int delayedSelectedTab = 0; // For confirmation
@@ -142,10 +168,13 @@ void YAMPUserInterface::Draw()
 
 			// The launcher hosts no game, so only the Graphics + About pages apply there.
 			int index = 0;
-			game_id = controls_id = debug_id = -1;
+			game_id = controls_id = debug_id = netplay_id = -1;
 			if (!launcherMode) game_id = settingsSection("Game", index++, m_pageModified);
 			graphics_id = settingsSection("Graphics", index++, m_pageModified);
 			if (!launcherMode) controls_id = settingsSection("Controls", index++, m_pageModified);
+			// Only the game that can actually hold a session gets the page — a Netplay tab on a
+			// title with no netcode behind it would be a promise YAMP cannot keep.
+			if (!launcherMode && IsNetplayGame()) netplay_id = settingsSection("Netplay", index++, m_pageModified);
 			if (!launcherMode) debug_id = settingsSection("Debug", index++, m_pageModified);
 			about_id = settingsSection("About", index++, m_pageModified);
 
@@ -180,6 +209,7 @@ void YAMPUserInterface::Draw()
 			if (selectedTab == game_id) DrawGame();
 			else if (selectedTab == graphics_id) DrawGraphics();
 			else if (selectedTab == controls_id) DrawControls();
+			else if (selectedTab == netplay_id) DrawNetplay();
 			else if (selectedTab == debug_id) DrawDebug();
 			else if (selectedTab == about_id) DrawAbout();
 		}
@@ -271,11 +301,24 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_m2PadBinds = settings->m_m2PadBinds;
 	for (int player = 0; player < 2; player++)
 	{
-		m_m2PadIndex[player] = settings->m_m2PadIndex[player];
+		m_m2PadId[player] = settings->m_m2PadId[player];
 	}
 
 	m_vf2Version20 = settings->m_vf2Version20;
 	m_vf2DisablePepsi = settings->m_vf2DisablePepsi;
+
+	// Netplay: settings hold std::strings, the page edits fixed buffers (no std::string InputText
+	// in this ImGui build), so the two are copied across at the page's edges.
+	auto copyToBuffer = [](char* dst, size_t cap, const std::string& src)
+	{
+		strncpy_s(dst, cap, src.c_str(), _TRUNCATE);
+	};
+	copyToBuffer(m_netServer, sizeof(m_netServer), settings->m_netServer);
+	copyToBuffer(m_netNpid, sizeof(m_netNpid), settings->m_netNpid);
+	copyToBuffer(m_netToken, sizeof(m_netToken), settings->m_netToken);
+	copyToBuffer(m_netFingerprint, sizeof(m_netFingerprint), settings->m_netCertFingerprint);
+	copyToBuffer(m_netComId, sizeof(m_netComId), settings->m_netComId);
+	m_netFrameDelay = settings->m_netFrameDelay;
 
 	m_dontApplyPatches = settings->m_dontApplyPatches;
 	m_useD3DDebugLayer = settings->m_useD3DDebugLayer;
@@ -730,6 +773,9 @@ void YAMPUserInterface::DrawControlsStF()
 	if (IsM2ftgGame())
 	{
 		ImGui::TextDisabled("With Free Play off, Start doubles as a coin insert at the coin screen.");
+		ImGui::TextDisabled("Test and Service are the cabinet's service-panel switches: Test opens the board's\n"
+			"own service menu (where the input test shows exactly what the game is reading),\n"
+			"Service is the credit/navigate button beside it. Both are disabled during netplay.");
 	}
 	ImGui::TextDisabled("In the game's own menus, Punch confirms, Kick cancels and Back resets/shows controls.");
 
@@ -742,31 +788,63 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 	// game loop's own per-frame poll has run (polling twice per frame is harmless).
 	Input::PollPads();
 
-	auto controllerLabel = [](int padIndex, char (&buf)[64]) -> const char* {
-		if (padIndex < 0)
-		{
-			return "None (keyboard only)";
-		}
-		sprintf_s(buf, "Controller %d%s", padIndex + 1,
-			Input::GetPadState(padIndex).connected ? "" : " (not connected)");
-		return buf;
-	};
+	// The picker lists every ATTACHED controller - XInput pads and DirectInput ones alike (arcade
+	// encoders, fight sticks, adapters and third-party pads are DirectInput only, and used to be
+	// invisible here). A pad that is configured but currently unplugged still gets a row, so the
+	// player can see their bindings are intact rather than silently reassigned.
+	const std::vector<Input::PadDevice>& devices = Input::Devices();
+	const int selected = Input::FindDevice(m_m2PadId[player]);
+	const bool selectedMissing = selected < 0 && !m_m2PadId[player].empty();
 
-	char label[64];
-	if (ImGui::BeginCombo("Controller", controllerLabel(m_m2PadIndex[player], label)))
+	std::string preview = "None (keyboard only)";
+	if (selected >= 0)
 	{
-		for (int padIndex = -1; padIndex < 4; padIndex++)
+		preview = devices[selected].name;
+	}
+	else if (selectedMissing)
+	{
+		preview = m_m2PadId[player] + " (not connected)";
+	}
+
+	if (ImGui::BeginCombo("Controller", preview.c_str()))
+	{
+		if (ImGui::Selectable("None (keyboard only)", m_m2PadId[player].empty()))
 		{
-			const bool isSelected = padIndex == m_m2PadIndex[player];
-			if (ImGui::Selectable(controllerLabel(padIndex, label), isSelected))
+			m_pageModified = true;
+			m_m2PadId[player].clear();
+		}
+		for (const Input::PadDevice& device : devices)
+		{
+			const bool isSelected = device.id == m_m2PadId[player];
+			if (ImGui::Selectable(device.name.c_str(), isSelected))
 			{
 				m_pageModified = true;
-				m_m2PadIndex[player] = padIndex;
+				m_m2PadId[player] = device.id;
 			}
 			if (isSelected)
 				ImGui::SetItemDefaultFocus();
 		}
+		if (selectedMissing)
+		{
+			// Keep the absent pad selectable so opening the combo cannot silently drop it.
+			ImGui::Selectable(preview.c_str(), true);
+			ImGui::SetItemDefaultFocus();
+		}
 		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
+	// Manual, because scanning for controllers is expensive enough to be felt (~100 ms - see
+	// Input::RefreshDevices) and there is no cheap way to be told about it. Doing it on a timer
+	// stuttered the game every couple of seconds; doing it on WM_DEVICECHANGE would stutter it
+	// whenever anything at all was plugged into the machine. A button costs nothing until asked.
+	if (ImGui::Button("Rescan"))
+	{
+		Input::RequestDeviceRescan();
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Look for controllers plugged in since YAMP started.\n"
+			"Brief pause while it scans.");
 	}
 	ImGui::NewLine();
 
@@ -780,7 +858,13 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		m_pageModified = true;
 		m_m2KeyBinds[player] = Input::DEFAULT_KEY_BINDS[player];
 		m_m2PadBinds[player] = Input::DEFAULT_PAD_BINDS[player];
-		m_m2PadIndex[player] = player;
+		// The pad defaults are Xbox button names, so the matching default device is the
+		// player's XInput slot - keep whatever is selected if it is not an XInput pad, since
+		// resetting a DirectInput stick to "XInput Controller 1" would just unplug the player.
+		if (m_m2PadId[player].empty() || m_m2PadId[player].compare(0, 7, "xinput:") == 0)
+		{
+			m_m2PadId[player] = "xinput:" + std::to_string(player);
+		}
 	}
 
 	if (ImGui::BeginTable("##bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV))
@@ -792,6 +876,14 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 
 		for (uint32_t action = 0; action < Input::Action_Count; action++)
 		{
+			// Test / Service are switches on the arcade cabinet's service panel, which only the
+			// m2ftg boards emulate — the VF5FS builds have no I/O board to wire them to, so
+			// offering the bindings there would just be a row that does nothing.
+			if ((action == Input::Action_Test || action == Input::Action_Service) && !IsM2ftgGame())
+			{
+				continue;
+			}
+
 			ImGui::PushID(static_cast<int>(action));
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
@@ -811,10 +903,8 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 			}
 
 			ImGui::TableNextColumn();
-			const char* padLabel = Input::PadButtonName(m_m2PadBinds[player][action]);
-			char padButtonLabel[64];
-			sprintf_s(padButtonLabel, "%s##pad", padLabel);
-			if (ImGui::Button(padButtonLabel, ImVec2(-FLT_MIN, 0.0f)))
+			const std::string padButtonLabel = Input::PadButtonName(m_m2PadBinds[player][action]) + "##pad";
+			if (ImGui::Button(padButtonLabel.c_str(), ImVec2(-FLT_MIN, 0.0f)))
 			{
 				StartStfCapture(player, false, action, 2);
 			}
@@ -852,9 +942,10 @@ void YAMPUserInterface::StartStfCapture(int player, bool wizard, uint32_t action
 	// Prime the edge detectors with the current state so already-held inputs are ignored.
 	m_stfCapturePrevKeys = gGeneral.GetPressedKeys();
 	Input::PollPads();
-	for (int i = 0; i < 4; i++)
+	m_stfCapturePrevPadButtons.assign(Input::Devices().size(), 0);
+	for (size_t i = 0; i < m_stfCapturePrevPadButtons.size(); i++)
 	{
-		m_stfCapturePrevPadButtons[i] = Input::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = Input::GetPadState(static_cast<int>(i)).buttons;
 	}
 }
 
@@ -876,17 +967,17 @@ void YAMPUserInterface::AssignStfKey(int player, uint32_t action, uint32_t vk)
 	m_m2KeyBinds[player][action] = vk;
 }
 
-void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t button, int padIndex)
+void YAMPUserInterface::AssignStfPadButton(int player, uint32_t action, uint32_t button, const std::string& padId)
 {
 	m_pageModified = true;
 	// Answering with a controller also claims that controller for this player - the
 	// wizard's "press a button to join" moment, like Lost Judgment's pad picking.
-	m_m2PadIndex[player] = padIndex;
+	m_m2PadId[player] = padId;
 	// Steal the button only from players reading the same physical controller; a player
 	// on a different pad legitimately keeps identical bindings.
 	for (int p = 0; p < 2; p++)
 	{
-		if (m_m2PadIndex[p] != padIndex)
+		if (m_m2PadId[p] != padId)
 		{
 			continue;
 		}
@@ -959,14 +1050,19 @@ void YAMPUserInterface::DrawStfBindingCapture()
 	}
 	if (!advanced && (prompt.deviceMask & 2))
 	{
-		for (int padIndex = 0; padIndex < 4 && !advanced; padIndex++)
+		const std::vector<Input::PadDevice>& devices = Input::Devices();
+		// A device list that grew mid-prompt (someone plugged a pad in) would otherwise index
+		// past the primed edges; treat anything new as "nothing held" rather than skipping it.
+		m_stfCapturePrevPadButtons.resize(devices.size(), 0);
+		for (size_t i = 0; i < devices.size() && !advanced; i++)
 		{
-			const uint32_t pressed = Input::GetPadState(padIndex).buttons & ~m_stfCapturePrevPadButtons[padIndex];
+			const uint64_t pressed =
+				Input::GetPadState(static_cast<int>(i)).buttons & ~m_stfCapturePrevPadButtons[i];
 			for (uint32_t button = 1; button < Input::Pad_Count && !advanced; button++)
 			{
-				if (pressed & (1u << button))
+				if (pressed & (1ull << button))
 				{
-					AssignStfPadButton(m_stfCapturePlayer, prompt.action, button, padIndex);
+					AssignStfPadButton(m_stfCapturePlayer, prompt.action, button, devices[i].id);
 					advanced = true;
 				}
 			}
@@ -995,15 +1091,33 @@ void YAMPUserInterface::DrawStfBindingCapture()
 
 	// Refresh the edge detectors for the next frame/prompt.
 	m_stfCapturePrevKeys = keys;
-	for (int i = 0; i < 4; i++)
+	m_stfCapturePrevPadButtons.assign(Input::Devices().size(), 0);
+	for (size_t i = 0; i < m_stfCapturePrevPadButtons.size(); i++)
 	{
-		m_stfCapturePrevPadButtons[i] = Input::GetPadState(i).buttons;
+		m_stfCapturePrevPadButtons[i] = Input::GetPadState(static_cast<int>(i)).buttons;
 	}
 	ImGui::EndPopup();
 }
 
 void YAMPUserInterface::DrawDebug()
 {
+	// Everything on this page either alters the emulated ROM image (the HLE hook mask), writes
+	// emulated RAM (the game debug flag) or exposes the DLL's own CPU controls. All of them change
+	// what this machine simulates, so none of them may be touched while a peer is depending on
+	// this machine simulating the same thing theirs does.
+	if (net::SessionInProgress())
+	{
+		ImGui::PushTextWrapPos();
+		ImGui::TextColored(WARNING_COLOUR, "Debug options are unavailable during a netplay session.");
+		ImGui::TextUnformatted("These settings change what this machine simulates - the emulated ROM "
+			"patches, the game's debug flag, and the game's own CPU/debug windows. Changing any of "
+			"them while another player is in your room would desync the match immediately.");
+		ImGui::NewLine();
+		ImGui::TextUnformatted("Leave the room on the Netplay page to get them back.");
+		ImGui::PopTextWrapPos();
+		return;
+	}
+
 	if (m_debugInfoAccepted.has_value())
 	{
 		ImGui::TextDisabled("Graphics backend: DX11 on D3D12");
@@ -1433,6 +1547,405 @@ void YAMPUserInterface::DrawStfHleHooks()
 	}
 }
 
+// The netplay page. Two halves that behave differently on purpose: the account block above is
+// ordinary settings and goes through Apply/Cancel like every other page, while the lobby below
+// acts the moment a button is pressed — it drives a live network session, which is not something
+// that can sit pending until the user remembers to press Apply.
+void YAMPUserInterface::DrawNetplay()
+{
+	ImGui::PushTextWrapPos();
+	ImGui::TextColored(WARNING_COLOUR, "Netplay is experimental. It plays Sonic the Fighters against one "
+		"other machine over an RPCN server using delay-based lockstep, the same scheme the PS3 port used.");
+	ImGui::PopTextWrapPos();
+	ImGui::Separator();
+
+	if (!net::IsAvailable())
+	{
+		ImGui::PushTextWrapPos();
+		ImGui::TextUnformatted("The netplay plugin (yampnet.dll) is not loaded, so netplay is unavailable. "
+			"It is an optional DLL that sits next to YAMP.exe; builds that ship without it have no netcode at all.");
+		const char* why = net::LoadError();
+		if (why != nullptr && *why != '\0')
+		{
+			ImGui::TextColored(WARNING_COLOUR, "The plugin was found but rejected: %s", why);
+		}
+		ImGui::PopTextWrapPos();
+		return;
+	}
+
+	const net::Status status = net::GetStatus();
+	// A session started with -net-server drives itself end to end (it is the two-machine
+	// regression harness); letting the lobby half-steer it would only produce states neither path
+	// expects, so the controls go read-only instead.
+	const bool commandLineSession = net::Config().enabled;
+
+	// ---- Account ------------------------------------------------------------------------------
+	ImGui::TextUnformatted("Account");
+	ImGui::Separator();
+
+	// Consumed at Connect, so these stay editable right up to that point and never need a restart.
+	// Read-only rather than hidden once a session is up: the values still have to be readable, and
+	// this ImGui build has no BeginDisabled. FAILED counts as editable on purpose — a rejected
+	// login is exactly when a credential needs correcting.
+	const bool accountLocked = commandLineSession
+		|| (status.state != YAMPNET_STATE_IDLE && status.state != YAMPNET_STATE_FAILED);
+	const ImGuiInputTextFlags lockFlag = accountLocked ? ImGuiInputTextFlags_ReadOnly : 0;
+	if (accountLocked)
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+	}
+
+	ImGui::PushItemWidth(-180.0f);
+	if (ImGui::InputText("Server", m_netServer, sizeof(m_netServer), lockFlag)) m_pageModified = true;
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Host name or address of the RPCN server, e.g. np.rpcs3.net.\n"
+			"Both players must use the same one.");
+	}
+
+	if (ImGui::InputText("Account (NPID)", m_netNpid, sizeof(m_netNpid), lockFlag)) m_pageModified = true;
+
+	const ImGuiInputTextFlags tokenFlags =
+		lockFlag | (m_netShowToken ? 0 : ImGuiInputTextFlags_Password);
+	if (ImGui::InputText("Password", m_netToken, sizeof(m_netToken), tokenFlags)) m_pageModified = true;
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Stored in plain text in the settings file, like every other setting.\n"
+			"Use an account you do not mind being readable there.");
+	}
+	ImGui::PopItemWidth();
+	ImGui::SameLine();
+	ImGui::Checkbox("Show", &m_netShowToken);
+
+	ImGui::PushItemWidth(-180.0f);
+	if (ImGui::InputText("Communication ID", m_netComId, sizeof(m_netComId), lockFlag)) m_pageModified = true;
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("The title the rooms are scoped to. Both players must match.\n"
+			"Any well-formed ID works (9 uppercase letters/digits, '_', 2 digits) -\n"
+			"the server registers an unknown title on first use.");
+	}
+
+	if (ImGui::InputText("Certificate SHA-256", m_netFingerprint, sizeof(m_netFingerprint), lockFlag)) m_pageModified = true;
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Leave EMPTY for a server with a proper certificate - it is then validated\n"
+			"the way a browser validates a website, and nothing needs to be pasted here.\n"
+			"\n"
+			"Fill it in only for a SELF-SIGNED server: those certificates carry no usable name, so\n"
+			"ordinary validation can never accept them and the exact certificate is pinned instead.\n"
+			"Connecting to one unpinned fails with its fingerprint in the message (and in\n"
+			"yampnet.log) - that is the value to paste here.\n"
+			"\n"
+			"Do not pin a real certificate: it is reissued every renewal and the pin would then\n"
+			"start rejecting the server.");
+	}
+
+	// The delay is read when a round starts, not when the session connects, so it stays editable
+	// between matches — but not while one is running, where it would silently mean nothing.
+	if (status.state == YAMPNET_STATE_SYNCING || status.state == YAMPNET_STATE_IN_MATCH)
+	{
+		ImGui::LabelText("Input delay", "%d frames", m_netFrameDelay);
+	}
+	else if (ImGui::SliderInt("Input delay", &m_netFrameDelay, 0, 10, "%d frames"))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Frames of delay applied to both players' inputs to hide network latency.\n"
+			"Too low for the connection and the game stalls rather than desyncing; 2-4 suits most links.\n"
+			"Read when a match starts, so a change applies to the next one.");
+	}
+	ImGui::PopItemWidth();
+
+	if (accountLocked)
+	{
+		ImGui::PopStyleVar();
+		ImGui::TextDisabled(commandLineSession
+			? "Driven by the command line for this session."
+			: "Disconnect to change these.");
+	}
+
+	// ---- Lobby --------------------------------------------------------------------------------
+	ImGui::NewLine();
+	ImGui::TextUnformatted("Session");
+	ImGui::Separator();
+
+	ImGui::PushTextWrapPos();
+	ImGui::TextUnformatted(status.text);
+	if (status.error != nullptr && *status.error != '\0')
+	{
+		ImGui::TextColored(WARNING_COLOUR, "%s", status.error);
+	}
+	// Latched for the rest of the session on purpose: this is the single most useful thing the
+	// netplay UI can tell you, and it must not scroll away with the next status change.
+	if (status.desynced)
+	{
+		ImGui::TextColored(WARNING_COLOUR,
+			"Desync detected at frame %u (this machine %u, the other %u). The two emulators "
+			"stopped simulating the same game there; see yampnet.log.",
+			status.desync_frame, status.desync_local, status.desync_remote);
+	}
+	if (const char* actionError = net::LastActionError(); actionError != nullptr && *actionError != '\0')
+	{
+		ImGui::TextColored(WARNING_COLOUR, "%s", actionError);
+	}
+	ImGui::PopTextWrapPos();
+
+	if (commandLineSession)
+	{
+		ImGui::TextDisabled("Started from the command line; the lobby controls are disabled.");
+		return;
+	}
+
+	switch (status.state)
+	{
+	case YAMPNET_STATE_IDLE:
+	case YAMPNET_STATE_FAILED:
+	{
+		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0' && m_netToken[0] != '\0';
+		if (ImGuiCustom::ButtonToggleable("Connect", ready))
+		{
+			// Deliberately the page's live buffers rather than the saved settings: connecting is
+			// how you find out a credential is wrong, and having to Apply first would make fixing
+			// it a two-step dance.
+			net::Connect(m_netServer, m_netNpid, m_netToken, m_netFingerprint, m_netComId);
+		}
+		if (!ready && ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Fill in the server, account and password first.");
+		}
+		break;
+	}
+
+	case YAMPNET_STATE_CONNECTING:
+		if (ImGui::Button("Cancel"))
+		{
+			net::Disconnect();
+		}
+		break;
+
+	case YAMPNET_STATE_ONLINE:
+	{
+		if (ImGui::Button("Host a room"))
+		{
+			net::HostRoom(m_netRoomPassword);
+		}
+		ImGui::SameLine();
+		ImGui::PushItemWidth(160.0f);
+		ImGui::InputText("Room password", m_netRoomPassword, sizeof(m_netRoomPassword));
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Optional. Leave empty for a room anyone with the ID can join.");
+		}
+
+		ImGui::PopItemWidth();
+
+		// ---- Room browser --------------------------------------------------------------------
+		ImGui::NewLine();
+		if (ImGui::Button("Refresh room list"))
+		{
+			net::RefreshRooms();
+			m_netSelectedRoom = 0;
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("Rooms are listed by the account hosting them.");
+
+		net::RoomRow rooms[16];
+		const unsigned int roomCount = net::GetRooms(rooms, static_cast<unsigned int>(std::size(rooms)));
+
+		if (ImGui::BeginTable("##rooms", 4,
+			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+			{ 0.0f, 130.0f }))
+		{
+			ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
+			ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+			ImGui::TableSetupColumn("Locked", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+			ImGui::TableSetupColumn("Room ID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+			ImGui::TableHeadersRow();
+
+			for (unsigned int i = 0; i < roomCount; i++)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::PushID(static_cast<int>(i));
+				const bool selected = m_netSelectedRoom == rooms[i].room_id;
+				if (ImGui::Selectable(rooms[i].owner, selected, ImGuiSelectableFlags_SpanAllColumns))
+				{
+					m_netSelectedRoom = rooms[i].room_id;
+					sprintf_s(m_netJoinRoomId, "%llu", rooms[i].room_id);
+				}
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%u/%u", rooms[i].players, rooms[i].max_players);
+				ImGui::TableSetColumnIndex(2);
+				// A locked room cannot be entered without the password at all: the server only
+				// hands a password-less joiner a PUBLIC slot, and a locked room has none.
+				ImGui::TextUnformatted(rooms[i].has_password ? "yes" : "");
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%llu", rooms[i].room_id);
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+
+		if (roomCount == 0)
+		{
+			ImGui::TextDisabled("No rooms found. Press Refresh, or host one yourself.");
+		}
+
+		// Join by ID stays available: a room can be joined before it shows up in a search, and it
+		// is the fallback when someone simply gives you a number.
+		ImGui::PushItemWidth(160.0f);
+		ImGui::InputText("Room ID", m_netJoinRoomId, sizeof(m_netJoinRoomId), ImGuiInputTextFlags_CharsDecimal);
+		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		if (ImGuiCustom::ButtonToggleable("Join room", m_netJoinRoomId[0] != '\0'))
+		{
+			net::JoinRoom(_strtoui64(m_netJoinRoomId, nullptr, 10), m_netRoomPassword);
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("A locked room needs its password typed into the Room password box above.");
+		}
+
+		ImGui::NewLine();
+		if (ImGui::Button("Disconnect"))
+		{
+			net::Disconnect();
+		}
+		break;
+	}
+
+	case YAMPNET_STATE_IN_ROOM:
+	{
+		if (status.room_id != 0)
+		{
+			ImGui::Text("Room ID: %llu", status.room_id);
+			ImGui::SameLine();
+			if (ImGui::Button("Copy"))
+			{
+				char idText[32];
+				sprintf_s(idText, "%llu", status.room_id);
+				ImGui::SetClipboardText(idText);
+			}
+		}
+		ImGui::PushTextWrapPos();
+		if (status.hosting)
+		{
+			ImGui::TextUnformatted("Give this ID to the other player so they can join.");
+		}
+		// The room is not a presence channel: this machine finds out the other player exists only
+		// when their first packet arrives, and that does not happen until they start the match.
+		// So "waiting for them to join" is not something the lobby can honestly display.
+		ImGui::TextUnformatted("Both players press Start match. Nothing happens until both have - "
+			"the board is reset on both machines at that point so the round starts from the same state.");
+		ImGui::PopTextWrapPos();
+
+		if (ImGui::Button("Start match"))
+		{
+			net::RequestStartRound();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Leave room"))
+		{
+			net::LeaveRoom();
+		}
+		break;
+	}
+
+	case YAMPNET_STATE_SYNCING:
+	case YAMPNET_STATE_IN_MATCH:
+	{
+		ImGui::Text("You are player %d", status.local_player + 1);
+		ImGui::Text("Input delay: %d frames", m_netFrameDelay);
+		// Every stall is a frame the emulator could not run because the other machine's input had
+		// not arrived. A number that keeps climbing is the connection, not the game.
+		ImGui::Text("Stalls: %u", status.stall_count);
+		if (ImGui::Button("Leave match"))
+		{
+			net::LeaveRoom();
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
+}
+
+void YAMPUserInterface::DrawNetplayOverlay()
+{
+	if (!IsNetplayGame() || !net::IsAvailable())
+	{
+		return;
+	}
+
+	const net::Status status = net::GetStatus();
+
+	// The other player vanished. This takes over the screen rather than joining the small status
+	// overlay: the match is over, the game is about to be reset, and the player needs to know why
+	// their opponent stopped moving instead of being dropped back into attract mode unexplained.
+	if (status.peer_lost)
+	{
+		const ImVec2& display = ImGui::GetIO().DisplaySize;
+		ImGui::SetNextWindowPos({ display.x / 2.0f, display.y / 2.0f }, ImGuiCond_Always,
+			{ 0.5f, 0.5f });
+		ImGui::Begin("Netplay##peerlost", nullptr,
+			ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize
+			| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		ImGui::TextUnformatted(status.peer_lost_reason);
+		ImGui::TextUnformatted("The session will be closed and the game reset.");
+		ImGui::NewLine();
+		if (ImGui::Button("OK", { 120.0f, 0.0f }))
+		{
+			// Leave RPCN entirely (not just the room) so nothing reconnects behind the player's
+			// back, then put the board back to a clean attract mode.
+			net::EndSession();
+			m2ftg::ResetBoard();
+		}
+		ImGui::End();
+		return;
+	}
+
+	// Nothing to say before a session is started, and nothing worth covering the game with once
+	// one is running normally.
+	if (!status.started || status.state == YAMPNET_STATE_IN_MATCH || status.state == YAMPNET_STATE_IDLE)
+	{
+		return;
+	}
+
+	ImGui::SetNextWindowPos({ 20, 20 }, ImGuiCond_Always);
+	ImGui::Begin("Netplay", nullptr,
+		ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize
+		| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+	ImGui::TextUnformatted(status.text);
+	// Shown for as long as there is a room, not just while IN_ROOM: a command-line host opens the
+	// barrier the same frame it gets the room, so it is SYNCING within a frame or two - and that
+	// is exactly when the other player still needs to be told which room to join.
+	if (status.room_id != 0)
+	{
+		ImGui::Text("Room ID: %llu", status.room_id);
+	}
+	// The round cannot start until this machine's board has booted (see m2ftg::IsBoardBooted).
+	// Say so, or the wait looks like the session having stalled.
+	if ((status.state == YAMPNET_STATE_IN_ROOM || status.state == YAMPNET_STATE_SYNCING)
+		&& !m2ftg::IsBoardBooted())
+	{
+		ImGui::TextUnformatted("Waiting for the emulated board to finish booting...");
+	}
+	if (status.state == YAMPNET_STATE_FAILED && status.error != nullptr && *status.error != '\0')
+	{
+		ImGui::TextColored(WARNING_COLOUR, "%s", status.error);
+	}
+	if (status.desynced)
+	{
+		ImGui::TextColored(WARNING_COLOUR, "Desync at frame %u - round ended", status.desync_frame);
+	}
+	ImGui::TextDisabled("F1 -> Netplay");
+	ImGui::End();
+}
+
 void YAMPUserInterface::DrawAbout()
 {
 	ImGui::PushTextWrapPos();
@@ -1656,12 +2169,21 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_m2PadBinds = m_m2PadBinds;
 	for (int player = 0; player < 2; player++)
 	{
-		settings->m_m2PadIndex[player] = m_m2PadIndex[player];
+		settings->m_m2PadId[player] = m_m2PadId[player];
 	}
 
 	// Consumed once by module_start (config.is_vf20 / is_disable_pepsi), hence the restart warning.
 	settings->m_vf2Version20 = m_vf2Version20;
 	settings->m_vf2DisablePepsi = m_vf2DisablePepsi;
+
+	// Netplay: read when a session connects and when a round starts, so no restart is needed —
+	// which is why none of these appear in the needsRestart test above.
+	settings->m_netServer = m_netServer;
+	settings->m_netNpid = m_netNpid;
+	settings->m_netToken = m_netToken;
+	settings->m_netCertFingerprint = m_netFingerprint;
+	settings->m_netComId = m_netComId;
+	settings->m_netFrameDelay = m_netFrameDelay;
 
 	settings->m_dontApplyPatches = m_dontApplyPatches;
 	settings->m_useD3DDebugLayer = m_useD3DDebugLayer;

@@ -2,6 +2,7 @@
 
 #include "../../YAMPGeneral.h"
 #include "../ELF/ElfRom.h"
+#include "../../net/NetPlugin.h"
 
 #include "../../imgui/imgui.h"
 
@@ -750,6 +751,201 @@ uint32_t m2ftg::I960Profile::Bucket(size_t index)
 	return index < BUCKET_COUNT ? detail::g_buckets[index] : 0;
 }
 
+namespace
+{
+	// --- Deterministic texture-upload budget (see the header) --------------------------------
+	constexpr uintptr_t RVA_HLE_TABLE_LOCAL = 0x1E8870;
+	constexpr size_t HLE_ENTRY_COUNT = 76;
+	constexpr uintptr_t RVA_TEX_BUDGET_HANDLER = 0x52FD0;
+
+	struct HleEntry
+	{
+		uint32_t romOffset;
+		uint32_t padding;
+		uint64_t handler;
+	};
+	static_assert(sizeof(HleEntry) == 0x10, "HLE record is 16 bytes in the DLL");
+
+	using HleHandlerFn = unsigned long long (*)(unsigned int);
+
+	HleHandlerFn g_originalTexBudget = nullptr;
+	uint8_t* g_texBudgetBase = nullptr;
+
+	// Runs the DLL's own handler first so its return value (the trapped instruction's length, 4 or
+	// 8) stays exactly right, then replaces the wall-clock answer it wrote into g0.
+	unsigned long long DeterministicTexBudget(unsigned int index)
+	{
+		const unsigned long long length = g_originalTexBudget(index);
+
+		if (g_texBudgetBase != nullptr)
+		{
+			uint8_t* ctx = *reinterpret_cast<uint8_t**>(g_texBudgetBase + RVA_CPU_CTX_PTR);
+			if (ctx != nullptr)
+			{
+				// g0 = 0: "the budget has not expired", so the unpack loop runs to completion
+				// instead of stopping wherever this machine happened to be after 9 ms.
+				*reinterpret_cast<uint32_t*>(ctx + 0x98) = 0;
+			}
+		}
+		return length;
+	}
+}
+
+bool m2ftg::SetTextureBudgetDeterministic(bool enable)
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return false;
+	}
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return false;
+	}
+	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	{
+		return false;
+	}
+
+	g_texBudgetBase = base;
+	const uint64_t original = reinterpret_cast<uint64_t>(base + RVA_TEX_BUDGET_HANDLER);
+	const uint64_t replacement = reinterpret_cast<uint64_t>(&DeterministicTexBudget);
+
+	// The table lives in .data and the installer writes it at boot, so it is already writable -
+	// no VirtualProtect dance needed.
+	auto* table = reinterpret_cast<HleEntry*>(base + RVA_HLE_TABLE_LOCAL);
+	size_t patched = 0;
+	for (size_t i = 0; i < HLE_ENTRY_COUNT; ++i)
+	{
+		if (enable && table[i].handler == original)
+		{
+			if (g_originalTexBudget == nullptr)
+			{
+				g_originalTexBudget = reinterpret_cast<HleHandlerFn>(original);
+			}
+			table[i].handler = replacement;
+			++patched;
+		}
+		else if (!enable && table[i].handler == replacement)
+		{
+			table[i].handler = original;
+			++patched;
+		}
+	}
+	return patched != 0;
+}
+
+bool m2ftg::SeedHostRng(uint32_t seed)
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return false;
+	}
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return false;
+	}
+	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	{
+		return false;
+	}
+
+	// Layout from the generator at DLL+0x8D40 (see the header): the holder global points at a
+	// struct whose +0x20 is the Mersenne Twister state object.
+	constexpr uintptr_t RVA_RNG_HOLDER = 0x68BB88;
+	constexpr uintptr_t OFF_STATE = 0x008;    // u32 [624]
+	constexpr uintptr_t OFF_INDEX = 0x9C8;    // circular index, 0..623
+	constexpr uint32_t MT_N = 624;
+
+	__try
+	{
+		uint8_t* holder = *reinterpret_cast<uint8_t**>(base + RVA_RNG_HOLDER);
+		if (holder == nullptr)
+		{
+			return false;
+		}
+		uint8_t* mt = *reinterpret_cast<uint8_t**>(holder + 0x20);
+		if (mt == nullptr)
+		{
+			return false;
+		}
+
+		// Sanity: a live twister always has its index inside the state array. If this is not the
+		// object we think it is, bail rather than scribble 2.5 KB over something else.
+		uint32_t& index = *reinterpret_cast<uint32_t*>(mt + OFF_INDEX);
+		if (index >= MT_N)
+		{
+			return false;
+		}
+
+		// Standard init_genrand: mt[0] = seed; mt[i] = 1812433253 * (mt[i-1] ^ (mt[i-1]>>30)) + i.
+		uint32_t* state = reinterpret_cast<uint32_t*>(mt + OFF_STATE);
+		state[0] = seed;
+		for (uint32_t i = 1; i < MT_N; ++i)
+		{
+			const uint32_t prev = state[i - 1];
+			state[i] = 1812433253u * (prev ^ (prev >> 30)) + i;
+		}
+		// This generator twists in place off a circular index rather than regenerating in blocks,
+		// so a freshly seeded state starts at element 0.
+		index = 0;
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return false;
+	}
+}
+
+bool m2ftg::ReadEmulatedRam32(uint32_t address, uint32_t& out)
+{
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return false;
+	}
+	return ReadEmulated32(base, address, out);
+}
+
+bool m2ftg::IsBoardBooted()
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return false;
+	}
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return false;
+	}
+	return *reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) == 2;
+}
+
+bool m2ftg::ResetBoard()
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return false;
+	}
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return false;
+	}
+	// Calling the reset before the board has finished booting would re-init a CPU whose ROM is
+	// still loading, so gate on the same boot dword the menu actions use.
+	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	{
+		return false;
+	}
+
+	// DEBUG MENU item 5, "RESET": writes run-state 0 and calls the DLL's real i960/board init.
+	constexpr uintptr_t RVA_RESET_HANDLER = 0x4C840;
+	InvokeDwAction(base + RVA_RESET_HANDLER);
+	return true;
+}
+
 void m2ftg::DrawDebugWindows()
 {
 	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
@@ -813,7 +1009,12 @@ void m2ftg::UpdateGameDebugFlag()
 		return;
 	}
 	const YAMPSettings* settings = gGeneral.GetSettings();
-	const bool enable = settings != nullptr && settings->m_stfGameDebugFlag;
+	// Forced OFF during netplay, for the same reason the HLE mask is ignored there: this writes
+	// EMULATED RAM (the dword at 0x508000), so one machine having it set and the other not means
+	// the two are simulating different memory. Both peers run with it clear, which is a state they
+	// agree on without having to exchange anything.
+	const bool enable = settings != nullptr && settings->m_stfGameDebugFlag
+	                 && !net::SessionInProgress();
 
 	uint8_t* base = ModuleBase();
 	if (base == nullptr)
