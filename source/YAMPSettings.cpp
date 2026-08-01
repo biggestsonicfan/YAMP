@@ -221,6 +221,7 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_m2Country = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
 		m_m2Freeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str()) != 0;
 		m_m2VersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str()) != 0;
+		m_m2RealDamage = GetPrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str()) != 0;
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];
@@ -331,6 +332,7 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str());
 		for (int player = 0; player < 2; player++)
 		{
 			wchar_t key[48];

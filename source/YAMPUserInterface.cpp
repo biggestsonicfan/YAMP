@@ -297,6 +297,7 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_m2Country = settings->m_m2Country;
 	m_m2Freeplay = settings->m_m2Freeplay;
 	m_m2VersusMode = settings->m_m2VersusMode;
+	m_m2RealDamage = settings->m_m2RealDamage;
 	m_m2KeyBinds = settings->m_m2KeyBinds;
 	m_m2PadBinds = settings->m_m2PadBinds;
 	for (int player = 0; player < 2; player++)
@@ -690,6 +691,61 @@ void YAMPUserInterface::DrawGameStF()
 	{
 		ImGui::SetTooltip("When unchecked, the game asks for credits like a real cabinet:\n"
 			"press Start (F key) on the coin screen to insert a coin.\nRequires a restart.");
+	}
+
+	// StF's own GAME ASSIGNMENTS page has a DAMAGE item; the other m2ftg games do not, and it is
+	// not part of the module's config block either - it is a byte of the ROM's live game
+	// assignments, which is why this one applies immediately (see m2ftg::UpdateDamageAssignment).
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	{
+		const char* labels[] = { "Normal", "Real" };
+
+		// FROZEN once a room exists. The setting is published when the room is CREATED, so from
+		// that moment on it describes the match rather than this machine, and letting it move
+		// would only ever mean one of two wrong things: a value that is ignored (confusing), or
+		// one peer's emulator changing a damage rule mid-match (a desync). Showing the room's
+		// live value read-only is the honest version of both. Everything before a room - offline,
+		// connecting, or logged in and browsing - stays editable, which is where the choice
+		// belongs.
+		if (net::SessionInProgress())
+		{
+			const net::Status status = net::GetStatus();
+			ImGui::LabelText("Damage", "%s", labels[status.real_damage ? 1 : 0]);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Set by the room's host and fixed for the match.\n"
+					"Leave the room to change your own setting.");
+			}
+		}
+		else
+		{
+			const int current = m_m2RealDamage ? 1 : 0;
+			if (ImGui::BeginCombo("Damage", labels[current]))
+			{
+				for (int index = 0; index < 2; index++)
+				{
+					const bool isSelected = index == current;
+					if (ImGui::Selectable(labels[index], isSelected))
+					{
+						m_pageModified = true;
+						m_m2RealDamage = index != 0;
+					}
+					if (isSelected)
+						ImGui::SetItemDefaultFocus();
+				}
+
+				ImGui::EndCombo();
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("The cabinet's GAME ASSIGNMENTS -> DAMAGE setting. Real makes hits take\n"
+					"considerably more health, which is the setting most competitive players use.\n"
+					"Applies immediately - no restart needed.\n\n"
+					"Online this is a property of the ROOM: it is published when the host creates one\n"
+					"and cannot be changed while you are in a room. Everyone plays under the host's\n"
+					"choice, whatever their own setting says.");
+			}
+		}
 	}
 
 	if (ImGui::Checkbox("Versus Mode", &m_m2VersusMode))
@@ -1725,7 +1781,16 @@ void YAMPUserInterface::DrawNetplay()
 	{
 		if (ImGui::Button("Host a room"))
 		{
-			net::HostRoom(m_netRoomPassword);
+			// The room takes this machine's cabinet settings with it. Read from the SAVED
+			// settings, not the Game page's edit buffer: an unapplied combo change would
+			// otherwise publish a value the local emulator is not running under.
+			const YAMPSettings* set = gGeneral.GetSettings();
+			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage);
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The room is created with your current Damage setting (Game page),\n"
+				"and everyone who joins plays under it. It cannot be changed once the room exists.");
 		}
 		ImGui::SameLine();
 		ImGui::PushItemWidth(160.0f);
@@ -1750,12 +1815,13 @@ void YAMPUserInterface::DrawNetplay()
 		net::RoomRow rooms[16];
 		const unsigned int roomCount = net::GetRooms(rooms, static_cast<unsigned int>(std::size(rooms)));
 
-		if (ImGui::BeginTable("##rooms", 4,
+		if (ImGui::BeginTable("##rooms", 5,
 			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
 			{ 0.0f, 130.0f }))
 		{
 			ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+			ImGui::TableSetupColumn("Damage", ImGuiTableColumnFlags_WidthFixed, 60.0f);
 			ImGui::TableSetupColumn("Locked", ImGuiTableColumnFlags_WidthFixed, 55.0f);
 			ImGui::TableSetupColumn("Room ID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
 			ImGui::TableHeadersRow();
@@ -1774,10 +1840,15 @@ void YAMPUserInterface::DrawNetplay()
 				ImGui::TableSetColumnIndex(1);
 				ImGui::Text("%u/%u", rooms[i].players, rooms[i].max_players);
 				ImGui::TableSetColumnIndex(2);
+				// The host's DAMAGE assignment, published with the room. Worth a column of its
+				// own because it is not a preference you keep on joining - it is how that match
+				// will play, and the two settings are very different games.
+				ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
+				ImGui::TableSetColumnIndex(3);
 				// A locked room cannot be entered without the password at all: the server only
 				// hands a password-less joiner a PUBLIC slot, and a locked room has none.
 				ImGui::TextUnformatted(rooms[i].has_password ? "yes" : "");
-				ImGui::TableSetColumnIndex(3);
+				ImGui::TableSetColumnIndex(4);
 				ImGui::Text("%llu", rooms[i].room_id);
 				ImGui::PopID();
 			}
@@ -1825,6 +1896,11 @@ void YAMPUserInterface::DrawNetplay()
 				ImGui::SetClipboardText(idText);
 			}
 		}
+		// What this match will actually be played under, stated for BOTH players: the host has to
+		// see what it published (the room is fixed now, so a later settings change is not it), and
+		// the guest has to see what it has just adopted.
+		ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal",
+			status.hosting ? "" : " (set by the host)");
 		ImGui::PushTextWrapPos();
 		if (status.hosting)
 		{
@@ -2134,6 +2210,7 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_m2Country != m_m2Country ||
 		settings->m_m2Freeplay != m_m2Freeplay ||
 		settings->m_m2VersusMode != m_m2VersusMode ||
+		settings->m_m2RealDamage != m_m2RealDamage ||
 		settings->m_vf2Version20 != m_vf2Version20 ||
 		settings->m_vf2DisablePepsi != m_vf2DisablePepsi ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
@@ -2159,6 +2236,7 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_m2Country = m_m2Country;
 	settings->m_m2Freeplay = m_m2Freeplay;
 	settings->m_m2VersusMode = m_m2VersusMode;
+	settings->m_m2RealDamage = m_m2RealDamage;
 	// Bindings are re-read by the game loop every frame, so they apply live.
 	settings->m_m2KeyBinds = m_m2KeyBinds;
 	settings->m_m2PadBinds = m_m2PadBinds;

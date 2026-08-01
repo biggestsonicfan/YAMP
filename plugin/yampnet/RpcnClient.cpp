@@ -294,12 +294,18 @@ namespace yampnet
     }
 
     uint64_t RpcnClient::CreateRoom(const char* com_id, uint32_t world_id, uint32_t max_slot,
-                                const char* password)
+                                const char* password, uint32_t flag_attr)
     {
         uint8_t pb[256];
         PbWriter w(pb, sizeof(pb));
         w.Varint(1, world_id);                 // worldId
         w.Varint(3, max_slot);                 // maxSlot
+        if (flag_attr != 0)
+        {
+            // flagAttr. A bare varint, unlike the uint8/uint16 fields around it - the proto types
+            // it uint32, so it is NOT one of the flatbuffers-era wrapper submessages.
+            w.Varint(4, flag_attr);
+        }
         // teamId is NOT optional despite proto3: room_manager.rs does
         // `pb.team_id.get_verified()?` and Option<Uint8>::get_verified() returns Malformed when the
         // field is absent ("Protobuf Uint8 is none!"). It is a uint8 WRAPPER submessage, so it has
@@ -455,7 +461,9 @@ namespace yampnet
             RoomListing row = {};
             // RoomDataExternal: roomId = 6 (bare varint), maxSlot = 8, curMemberNum = 10 and
             // privateSlotNum = 4 (all uint16 WRAPPER submessages - see the proto note: uint8/uint16
-            // are messages { uint32 value = 1 }, not bare varints), owner = 12 (UserInfo).
+            // are messages { uint32 value = 1 }, not bare varints), owner = 12 (UserInfo),
+            // flagAttr = 14 (uint32, so a bare varint). flagAttr needs no attrId in the search
+            // request - the server fills it unconditionally, unlike the searchable attr arrays.
             PbReader room = top.Sub();
             while (room.Next())
             {
@@ -483,6 +491,7 @@ namespace yampnet
                     }
                     break;
                 }
+                case 14: row.flag_attr = static_cast<uint32_t>(room.AsVarint()); break;
                 default: break;
                 }
             }
@@ -510,6 +519,30 @@ namespace yampnet
             {
                 if (room.Field() == 4 && room.WireType() == kWireVarint)
                     return room.AsVarint();
+            }
+        }
+        return 0;
+    }
+
+    uint32_t RpcnClient::ParseRoomFlagAttr(const uint8_t* payload, uint32_t size)
+    {
+        if (!StripDataPacket(payload, size))
+            return 0;
+
+        // Same wrapper as ParseRoomId - CreateRoomResponse{ internal=1 } and
+        // JoinRoomResponse{ room_data=1 } are both a RoomDataInternal at field 1 - whose flagAttr
+        // is field 10. This is what makes a guest able to learn the host's cabinet settings from
+        // the join alone, with no search and no extra request.
+        PbReader top(payload, size);
+        while (top.Next())
+        {
+            if (top.Field() != 1 || top.WireType() != kWireLen)
+                continue;
+            PbReader room = top.Sub();
+            while (room.Next())
+            {
+                if (room.Field() == 10 && room.WireType() == kWireVarint)
+                    return static_cast<uint32_t>(room.AsVarint());
             }
         }
         return 0;

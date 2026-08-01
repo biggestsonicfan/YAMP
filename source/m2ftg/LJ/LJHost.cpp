@@ -176,6 +176,9 @@ namespace m2ftg
                 // Cabinet Test / Service switches on the emulated I/O board's system port,
                 // which is what makes the board's own service menu reachable.
                 InstallSystemSwitches(dll, symbolMap);
+                // ...and one bad byte in the backup RAM the module injects, which hangs the
+                // board as soon as that menu's GAME ASSIGNMENTS page is drawn.
+                FixBackupRamTimeIndex(dll);
             }
 
             PatchSl(sl::sm_context);
@@ -965,6 +968,15 @@ namespace m2ftg
             int funcResult = 0;
             if (advanceFrame)
             {
+                // GAME ASSIGNMENTS -> DAMAGE, held at the dip switch's (or the room's) value.
+                // Deliberately inside the advanceFrame branch and immediately before the call:
+                // this writes emulated RAM, so under lockstep it must happen exactly once per
+                // EMULATED frame on both machines. Driving it from the UI thread - where the other
+                // live setting, the debug flag, is driven - would tie it to host frame pacing
+                // instead, and a write that lands a frame earlier on one peer than the other is a
+                // divergence even when the value is identical.
+                UpdateDamageAssignment();
+
                 // Bracket the DLL's render so the ResourceBarrier hook corrects StF's barrier
                 // StateBefore values (ping-pong RTs assume last-frame state; YAMP creates in
                 // COMMON -> id=527 desync).

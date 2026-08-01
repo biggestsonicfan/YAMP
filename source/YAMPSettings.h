@@ -52,6 +52,12 @@ public:
 	// Seeds the game-assignments country byte (SRAM 0x1D03352 / RAM 0x59C352).
 	uint32_t m_m2Country = 0;
 	bool m_m2Freeplay = true;
+	// Sonic the Fighters' GAME ASSIGNMENTS -> DAMAGE item: false = NORMAL (the cabinet default),
+	// true = REAL. Unlike the switches above this one is NOT part of the module's config block -
+	// the ROM keeps it as bit 0x80 of game_assignments_flag in emulated RAM (0x59C353), which is
+	// also why it applies live rather than needing a restart. StF only; the other m2ftg games have
+	// no such assignment. See m2ftg::UpdateDamageAssignment.
+	bool m_m2RealDamage = false;
 	// is_vs_mode: LJ's 2P-quick-match boot (auto-credits both players, random stage).
 	// Off = authentic arcade boot (attract mode, single-player ladder).
 	bool m_m2VersusMode = false;

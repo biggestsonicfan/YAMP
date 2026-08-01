@@ -7,6 +7,7 @@
 #include "../../wil/common.h"
 #include "../../DebugLog.h"
 #include "../../Utils/MemoryMgr.h"
+#include "../../Utils/Patterns.h"
 #include "../../Utils/Trampoline.h"
 
 #include "../../pxd/LJ/sys_util.h"
@@ -259,6 +260,76 @@ namespace m2ftg
 			SystemSwitches::orgIoRefresh = refresh;
 			Trampoline* t = Trampoline::MakeTrampoline(dll);
 			Memory::InjectHook(callSite, t->Jump(&SystemSwitches::IoRefresh));
+		}
+
+		// ---- GAME ASSIGNMENTS lockup -----------------------------------------------------
+		// Selecting GAME ASSIGNMENTS in the board's service menu froze the whole app. The i960
+		// spins forever inside print_mes (ROM 0x5680-0x569C), so module_main never returns and
+		// the host frame pump never gets control back - the freeze is the emulator's, but the
+		// cause is one bad byte in the backup RAM the module injects.
+		//
+		// The menu's value column is drawn by game_assign_bk_ram_thing (ROM 0x637C8). For an
+		// item whose flag word has bit 8 set and bit 2 clear, it uses the item's backup-RAM byte
+		// as a RAW INDEX into a ROM array of string pointers, with no bounds check:
+		//     r9 = item[0x10]; g0 = r9[value * 4]; print_mes(g0)
+		// The TIME item (backup +0x3351, "time_var_array_num") indexes a 10-entry table at ROM
+		// 0x5E088 holding "10".."99" - the display strings for time_vars[] at ROM 0x8F3C4
+		// (0A 14 1E 28 32 3C 46 50 5A 63). The ROM's own default, written by
+		// init_game_assignments (ROM 0x626A4), is 2 - index of "30" - and the menu's own edit
+		// handler ga_TIME_sub (ROM 0x5D648) clamps the field to 0..9.
+		//
+		// The module writes 0x1E: the time in SECONDS, not the index. Index 30 reads 80 bytes
+		// past the end of a 40-byte table - into i960 code - and yields the pointer 0x8C703000.
+		// That guest address is unmapped, and an unmapped read in this emulator is a bare `ret`
+		// stub that leaves the destination register untouched, so print_mes's `ldib` returns the
+		// same non-zero byte forever and its "stop at NUL" loop can never end. On real hardware
+		// the same read would eventually hit a zero (or the watchdog would reset the board);
+		// here it is a guaranteed hang. TIME is the only item of the eighteen whose injected
+		// value is out of range - every other byte in the block matches the ROM's own defaults
+		// exactly, which is why only this one page locks up.
+		//
+		// Fixed at the source, by correcting the constant in the module's injector rather than
+		// policing the backup RAM afterwards: the byte is the operator's setting, so the service
+		// menu must stay free to change it, and re-asserting it per frame would fight the menu.
+		void FixBackupRamTimeIndex(void* dll)
+		{
+			// The tail of the injector (StF's set_window_data+0x564 handler, module +0x529D0)
+			// that fills the +0x3340 half of the block. Anchored on the TST_*_ADD / TST_*_MUL
+			// constants either side of it, which are distinctive and are themselves confirmed
+			// correct against init_game_assignments:
+			//     mov dword [rbp+0x20], 0x36161616   ; +0x3359 TST_RED/GRN/BLUE_ADD, RED_MUL
+			//     lea  rax, [rbx+0x91]
+			//     mov  word [rbp+0x24], 0x3636       ; +0x335D TST_GRN/BLUE_MUL
+			//     mov  byte [rbp+0x26], 0x1F         ; +0x335F
+			//     mov  byte [rbp+0x18], 0x1E         ; +0x3351 <- the one that is wrong
+			// The stack buffer is copied out with `vmovups [rax+0x3340], ymm0` from [rbp+0x07],
+			// which is what fixes the +0x07 <-> 0x3340 correspondence used above.
+			constexpr ptrdiff_t IMMEDIATE_OFFSET = 27;  // the 0x1E, from the pattern's first byte
+			constexpr uint8_t TIME_INDEX_30S = 0x02;    // init_game_assignments' own default
+
+			hook::txn::pattern injector(dll,
+				"C7 45 20 16 16 16 36 48 8D 83 ? ? ? ? 66 C7 45 24 36 36 C6 45 26 1F C6 45 18 1E");
+			// size() is the non-throwing accessor - a module that does not match (a different
+			// m2ftg build, or a future one where SEGA fixed this) simply keeps its own value.
+			if (injector.size() != 1)
+			{
+				DebugLog("[%s] Backup-RAM TIME index: injector not matched (%zu hits) - left alone.\n",
+					gGeneral.GetGameTag(), injector.size());
+				return;
+			}
+
+			auto* const immediate = injector.get(0).get<uint8_t>(IMMEDIATE_OFFSET);
+			if (*immediate != 0x1E)
+			{
+				DebugLog("[%s] Backup-RAM TIME index: expected 0x1E, found 0x%02X - left alone.\n",
+					gGeneral.GetGameTag(), *immediate);
+				return;
+			}
+
+			Memory::VP::Patch<uint8_t>(immediate, TIME_INDEX_30S);
+			DebugLog("[%s] Backup-RAM TIME index: 0x1E (30s, a raw value) -> 0x%02X (the ROM's own "
+				"index for \"30\"); GAME ASSIGNMENTS is safe to open.\n",
+				gGeneral.GetGameTag(), TIME_INDEX_30S);
 		}
 
 		void SetSystemSwitches(bool test, bool service)

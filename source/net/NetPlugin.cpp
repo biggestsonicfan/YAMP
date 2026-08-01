@@ -318,6 +318,13 @@ namespace net
             {
                 yampnet_room_config rcfg = {};
                 rcfg.max_players = 2;
+                // The harness host publishes its own dip switches too, so a -net-host / -net-join
+                // pair is played under the same cabinet settings the lobby would have produced.
+                if (const YAMPSettings* set = gGeneral.GetSettings();
+                    set != nullptr && set->m_m2RealDamage)
+                {
+                    rcfg.game_flags |= YAMPNET_ROOM_FLAG_REAL_DAMAGE;
+                }
                 r = s_api->create_room(s_session, &rcfg);
             }
             else
@@ -454,6 +461,8 @@ namespace net
         st.peer_lost = s_peerLost;
         st.peer_lost_reason = s_peerLostReason;
         st.error = s_api->get_error(s_session);
+        st.real_damage =
+            (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
         if (s_api->get_desync(s_session, &dFrame, &dLocal, &dRemote) != 0)
@@ -538,7 +547,7 @@ namespace net
         NetLog("ui: disconnected");
     }
 
-    bool HostRoom(const char* password)
+    bool HostRoom(const char* password, bool realDamage)
     {
         if (!UiMayAct())
             return false;
@@ -548,6 +557,9 @@ namespace net
         rcfg.is_private = (password != nullptr && *password != '\0') ? 1u : 0u;
         rcfg.password = rcfg.is_private ? password : nullptr;
         rcfg.forced_seed = 0;            // the plugin generates and distributes the match seed
+        // Published once, at creation. The room - not either player's settings file - is what the
+        // match is played under from here on.
+        rcfg.game_flags = realDamage ? YAMPNET_ROOM_FLAG_REAL_DAMAGE : 0u;
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
         {
@@ -614,8 +626,22 @@ namespace net
             out[i].players = rooms[i].player_count;
             out[i].max_players = rooms[i].max_players;
             out[i].has_password = rooms[i].has_password != 0;
+            out[i].real_damage =
+                (rooms[i].game_flags & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
         }
         return n;
+    }
+
+    bool EffectiveRealDamage(bool localSetting)
+    {
+        if (!SessionInProgress())
+        {
+            return localSetting;
+        }
+        // Read from the plugin every time rather than cached: for a guest the room flags only
+        // become known when the join reply lands, and this is called from the emulator's frame
+        // loop, which is running long before that.
+        return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
     }
 
     void LeaveRoom()

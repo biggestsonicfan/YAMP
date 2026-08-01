@@ -100,6 +100,9 @@ namespace net
         unsigned int desync_remote = 0;
         const char* text = "";         // one line describing `state`; never null
         const char* error = "";        // the plugin's last failure text; "" when none
+        // The cabinet settings this room is played under - the host's, adopted by every peer.
+        // Meaningless unless there is a room; the lobby only shows them from IN_ROOM onwards.
+        bool real_damage = false;
     };
     Status GetStatus();
 
@@ -108,7 +111,9 @@ namespace net
     bool Connect(const char* server, const char* npid, const char* token,
                  const char* fingerprint, const char* comId);
     void Disconnect();
-    bool HostRoom(const char* password);
+    // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
+    // joins plays under it - see EffectiveRealDamage.
+    bool HostRoom(const char* password, bool realDamage);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -119,6 +124,9 @@ namespace net
         unsigned int players = 0;
         unsigned int max_players = 0;
         bool has_password = false;
+        // The host's DAMAGE setting, shown in the browser so the room can be judged before
+        // joining it: it is not a preference the joiner gets to keep, it is how that match plays.
+        bool real_damage = false;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();
@@ -136,6 +144,17 @@ namespace net
     // network fault. There is no way to make these safe per-feature: the answer is to switch them
     // off for the duration.
     bool SessionInProgress();
+
+    // The DAMAGE setting the emulator must actually run under this frame: the ROOM'S while a
+    // session is up, and `localSetting` otherwise.
+    //
+    // This is the one function that decides it, so no caller can accidentally apply a local
+    // preference to a networked match. Cabinet settings are not per-player: they change what the
+    // ROM computes from a hit, so two peers disagreeing on one produce different games from
+    // identical inputs and the desync canary fires within seconds. The room's value is
+    // authoritative for the host too - it changes nothing for a host whose switch has not moved,
+    // and it stops a mid-session switch flip from silently splitting the pair.
+    bool EffectiveRealDamage(bool localSetting);
 
     // Called by the host loop when a round ends because the other player went away. Latches the
     // reason for the dialog; harmless to call repeatedly.

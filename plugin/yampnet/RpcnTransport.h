@@ -56,9 +56,16 @@ namespace yampnet
         uint64_t RoomId() const { return m_room_id; }
         bool IsHost() const { return m_is_host; }
 
-        // Create a room and wait for someone to join, or join an existing one.
-        bool Host(uint32_t max_slot = 2, const char* password = nullptr);
+        // Create a room and wait for someone to join, or join an existing one. `flag_attr` is the
+        // room's published attribute word (YAMPNET_ROOM_FLAG_*); a joiner learns the host's from
+        // the reply, so it is only an input on the hosting side.
+        bool Host(uint32_t max_slot = 2, const char* password = nullptr, uint32_t flag_attr = 0);
         bool Join(uint64_t room_id, const char* password = nullptr);
+
+        // The attribute word of the room we are in - our own when hosting, the host's when we
+        // joined - or 0 when there is no room. Filled from the create/join reply rather than
+        // remembered from the request, so it is always the value the SERVER holds.
+        uint32_t RoomFlags() const { return m_room_flags; }
 
         // Ask the server for the rooms in our world. The reply is asynchronous: RoomCount()/Room()
         // report the result of the LAST completed search, and SearchPending() is true until it
@@ -89,6 +96,7 @@ namespace yampnet
         uint16_t m_server_id = 0;
         uint32_t m_world_id = 0;
         uint64_t m_room_id = 0;
+        uint32_t m_room_flags = 0;
         bool m_is_host = false;
 
         uint32_t m_peer_ip = 0;      // network byte order

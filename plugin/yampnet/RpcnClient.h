@@ -107,8 +107,13 @@ namespace yampnet
 
         // `password` may be null/empty for a public room. RPCN answers RoomPasswordMismatch(18)
         // or RoomPasswordMissing(19) on a bad join rather than a generic failure.
+        //
+        // `flag_attr` is the room's u32 attribute word, which YAMP uses to publish the cabinet
+        // settings a match will be played under (see YAMPNET_ROOM_FLAG_* in YampNet.h). The server
+        // stores it verbatim apart from SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000), which it
+        // clears here and sets itself once the room is full - so never rely on that bit.
         uint64_t CreateRoom(const char* com_id, uint32_t world_id, uint32_t max_slot,
-                            const char* password);
+                            const char* password, uint32_t flag_attr);
         uint64_t JoinRoom(const char* com_id, uint64_t room_id, const char* password);
         uint64_t SearchRoom(const char* com_id, uint32_t world_id);
         // npid of the peer whose address we want. Reply is [u32 len][SignalingAddr protobuf].
@@ -122,6 +127,7 @@ namespace yampnet
             uint16_t max_slots;
             bool     has_password;
             char     owner[20];
+            uint32_t flag_attr;      // as published by CreateRoom; see YAMPNET_ROOM_FLAG_*
         };
         // Parses a SearchRoomResponse (repeated RoomDataExternal) into `out`. Returns the count
         // written, capped at max_out.
@@ -130,6 +136,10 @@ namespace yampnet
 
         // Pulls roomId out of a CreateRoomResponse / JoinRoomResponse payload. Returns 0 if absent.
         static uint64_t ParseRoomId(const uint8_t* payload, uint32_t size);
+        // Pulls flagAttr out of the same two replies (RoomDataInternal field 10). Returns 0 if
+        // absent - which is also the value of a room created without any flags, and is why the
+        // caller must treat "no flags" and "flags we do not understand" identically.
+        static uint32_t ParseRoomFlagAttr(const uint8_t* payload, uint32_t size);
         // Collects member npids from a CreateRoomResponse / JoinRoomResponse. Returns the count.
         static uint32_t ParseRoomMembers(const uint8_t* payload, uint32_t size,
                                          char out[][20], uint32_t max_out);

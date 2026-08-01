@@ -71,6 +71,13 @@ namespace m2ftg
 		// has no reader in the map.
 		bool ReadEmulatedRam32(uint32_t address, uint32_t& out);
 
+		// Holds Sonic the Fighters' GAME ASSIGNMENTS -> DAMAGE item at the value the YAMP dip
+		// switch (or, during netplay, the ROOM) selects, by writing bit 0x80 of the ROM's
+		// game_assignments_flag in emulated RAM. Call once per EMULATED frame, from the module
+		// thread, before module_main - not from the UI thread, whose timing relative to the
+		// emulator differs between machines. No-op unless the game is StF and the board has booted.
+		void UpdateDamageAssignment();
+
 		// True once the emulated board has finished booting (the DLL's own phase dword
 		// +0x6B9300 reaches 2, which only happens after module_main has run for a while).
 		//

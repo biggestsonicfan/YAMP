@@ -74,6 +74,7 @@ namespace yampnet
         m_client.Disconnect();
         m_stage = Stage::Idle;
         m_room_id = 0;
+        m_room_flags = 0;
         m_is_host = false;
         m_peer_ip = 0;
         m_peer_port = 0;
@@ -179,6 +180,12 @@ namespace yampnet
                     return false;
                 }
 
+                // Read back rather than assumed, on BOTH sides. For a guest this is the only place
+                // the host's cabinet settings arrive; for a host it is the server confirming what
+                // it actually stored (it clears the FULL bit it owns), so the two peers end up
+                // reading the same word from the same source.
+                m_room_flags = RpcnClient::ParseRoomFlagAttr(pkt.payload, pkt.payload_size);
+
                 if (m_is_host)
                 {
                     // Nothing more to do: the guest will find us and transmit first.
@@ -247,7 +254,7 @@ namespace yampnet
         PumpKeepalive();
     }
 
-    bool RpcnTransport::Host(uint32_t max_slot, const char* password)
+    bool RpcnTransport::Host(uint32_t max_slot, const char* password, uint32_t flag_attr)
     {
         if (m_stage != Stage::Online)
         {
@@ -255,7 +262,8 @@ namespace yampnet
             return false;
         }
         m_is_host = true;
-        m_pending_room = m_client.CreateRoom(m_com_id, m_world_id, max_slot, password);
+        m_room_flags = 0;   // adopted from the server's reply, like the room id
+        m_pending_room = m_client.CreateRoom(m_com_id, m_world_id, max_slot, password, flag_attr);
         return m_pending_room != 0;
     }
 
@@ -267,6 +275,7 @@ namespace yampnet
             return false;
         }
         m_is_host = false;
+        m_room_flags = 0;
         m_pending_room = m_client.JoinRoom(m_com_id, room_id, password);
         return m_pending_room != 0;
     }

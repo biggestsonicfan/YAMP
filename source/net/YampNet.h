@@ -38,7 +38,7 @@ extern "C" {
 // Bump on ANY change to the structs or the function table below. The loader refuses a plugin
 // whose version does not match exactly - a stale DLL is rejected at load rather than being
 // allowed to scribble through a shifted struct.
-#define YAMPNET_ABI_VERSION 5u
+#define YAMPNET_ABI_VERSION 6u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -146,6 +146,27 @@ typedef struct yampnet_rpcn_config
     const char* cert_fingerprint;
 } yampnet_rpcn_config;
 
+// ---------------------------------------------------------------------------------------------
+// Room game flags
+// ---------------------------------------------------------------------------------------------
+//
+// Cabinet settings that BOTH peers must agree on or the two emulators compute different results
+// from identical inputs. They are properties of the ROOM, not of the machine: the host's values
+// are published when the room is created and a guest adopts them, exactly as it adopts the match
+// seed. A player's own dip-switch settings are ignored for the duration.
+//
+// ON THE WIRE these ride in RPCN's room `flagAttr` (a u32 attached to the room), and NOT in a
+// searchable int attribute, for one reason: flagAttr is the only room field carried by all three
+// replies YAMP reads. CreateRoom and JoinRoom return RoomDataInternal (flagAttr = field 10) and
+// SearchRoom returns RoomDataExternal (flagAttr = field 14), so the host, the guest and the room
+// browser all learn the same value with no extra round trip. Searchable int attrs appear only in
+// the search reply, and only when the request lists their ids - a guest joining by ID would never
+// see them. The server stores flagAttr verbatim except for SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL
+// (0x20000000), which it owns and sets when the room fills; every bit below is YAMP's own, well
+// clear of the SCE flags (all of which live in the top nibbles), so a stock RPCN server and a
+// stock RPCS3 client are unaffected.
+#define YAMPNET_ROOM_FLAG_REAL_DAMAGE 0x00000001u  // StF GAME ASSIGNMENTS -> DAMAGE = REAL
+
 typedef struct yampnet_room_config
 {
     uint16_t max_players;            // the PS3 relay walks 8 peer slots; 2 for a StF match
@@ -154,6 +175,9 @@ typedef struct yampnet_room_config
     // Word 0 of the PS3 match-settings block is the RNG seed. Pass 0 to let the plugin generate
     // one on the host and distribute it; a non-zero value forces it (useful for replay/debug).
     uint32_t forced_seed;
+    // YAMPNET_ROOM_FLAG_* for the room being created. The host's cabinet settings become the
+    // room's, and every peer plays under them.
+    uint32_t game_flags;
 } yampnet_room_config;
 
 typedef struct yampnet_room_info
@@ -169,6 +193,9 @@ typedef struct yampnet_room_info
     // has no "has password" flag, but a room created with a password marks its slots private, and
     // a joiner without the password can only take a PUBLIC slot - so private slots ARE the lock.
     uint8_t  has_password;
+    // YAMPNET_ROOM_FLAG_* the host created this room with, so the browser can show what the match
+    // would actually be played under before anyone joins.
+    uint32_t game_flags;
 } yampnet_room_info;
 
 // Tunables. Frame delay is the lockstep input delay in frames; the PS3 packet carries 10 frames
@@ -264,6 +291,18 @@ typedef struct yampnet_api
     // consequence rather than a cause. Out parameters may be null.
     int32_t (*get_desync)(yampnet_session* s, uint32_t* out_frame,
                           uint32_t* out_local, uint32_t* out_remote);
+
+    // --- ABI 6: room game flags ---
+    //
+    // YAMPNET_ROOM_FLAG_* for the room this session is in, or 0 when there is none. For a host
+    // these are the values it created the room with; for a guest they are the HOST'S, read out of
+    // the join reply. Either way this - not the local setting - is what YAMP must apply to the
+    // emulator while the session lasts, which is the whole point of publishing them: a cabinet
+    // setting that differs between the peers makes identical inputs produce different games.
+    //
+    // Deliberately sourced from the room rather than remembered from create_room, so a host that
+    // changes its own dip switches mid-session cannot drift away from the room it is hosting.
+    uint32_t (*get_room_flags)(yampnet_session* s);
 } yampnet_api;
 
 // The single exported symbol. Returns NULL if the plugin cannot satisfy `requested_abi`.

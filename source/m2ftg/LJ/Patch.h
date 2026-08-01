@@ -27,6 +27,11 @@ namespace m2ftg
 		void InstallSystemSwitches(void* dll, const Imports& symbols);
 		void SetSystemSwitches(bool test, bool service);
 
+		// Corrects the one byte of the module's injected backup-RAM block that holds a raw
+		// value where the ROM stores a table index - the service menu's GAME ASSIGNMENTS page
+		// hangs the board on it. See the definition for the full chain.
+		void FixBackupRamTimeIndex(void* dll);
+
 		void Patch_SysUtil(void* dll, const Imports& symbols);
 		void Patch_CsGame(void* dll, const Imports& symbols);
 		void Patch_Misc(void* dll, const Imports& symbols);

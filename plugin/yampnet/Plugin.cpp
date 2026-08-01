@@ -425,7 +425,8 @@ namespace
     {
         if (!s || !cfg) return YAMPNET_ERR_ARG;
 
-        if (!s->transport.Host(cfg->max_players ? cfg->max_players : 2, cfg->password))
+        if (!s->transport.Host(cfg->max_players ? cfg->max_players : 2, cfg->password,
+                               cfg->game_flags))
         {
             s->Fail(s->transport.LastError());
             return YAMPNET_ERR_ROOM;
@@ -443,7 +444,8 @@ namespace
         // stage mapping owns the state. Setting it optimistically (a leftover from the UDP backend)
         // made the host open the lockstep barrier in the same frame it merely REQUESTED the room,
         // which then pinned the state at SYNCING and suppressed the stage mapping for good.
-        s->Log(YAMPNET_LOG_INFO, "hosting requested; seed 0x%08X", s->match_seed);
+        s->Log(YAMPNET_LOG_INFO, "hosting requested; seed 0x%08X flags 0x%08X", s->match_seed,
+               cfg->game_flags);
         return YAMPNET_OK;
     }
 
@@ -478,6 +480,7 @@ namespace
             dst.player_count = src.cur_members;
             dst.max_players = src.max_slots;
             dst.has_password = src.has_password ? 1u : 0u;
+            dst.game_flags = src.flag_attr;
             // The owner's npid is the only human-readable handle a room has.
             strncpy_s(dst.name, src.owner[0] ? src.owner : "(unknown)", _TRUNCATE);
         }
@@ -624,6 +627,8 @@ namespace
     // is 0 until that reply lands - which is also exactly when the lobby may show it.
     uint64_t ApiGetRoomId(yampnet_session* s) { return s ? s->transport.RoomId() : 0; }
 
+    uint32_t ApiGetRoomFlags(yampnet_session* s) { return s ? s->transport.RoomFlags() : 0; }
+
     void ApiSubmitStateCheck(yampnet_session* s, uint32_t frame, uint32_t value)
     {
         if (!s || frame == kNoCheck)
@@ -670,6 +675,7 @@ namespace
         &ApiGetRoomId,
         &ApiSubmitStateCheck,
         &ApiGetDesync,
+        &ApiGetRoomFlags,
     };
 }
 

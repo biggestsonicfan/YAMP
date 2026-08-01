@@ -94,6 +94,7 @@ private:
 	uint32_t m_m2Country = 0;
 	bool m_m2Freeplay = true;
 	bool m_m2VersusMode = false;
+	bool m_m2RealDamage = false;
 	Input::KeyBinds m_m2KeyBinds = Input::DEFAULT_KEY_BINDS;
 	Input::PadBinds m_m2PadBinds = Input::DEFAULT_PAD_BINDS;
 	std::string m_m2PadId[2] = { "xinput:0", "xinput:1" };

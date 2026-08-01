@@ -109,6 +109,21 @@ namespace
 	// flips it. Surfaced as the "Set the game's debug flag" debug setting.
 	constexpr uint32_t DEBUG_FLAG_ADDRESS = 0x508000;
 	constexpr uint32_t DEBUG_FLAG_XOR = 0x24;
+	// GAME ASSIGNMENTS -> DAMAGE. The service menu's page edits a block of eighteen operator
+	// settings that the ROM keeps in work RAM at 0x59C320 and the module mirrors into backup SRAM
+	// +0x3320 (its injector, HLE hook 8 / set_window_data+0x564, copies the block verbatim and
+	// substitutes only difficulty, country, free play and VS mode - DAMAGE is not one of the
+	// values it supplies, which is why this is a live RAM write rather than another config field).
+	// game_assignments_flag is byte +0x33 of that block, i.e. RAM 0x59C353, and bit 0x80 is REAL
+	// damage: the whole byte reads 0x00 with everything at its default and 0x80 with REAL picked.
+	//
+	// Read-modify-written through the 32-bit accessors on the ALIGNED dword below, with only bit
+	// 0x80 of its top byte touched - the rest of that byte is other items' flags and the three
+	// bytes under it are TST_*/TIME/COUNTRY, none of which are ours to move. The dword's top byte
+	// is 0x59C353 because emulated RAM is a flat little-endian host buffer: the DLL's own 32-bit
+	// reader (0x18004F150) copies four bytes from ramBase+address in ascending order, no swap.
+	constexpr uint32_t GAME_ASSIGN_FLAG_DWORD = 0x59C350;   // holds 0x59C350..0x59C353
+	constexpr uint32_t DAMAGE_REAL_BIT = 0x80u << 24;       // byte +0x33, bit 0x80
 	// ROM symbol table: 800 records of {uint64_t addr; const char* name}, sorted ascending by
 	// addr, starting at 0x1742D0. Earlier passes misread it as {name, addr} records starting
 	// 8 bytes later at 0x1742D8, which pairs every name with the NEXT function's address and
@@ -999,6 +1014,47 @@ void m2ftg::DrawDebugWindows()
 			}
 		}
 		ImGui::End();
+	}
+}
+
+void m2ftg::UpdateDamageAssignment()
+{
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	{
+		return;
+	}
+	const YAMPSettings* settings = gGeneral.GetSettings();
+	// NOT forced off during netplay, unlike the debug flag above - this one is meant to be on in
+	// a match. What makes it safe there is that the value comes from the ROOM rather than from
+	// this machine's settings, so both peers write the same bit; net::EffectiveRealDamage is the
+	// single place that choice is made.
+	const bool real = net::EffectiveRealDamage(settings != nullptr && settings->m_m2RealDamage);
+
+	uint8_t* base = ModuleBase();
+	if (base == nullptr)
+	{
+		return;
+	}
+	// Before the board is up there is no block to write, and the ROM's own init_game_assignments
+	// runs during boot - a write landing before it would simply be overwritten.
+	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	{
+		return;
+	}
+
+	uint32_t value = 0;
+	if (!ReadEmulated32(base, GAME_ASSIGN_FLAG_DWORD, value))
+	{
+		return;
+	}
+
+	// Enforced every frame, but only WRITTEN when it differs. Re-asserting is what makes this
+	// survive the ROM reloading its assignments (a board reset, or leaving the service menu),
+	// which is exactly what happens at the start of every netplay round.
+	const uint32_t wanted = real ? (value | DAMAGE_REAL_BIT) : (value & ~DAMAGE_REAL_BIT);
+	if (wanted != value)
+	{
+		WriteEmulated32(base, GAME_ASSIGN_FLAG_DWORD, wanted);
 	}
 }
 

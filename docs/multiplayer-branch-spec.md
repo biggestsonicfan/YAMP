@@ -524,6 +524,13 @@ MR's RVAs are zero **on purpose**: its CPU core inlines fetch/decode into its ex
 - `InjectTraps`, `Patch_SysUtil`, `Patch_CsGame`, `Patch_Misc`.
 - `InstallRamExecFetch` — YAMP's region-aware reimplementation of the i960 fetch/decode dispatcher, so code in emulated work RAM can execute. Also the hook point for HLE hit counting and the i960 profiler.
 - **`InstallSystemSwitches` / `SetSystemSwitches(test, service)`** — the cabinet TEST/SERVICE switches. The emulated I/O board keeps one byte of state (`io[9]`, the bank-0 copy; `io[0x0A]` is the DIP bank, hard-wired `0xFF`), **active low**, laid out like the hardware. `read_sw` folds that byte into the low 8 bits of the ROM's flag longs at RAM `0x500700` (held) / `0x500704` (momentary), inverted — which is why the DLL's `ADV_DSP` handler can fake "both players pressed Start" by writing `0x30` straight to `0x500704`. The DLL rebuilds `io[9]` from scratch once per emulated frame and drives only coin 1 (from the `execute_info` coin bit, via a one-shot flag at `io+0x4098`) and the two Start bits; TEST and SERVICE have **no host source anywhere in the module protocol**. Since nothing about `io[9]` survives a frame, a host write between `module_main` calls is simply overwritten — so YAMP intercepts the CALL to the refresh and pulls the two lines low **immediately after it**, before the frame's first i960 instruction runs. The I/O-state global is decoded out of the instruction at `match+0x2B` (StF → `0x1806C9B88`, FV → `0x1806CC188`) rather than hardcoded per DLL, which is what keeps it correct under ASLR.
+- **`FixBackupRamTimeIndex(dll)`** — corrects one byte of the backup-RAM block the module injects, without which the service menu's **GAME ASSIGNMENTS** page hard-freezes the whole application. This is a bug in SEGA's module, not in YAMP; it only became reachable once `InstallSystemSwitches` made the TEST switch work, which is why Lost Judgment itself never hit it. The chain is worth stating in full because it is the clearest example of the emulator's most dangerous divergence from hardware:
+  - The page's value column is drawn by `game_assign_bk_ram_thing` (ROM `0x637C8`). For an item whose flag word has bit 8 set and bit 2 clear, it uses that item's backup-RAM byte as a **raw index with no bounds check**: `r9 = item[0x10]; g0 = r9[value * 4]; print_mes(g0)`.
+  - The `TIME` item reads backup `+0x3351` (`time_var_array_num`), which indexes a **10-entry** table at ROM `0x5E088` — the display strings `"10"`…`"99"` for `time_vars[]` at ROM `0x8F3C4` (`0A 14 1E 28 32 3C 46 50 5A 63`). The ROM's own `init_game_assignments` (`0x626A4`) writes **2** there, and the page's edit handler `ga_TIME_sub` (`0x5D648`) clamps the field to 0–9.
+  - The module's injector writes **`0x1E`** — the time in *seconds*, not the index. Index 30 reads 80 bytes past a 40-byte table, into i960 code, and yields the pointer `0x8C703000`.
+  - **That guest address is unmapped, and an unmapped read in this emulator leaves the destination register *unchanged*** (the memory map's miss slot is a bare `ret` stub) rather than returning zero or bus garbage. So `print_mes`'s `ldib` returns the same non-zero byte forever and its stop-at-NUL loop can never terminate. On real hardware the read would eventually hit a zero, or the watchdog would reset the board — **this hang is created by the emulator.** Treat "unmapped reads are inert" as true only of *crashing*: any ROM loop that scans for a terminator will spin instead.
+  - A ROM spin freezes **all of YAMP**, not just the game: the i960 only returns control at the HLE'd `main_loop` yield and the `interrupt_wait_b` traps (§12.2), so `module_main` never returns and the host frame pump is starved. Symptom is a fully unresponsive window with a busy CPU.
+  - The fix patches the injector's immediate `0x1E` → `0x02` at load, anchored on a pattern covering the neighbouring `TST_*_ADD` / `TST_*_MUL` constants (themselves confirmed against `init_game_assignments`), and verifies the byte still reads `0x1E` before writing. Corrected **at the source** rather than by re-asserting the backup byte per frame, because that byte is the operator's setting and the service menu must stay free to change it. A module that does not match — a different m2ftg build, or a future one SEGA fixed — logs and keeps its own value. `TIME` is the only one of the eighteen items whose injected value is out of range; every other byte in the block matches the ROM's defaults exactly, which is why only this one page locked up.
 
 **Presentation helpers (`m2ftg/HostUI.h`)**, shared with the VF2 host: `ApplyAspectSetting(window, mode)` (0 = 4:3 pillarboxed, 1 = 16:9 stretched, 2 = fill window; applied live) and `DrawPauseMenu(window, menuOpen)` mirroring Lost Judgment's — the host draws the menu shell while the module's own pause path (`execute_info` status bit0) freezes emulation. Returns false on Quit.
 
@@ -819,7 +826,7 @@ YAMP.exe                                     yampnet.dll (optional)
 
 **Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
 
-### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 5`)
+### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 6`)
 
 Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exported symbol**, `YampNet_GetApi(uint32_t requested_abi)`, returning a `yampnet_api` function table, so the loader does exactly one `GetProcAddress` and every later addition is a version bump rather than a new symbol.
 
@@ -832,6 +839,7 @@ Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exp
 **ABI evolution:**
 - ABI 2 added `get_room_id()` — the lobby needs it because there is no room browser on this transport, and before that the id existed only as a line in `yampnet.log`.
 - ABI 3 added **desync detection**: `submit_state_check(session, frame, value)` and `get_desync(session, &frame, &local, &remote)`. Lockstep guarantees identical *inputs*; it cannot guarantee the two emulators agree on what those inputs produced. The value YAMP submits is the ROM's own `frame_counter` at emulated `0x500020`, which advances exactly once per emulated frame and is therefore free of timing noise. The plugin carries the most recent one on every input packet. `get_desync` is **latched** — only the *first* disagreement is reported, because everything after it is a consequence rather than a cause.
+- ABI 6 added **room game flags**: `yampnet_room_config::game_flags` (in), `yampnet_room_info::game_flags` (out, per browser row) and `get_room_flags(session)`. These carry the **cabinet settings a match is played under**, which are properties of the *room*, not of a machine — see §14.9.
 
 Other notable config: `yampnet_rpcn_config::cert_fingerprint` (see §14.6), `yampnet_room_config::forced_seed` (0 = plugin generates and distributes; non-zero forces one, for replay/debug), `yampnet_match_config{frame_delay, input_redundancy, stall_timeout_ms}`.
 
@@ -917,6 +925,8 @@ Ports: TLS `31313` (default), UDP signaling helper `3657`, **P2P game traffic `3
 
 `RoomListing::has_password` is **derived from `privateSlotNum`**: RPCN has no "has password" flag, but a room created with a password marks its slots private, and a joiner without the password can only take a public slot — so private slots *are* the lock.
 
+**Room game flags ride in `flagAttr`, not in a searchable int attribute.** `flagAttr` is a bare `uint32` and is the only room field carried by *all three* replies YAMP reads: `CreateRoomResponse` and `JoinRoomResponse` both wrap a `RoomDataInternal` (`flagAttr` = field 10) and `SearchRoomResponse` carries `RoomDataExternal` (`flagAttr` = field 14). So the host, the guest and the room browser all learn the same word with no extra round trip. `roomSearchableIntAttrExternal` cannot do this: `to_RoomDataExternal` fills those arrays only for the ids listed in the request's `attrId`, and they appear in the **search** reply only — a guest joining by ID would never see them. The server stores `flagAttr` verbatim apart from `SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL` (`0x20000000`), which it masks out on create and sets itself when the room fills, so **never read that bit**. YAMP's own bits start at `0x00000001`, well clear of the SCE flags (all of which live in the top nibbles), so a stock RPCN server and a stock RPCS3 client are unaffected. Both sides read the value back **from the reply** rather than remembering what they sent, so the two peers take it from the same source.
+
 `Transport.h` keeps `UdpTransport` (a direct address:port link, no matchmaking) as a dependency-free LAN/loopback dev backend behind the same `ITransport`; swapping backends changes only the member type in `yampnet_session`.
 
 ### 14.6 `plugin/yampnet/TlsClient` — Schannel TLS
@@ -950,6 +960,8 @@ Loads `yampnet.dll` from the YAMP.exe directory, negotiates the ABI, builds the 
 
 Concretely suppressed for the whole of a session: **coin insert, TEST/SERVICE, pause, the DLL's debug windows, the HLE hook mask, and the game debug flag.** Players use START, which travels in the synchronised pad.
 
+**Suppression is not the only answer, though — a setting that both peers genuinely need can be *synchronised* instead.** That is what §14.9 does for DAMAGE: rather than forcing it off for the duration (which would make every online match play differently from every offline one), the host's value is published with the room and every peer adopts it. The test is whether a single agreed value exists: pause and coin insert are per-machine actions with no such value, a cabinet assignment has exactly one.
+
 `net::Logf()` appends one line to `yampnet.log` next to the CWD, **opened and closed per line** so it can be read live over a share while YAMP runs — unlike `d3d12_debug.log`, which `DebugLogFile` holds open exclusively for the whole process.
 
 ### 14.8 Determinism — the part that actually keeps two machines in sync
@@ -977,6 +989,24 @@ IN_MATCH  -> frame 0
 
 The generation counter wraps at 32 (5 bits). If **RNG seeding fails on this peer**, the round is *refused* rather than played — an unseeded generator is guaranteed to diverge. On round end (peer lost, timeout, or desync) the budget pin is released and the host returns to local play.
 
+### 14.9 Room game flags — `DAMAGE`, and the pattern for cabinet settings
+
+Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NORMAL` by default and `REAL` for the harder damage scaling most competitive players prefer. It is exposed as a YAMP arcade dip switch and, because it changes what the ROM computes from a hit, it is also the first setting that had to be made a property of the **room**.
+
+**Where the ROM keeps it.** The service page edits a block of eighteen operator settings that lives in work RAM at `0x59C320`. `game_assignments_flag` is byte `+0x33` of that block — **RAM `0x59C353`** — and **bit `0x80` is REAL**: with every item at its default the byte reads `0x00`, and picking REAL makes it `0x80`.
+
+**Nothing in the module supplies it, which is what makes it a live RAM write.** The block reaches backup SRAM through HLE hook 8 (`set_window_data+0x564`, handler `DLL+0x529D0`), which copies `0x59C320…0x59C382` to SRAM `+0x3320…+0x3382` and substitutes exactly four values out of `m2ftg_config_t`: difficulty (`+0x3342`), country (`+0x3352`), free play and VS mode. DAMAGE is **not** one of them — byte `+0x33` is copied verbatim from whatever `init_game_assignments` left in RAM. A sweep of all 76 HLE hooks found no other writer (`GAME_INT+0x4`/`DLL+0x52CA0` reads the neighbouring TIME byte `+0x31` into RAM `0x500090`, and that is the only other toucher of the block). So there is no config field to set and no immediate to patch: the honest mechanism is the game's own byte.
+
+**`m2ftg::UpdateDamageAssignment()`** (`DebugWindows.cpp`) read-modify-writes bit `0x80` of the aligned dword at `0x59C350` through the same memory-map dispatch as `ReadEmulatedRam32`, touching no other bit — the rest of that byte is other items' flags and the three bytes beneath it are `TST_*`/TIME/COUNTRY. The dword's *top* byte is `0x59C353` because emulated RAM is a **flat little-endian host buffer**: the DLL's own 32-bit reader (`DLL+0x4F150`) copies four bytes from `ramBase+address` in ascending order with no swap. It is re-asserted every frame but only *written* when it differs, which is what survives the ROM reloading its assignments on a board reset — i.e. at the start of every netplay round.
+
+> **It is called from the module thread, inside the `advanceFrame` branch, immediately before `module_main`** — not from the UI thread where the other live setting (the game debug flag) is driven. This writes emulated RAM, so under lockstep it has to happen exactly once per **emulated** frame; driving it from the UI thread would tie it to host frame pacing instead, and a write landing a frame earlier on one peer than the other is a divergence even when the value is identical.
+
+**Over the network.** `YAMPNET_ROOM_FLAG_REAL_DAMAGE` (`0x00000001`) is published in the room's `flagAttr` when the host creates it (§14.5) and read back from the create/join reply on both sides. `net::EffectiveRealDamage(localSetting)` is the **single** place the choice is made: the room's value while `SessionInProgress()`, the local dip switch otherwise. Sourcing it from the room rather than from `create_room`'s argument means a host that moves its own switch mid-session cannot drift away from the room it is hosting.
+
+**In the UI.** The room browser gains a **Damage** column, because it is not a preference a joiner keeps — it is how that match will play, and the two settings are very different games. The lobby's in-room panel states it for both players (`(set by the host)` for the guest). The dip switch itself is **frozen once a room exists** and shows the room's live value read-only: it is published at creation, so from that moment it describes the match rather than the machine, and letting it move could only mean a value that is silently ignored or one peer changing a damage rule mid-match. Everything before a room — offline, connecting, or logged in and browsing — stays editable, which is where the choice belongs. The `-net-host` harness path publishes the local setting too, so a command-line pair plays under the same rules the lobby would have produced.
+
+**Generalising.** Any future cabinet setting that changes the simulation follows this shape: a bit in `flagAttr`, published at create, adopted from the reply, resolved by one `net::Effective*` function, frozen in the UI for the life of the room, and applied on the module thread once per emulated frame.
+
 ---
 
 ## 15. Settings file reference
@@ -1003,6 +1033,7 @@ The generation counter wraps at 32 (5 bits). If **RNG seeding fails on this peer
 | | `Country` | 0/1/2 | 0 | Japan / USA / Export. Restart |
 | | `FreePlay` | 0/1 | 1 | Restart |
 | | `VersusMode` | 0/1 | 0 | Restart |
+| | `RealDamage` | 0/1 | 0 | GAME ASSIGNMENTS → DAMAGE (`0` = NORMAL, `1` = REAL). **Live** — it is a RAM byte, not a module config field. Overridden by the room's value during netplay and frozen in the UI for the life of a room (§14.9) |
 | | `P<n>ControllerId` | string | `xinput:0` / `xinput:1` | `Input::PadDevice::id` |
 | | `P<n>Controller` | int | — | **Legacy** XInput slot; honoured only when the id key is absent, rewritten in the new form on the next save |
 | | `P<n>Key<Action>` | int (VK) | see `DEFAULT_KEY_BINDS` | Live |
@@ -1027,11 +1058,12 @@ The generation counter wraps at 32 (5 bits). If **RNG seeding fails on this peer
 
 ## 16. Working-tree state at hand-off
 
-The branch tip is otherwise clean. **One uncommitted change remains, and a fresh clone will need it to build:**
+**Uncommitted changes on top of the tip:**
 
 | Path | Change |
 |---|---|
-| `source/Utils/Patterns.h` | Adds `#include <string>`. This is a one-line fix **inside the `ModUtils` submodule**, so it cannot be recorded by this repository — the gitlink only stores a commit SHA, and there is no upstream commit containing it. It must be pushed to `CookiePLMonster/ModUtils` (or a fork) and the submodule pointer then bumped here. Until that happens the file shows as `Submodule source/Utils contains modified content` and a fresh clone gets the unfixed header. |
+| `source/Utils/Patterns.h` | Adds `#include <string>`. This is a one-line fix **inside the `ModUtils` submodule**, so it cannot be recorded by this repository — the gitlink only stores a commit SHA, and there is no upstream commit containing it. It must be pushed to `CookiePLMonster/ModUtils` (or a fork) and the submodule pointer then bumped here. Until that happens the file shows as `Submodule source/Utils contains modified content` and a fresh clone gets the unfixed header. **A fresh clone needs this to build.** |
+| `source/m2ftg/LJ/{Patch.cpp,Patch.h,LJHost.cpp}` | `FixBackupRamTimeIndex` — the GAME ASSIGNMENTS freeze fix (§9.3), 2026-08-01. Ordinary source, committable as-is. Built clean and smoke-run (StF, 600 frames, exit 0, `module_stop -> 0x0`); **not yet confirmed by opening the page by hand**, which the automated harness cannot do because it has no way to drive the TEST switch. |
 
 The Escape / Exit launcher work described in §6.3 and the `IsSettingsOpen()` / `CloseSettings()` accessors landed in commit `9baa02e`; there is no separate uncommitted delta for them.
 
@@ -1110,10 +1142,12 @@ Worth mirroring, because most of the facts in this document were *measured*, not
 - **Automated smoke runs.** `-frames N` gives a deterministic run length **and** exercises the real teardown path. The standard regression is a **StF 2000-frame** and an **FV 600-frame** run under `cdb`, checked for exit 0, `module_stop -> 0x0`, no device removal, and matching draw counts, render-target catalogs and CRI cue sets against a baseline. `de7796c` records FV as **byte-identical** to its pre-change run.
 - **Live capture over static reading.** Several K2 facts (execute_info size, pad stride, host-provided gaps) were found by *running and reading the actual fault* rather than extrapolating from another generation. The `0x16E0` size gate was confirmed both statically (`CMP RCX, 0x16E0`) and live under x64dbg.
 - **Checking negative results.** The oversized display modes were added back and run to confirm they crop; the mode's effect on the output texture was measured at four different modes.
+- **Sampling the emulated CPU to locate a freeze.** A frozen YAMP is usually a *ROM* spin, not a host deadlock (§9.3), so the useful stack is the i960's. Read `ctx = *(DLL + rva_cpu_ctx_ptr)` and sample **`ctx+8`, the i960 IP**, in a loop over a live process; a handful of adjacent IPs cycling is a spin, and the module's own 800-entry symbol table (`DLL+0x1742D0`, `{u64 addr, char* name}`) names the function immediately. Two traps that each cost time here: the StF DLL **is ASLR'd**, so resolve the base from the loaded module list rather than assuming `0x180000000`; and if the debugger is **paused**, `ctx+8` reads constant and is easily misread as "stuck on one instruction" — check the run state before believing a single-valued sample. The GAME ASSIGNMENTS freeze was localised to `print_mes` this way in minutes, after which the ROM disassembly answered the rest.
 - **Decoder oracles.** HCA against ClHcaSharp, ADX against ffmpeg — 173/173 and 632/632 bit-exact, then listener-verified.
 - **Include-graph-first restructuring.** Every folder move in `bc9bfaf` was justified by the include graph before any file was touched.
 - **Remote second box.** A second test machine (`DESKTOP-GHRIIHN`) driven by PsExec + cdb over a share, with token-filter and first-chance-AV traps — which is also the two-machine netplay harness the `-net-*` switches exist for.
 
 ---
 
-*Generated from the `multiplayer` branch at `9baa02e`, 2026-08-01.*
+*Generated from the `multiplayer` branch at `9baa02e`, 2026-08-01. Amended the same day with the
+GAME ASSIGNMENTS freeze fix (§9.3, §16) and the i960 IP-sampling method that found it (§18).*
