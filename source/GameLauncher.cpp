@@ -318,8 +318,43 @@ namespace Launcher
 			return true;
 		}
 
+		// The Escape / Exit confirmation. A modal, so a stray click or Enter behind it cannot boot a
+		// game while the prompt is up, and so it grabs nav focus for pad and keyboard users. NOTE:
+		// this ImGui build deliberately does NOT close modals on Escape (imgui.cpp NavCancel only
+		// closes non-modal popups), so cancelling with Escape is the caller's job - see Run().
+		void DrawQuitPrompt(bool& promptOpen, bool& openPopup, bool& exitConfirmed)
+		{
+			if (openPopup)
+			{
+				ImGui::OpenPopup("Quit YAMP?");
+				openPopup = false;
+			}
+
+			ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+				{ 0.5f, 0.5f });
+			if (ImGui::BeginPopupModal("Quit YAMP?", &promptOpen,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
+			{
+				ImGui::TextUnformatted("Do you really want to quit?");
+				ImGui::Spacing();
+				if (ImGui::Button("Quit", { 120.0f, 0.0f }))
+				{
+					exitConfirmed = true;
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", { 120.0f, 0.0f }))
+				{
+					promptOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
+				// Cancel is where nav starts: the destructive button should never be one Enter away.
+				ImGui::SetItemDefaultFocus();
+				ImGui::EndPopup();
+			}
+		}
+
 		void DrawLauncherUI(const std::vector<FoundGame>& games, int& selected, int& displayMode,
-			bool& matchWindow, bool& playRequested, bool& rescanRequested)
+			bool& matchWindow, bool& playRequested, bool& rescanRequested, bool& quitRequested)
 		{
 			const ImVec2& displaySize = ImGui::GetIO().DisplaySize;
 			ImGui::SetNextWindowPos({ 0.0f, 0.0f });
@@ -524,7 +559,16 @@ namespace Launcher
 					rescanRequested = true;
 				}
 				ImGui::SameLine();
-				ImGui::TextDisabled("F1 - settings. Games can also be booted directly with "
+				// A clickable way out, for the fullscreen case where the window is a borderless
+				// WS_POPUP with no title bar to close (see RenderWindow's window styles). Escape
+				// does the same thing; this one is also reachable by mouse and by pad, which the
+				// launcher enables ImGui nav for. Both go through the confirmation prompt.
+				if (ImGui::Button("Exit"))
+				{
+					quitRequested = true;
+				}
+				ImGui::SameLine();
+				ImGui::TextDisabled("Esc - exit, F1 - settings. Games can also be booted directly with "
 					"-stf / -fv / -mr / -vf2 / -vf2-k2 / -von-k2 / -vf5fs / -vf5fs-lj / -vf5fs-ylad.");
 			}
 			ImGui::End();
@@ -566,18 +610,60 @@ namespace Launcher
 		}
 
 		bool booted = false;
+		bool escWasDown = false;
+		bool quitPromptOpen = false, quitPromptOpenPopup = false;
 		while (!window.IsShuttingDown())
 		{
 			bool playRequested = false;
 			bool rescanRequested = false;
+			bool quitRequested = false;   // asks for the prompt...
+			bool exitConfirmed = false;   // ...which is what actually ends the loop
+
+			// Escape is how you leave the launcher. There is no game here to pause (what Escape
+			// means in the hosts), and with the Fullscreen setting on the window is a borderless
+			// WS_POPUP - no title bar, no close button, nothing to click - so without this the
+			// process could only be killed. Three things it deliberately does NOT quit through:
+			//   - the F1 settings window: Escape closes that first, so backing out of settings
+			//     cannot drop the whole launcher.
+			//   - the quit prompt itself: a second Escape cancels it (this ImGui build leaves
+			//     Escape-on-modal to the caller, see DrawQuitPrompt).
+			//   - any other open ImGui popup (the resolution combo, a settings modal): ImGui
+			//     consumes Escape for those itself, and the key still reaches WndProc, so they are
+			//     checked here too. The state read is last frame's, which is the frame the key
+			//     went down on.
+			const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
+			if (escDown && !escWasDown)
+			{
+				if (window.GetUI().IsSettingsOpen())
+				{
+					window.GetUI().CloseSettings();
+				}
+				else if (quitPromptOpen)
+				{
+					quitPromptOpen = false;
+				}
+				else if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopup))
+				{
+					quitRequested = true;
+				}
+			}
+			escWasDown = escDown;
 
 			window.BeginFrame();
 			window.ClearBackbuffer();
 			window.NewImGuiFrame();
-			DrawLauncherUI(games, selected, displayMode, matchWindow, playRequested, rescanRequested);
+			DrawLauncherUI(games, selected, displayMode, matchWindow, playRequested, rescanRequested,
+				quitRequested);
+			if (quitRequested && !quitPromptOpen)
+			{
+				quitPromptOpen = quitPromptOpenPopup = true;
+			}
+			DrawQuitPrompt(quitPromptOpen, quitPromptOpenPopup, exitConfirmed);
 			window.RenderImGui();
 			window.EndFrame();
 			if (FAILED(swapChain->Present(1, 0))) break;
+
+			if (exitConfirmed) break;
 
 			if (rescanRequested)
 			{

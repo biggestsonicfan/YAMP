@@ -19,6 +19,11 @@ public:
 
 	// Open the settings window programmatically (same window F1 toggles).
 	void OpenSettings() { m_settingsOpen = true; }
+	// ...and query/close it, so a host's Escape key can dismiss settings instead of doing its
+	// own thing (the launcher's Escape quits, and must not quit out from under a user who was
+	// only backing out of the settings window).
+	bool IsSettingsOpen() const { return m_settingsOpen; }
+	void CloseSettings() { m_settingsOpen = false; }
 
 private:
 	void DrawGraphics();
