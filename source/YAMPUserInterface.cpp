@@ -5,8 +5,8 @@
 #include "YAMPGeneral.h"
 #include "GameVerify.h"
 #include "m2ftg/ELF/ElfRom.h"
-#include "m2ftg/LJ/DebugWindows.h"
-#include "m2ftg/LJ/HleHooks.h"
+#include "m2ftg/DebugWindows.h"
+#include "m2ftg/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 
 #include "net/NetPlugin.h"
@@ -54,10 +54,14 @@ static bool IsM2ftgGame()
 // FV's RNG needed the one genuinely new piece: it draws from TWO host twisters, not one, and
 // seeding only `rand` would leave the two peers agreeing on the fight and disagreeing on the
 // stage. SeedHostRng seeds every stream in the game's descriptor.
+//
+// Derived rather than listed, so this cannot drift from what NetSession will actually agree to
+// run. The ROM frame counter is the last per-game fact a new game needs (the rest of the
+// determinism set is already in its DwGame row), so "has a measured counter" is exactly "can
+// sustain a session" - and a game that gets one starts offering the page automatically.
 static bool IsNetplayGame()
 {
-	return gGeneral.GetGameId() == YAMPGeneral::GameId::StF
-		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
+	return m2ftg::RomFrameCounterAddress() != 0;
 }
 
 // The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
@@ -1322,7 +1326,10 @@ void YAMPUserInterface::DrawStfHleHooks()
 		return;
 	}
 
-	const char* gameName = m2ftg::CurrentGame().display_name;
+	// NOT m2ftg::CurrentGame().display_name: that is the LJ GameDesc table, which only knows
+	// StF/FV/MR and silently answers "Sonic the Fighters" for anything else. This panel now
+	// draws for VF2 as well, which the LJ table has no entry for.
+	const char* gameName = gGeneral.GetArcadeGameName();
 
 	ImGui::PushTextWrapPos();
 	ImGui::Text("At board start-up the game DLL overwrites %zu individual i960 instructions in the program ROM "

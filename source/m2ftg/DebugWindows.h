@@ -132,5 +132,11 @@ namespace m2ftg
 		//
 		// Returns false if the game is not StF, the board has not booted, or no entries matched.
 		bool SetTextureBudgetDeterministic(bool enable);
+
+		// The address in EMULATED RAM of the ROM's own per-frame counter - the value a netplay
+		// round anchors frame 0 to and desync-checks against every frame. 0 means this game has
+		// no measured counter, which disables netplay for it rather than anchoring on a value
+		// that is not a frame count.
+		uint32_t RomFrameCounterAddress();
 	}
 

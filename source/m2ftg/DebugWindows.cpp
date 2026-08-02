@@ -1,11 +1,10 @@
 #include "DebugWindows.h"
 
-#include "../../YAMPGeneral.h"
-#include "../ELF/ElfRom.h"
-#include "../../net/NetPlugin.h"
-#include "LJHost.h" // GameDesc / CurrentGame() - the DLL name to look the module up by
+#include "../YAMPGeneral.h"
+#include "ELF/ElfRom.h"
+#include "../net/NetPlugin.h"
 
-#include "../../imgui/imgui.h"
+#include "../imgui/imgui.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -179,33 +178,56 @@ namespace
 	// FV values were read out of fv-pxd-w64-d3d12_retail.dll; see docs/fv-hle-hooks.md.
 	struct DwGame
 	{
+		const wchar_t* dllName;        // resolved with GetModuleHandleW; every module is ASLR'd
 		uintptr_t rvaBootState;        // ROM/CPU boot phase; 2 = board booted
 		uintptr_t rvaCpuCtxPtr;        // -> i960 context (set by the CPU init)
 		uintptr_t rvaMemmapTbl;        // 64 x 0x70 emulated memory-map records
 		uintptr_t rvaResetHandler;     // DEBUG MENU "RESET": run-state 0 + real board init
 		uintptr_t rvaRngHolder;        // -> struct holding the host Mersenne Twister(s)
 		// Offsets within that struct of each twister the ROM actually draws from. StF has one
-		// (behind `rand`); FV has TWO - `rand` at +0x20 and the VS stage picker at +0x08 - and
-		// seeding only the first leaves the stage choice free to disagree between peers.
+		// (behind `rand`); FV and VF2 have TWO - `rand` at +0x20 and the stage picker at +0x08 -
+		// and seeding only the first leaves the stage choice free to disagree between peers.
 		const uintptr_t* rngStreams;
 		size_t rngStreamCount;
 		uintptr_t rvaTexBudgetHandler; // the wall-clock "has the upload budget expired?" handler
 		uintptr_t rvaHleTable;         // installer input, so the handler above can be repointed
 		size_t hleCount;
+		// The ROM's own per-frame counter, an address in EMULATED RAM rather than an RVA. It is
+		// the round-start anchor and the desync canary, so netplay is impossible without it -
+		// 0 means "not measured yet", which is how a game is kept out of netplay entirely.
+		//
+		// StF and FV share 0x500020, which is not the coincidence it looks like: StF was built
+		// on FV's engine and inherited its low-RAM global block. The rest of the layout did not
+		// come across, so both were MEASURED advancing it by exactly 1 per module_main call
+		// rather than assumed. VF2 is the common ancestor and very likely matches, but it has
+		// not been measured, so it stays 0.
+		uint32_t romFrameCounter;
 	};
 
 	constexpr uintptr_t STF_RNG_STREAMS[] = { 0x20 };
 	constexpr uintptr_t FV_RNG_STREAMS[] = { 0x20, 0x08 };
+	constexpr uintptr_t VF2_RNG_STREAMS[] = { 0x20, 0x08 };
 
 	constexpr DwGame DW_STF = {
+		L"stf-pxd-w64-d3d12_retail.dll",
 		0x6B9300, 0x58A960, 0x172660, 0x4C840,
 		0x68BB88, STF_RNG_STREAMS, std::size(STF_RNG_STREAMS),
-		0x52FD0, 0x1E8870, 76,
+		0x52FD0, 0x1E8870, 76, 0x500020,
 	};
 	constexpr DwGame DW_FV = {
+		L"fv-pxd-w64-d3d12_retail.dll",
 		0x6BB900, 0x58CF60, 0x170750, 0x4B3E0,
 		0x68E188, FV_RNG_STREAMS, std::size(FV_RNG_STREAMS),
-		0x51C20, 0x1E5840, 95,
+		0x51C20, 0x1E5840, 95, 0x500020,
+	};
+	// Virtua Fighter 2 as shipped in Yakuza: Like a Dragon. Hosted by YLAD/VF2.cpp rather than
+	// the LJ host, which is why none of this may reach for an LJ GameDesc. See
+	// docs/vf2-hle-hooks.md; the Kiwami 2 build of VF2 is a different module and is not here.
+	constexpr DwGame DW_VF2 = {
+		L"vf2-pxd-w64-retail.dll",
+		0x641890, 0x51F9B8, 0x15C080, 0x490A0,
+		0x623788, VF2_RNG_STREAMS, std::size(VF2_RNG_STREAMS),
+		0x4F740, 0x185640, 67, 0,   // frame counter not measured yet - keeps VF2 out of netplay
 	};
 
 	static const DwGame* CurrentDw()
@@ -214,15 +236,21 @@ namespace
 		{
 		case YAMPGeneral::GameId::StF: return &DW_STF;
 		case YAMPGeneral::GameId::FV:  return &DW_FV;
+		case YAMPGeneral::GameId::VF2: return &DW_VF2;
 		default:                       return nullptr;
 		}
 	}
 
 	static uint8_t* ModuleBase()
 	{
-		// Every LJ m2ftg DLL ships with ASLR set, so resolve the real base by name rather than
+		// Every pxd module ships with ASLR set, so resolve the real base by name rather than
 		// assuming the preferred 0x180000000 - the mistake that cost FV its first bring-up.
-		return reinterpret_cast<uint8_t*>(GetModuleHandleW(m2ftg::CurrentGame().dll_name));
+		// The name comes from the game's own descriptor, not an LJ GameDesc lookup: this file
+		// serves the YLAD host too now, and that host has no GameDesc table to ask.
+		const DwGame* game = CurrentDw();
+		return game != nullptr
+			? reinterpret_cast<uint8_t*>(GetModuleHandleW(game->dllName))
+			: nullptr;
 	}
 
 	// Board booted, for a game that has a descriptor. Returns false (rather than reading a
@@ -1202,4 +1230,10 @@ void m2ftg::UpdateGameDebugFlag()
 			applied = false;
 		}
 	}
+}
+
+uint32_t m2ftg::RomFrameCounterAddress()
+{
+	const DwGame* game = CurrentDw();
+	return game != nullptr ? game->romFrameCounter : 0;
 }

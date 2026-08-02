@@ -29,8 +29,9 @@ void AdvanceFrameStampNow();
 
 #include "../ImportSymbols.h"
 #include "../../pxd/LJ/HostCdevice.h"
-#include "HleHooks.h"
-#include "DebugWindows.h"
+#include "../HleHooks.h"
+#include "../DebugWindows.h"
+#include "../NetSession.h"
 #include "../ELF/CharRamFix.h"
 #include "../ELF/ElfRom.h"
 #include "../../input/Input.h"
@@ -470,21 +471,14 @@ namespace m2ftg
             // s_coinPending  <- a credit was inserted, START injection phase   (scene+0x2B59)
             // s_startToggle  <- alternate-frame START injector                 (scene+0x2B5A)
             static csl_pad s_pads[2];
-            // Hoisted so the input/status code below can tell whether a netplay round is live.
-            // UINT32_MAX = not in a round.
-            static uint32_t s_netplayFrame = UINT32_MAX;
-            const bool netplayMatch = net::IsAvailable() && s_netplayFrame != UINT32_MAX;
-            // Which pad slot this machine drives on the wire: 0 = host, 1 = guest, -1 = local play.
-            const int32_t netplayLocalPad =
-                net::IsAvailable() ? net::Api()->get_local_player(net::Session()) : -1;
-            // Every host->module input that is NOT part of the transmitted pad has to be dead for
-            // the whole session, not merely during a live round. The window between pressing Start
-            // and frame 0 is the dangerous one: the board is reset and then runs FREELY until it
-            // reaches the anchor, so a coin or a service switch pressed in there changes this
-            // machine's state before the round begins - and the anchor only aligns the ROM's frame
-            // counter, not the rest of the board. Using the session predicate closes that window
-            // and covers the lobby too.
-            const bool netplayLocked = net::SessionInProgress();
+            // (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
+            // routing, the coin protocol and the input suppression below all see the same answer
+            // for the whole frame. See NetSession.h for the four-call-point contract.
+            NetSession& net_ = NetplaySession();
+            const NetSession::Status netStatus = net_.GetStatus();
+            const bool netplayMatch = netStatus.inMatch;
+            const int32_t netplayLocalPad = netStatus.localPad;
+            const bool netplayLocked = netStatus.locked;
 
             static bool s_startScreen = false;
             static bool s_coinPending = false;
@@ -687,259 +681,23 @@ namespace m2ftg
             ResetCbvSrvRingCursors(gs::sm_context);
 
             // ---- NETPLAY SESSION DRIVER ----------------------------------------------------
-            // UINT32_MAX means "not in a netplay round"; anything else is the frame counter the
-            // lockstep engine keys inputs by. It must start at 0 for a round and advance ONLY on
-            // frames the emulator actually ran, which is why it is bumped next to module_main
-            // rather than once per loop iteration.
-            // ROUND-START SEQUENCE. Getting two emulators to start a round from the SAME state
-            // needs more than a barrier, because a barrier only proves both peers are present.
-            // Measured 2026-08-01: resetting the board and starting frame 0 in the same instant
-            // left the ROM ~40 frames into its post-reset boot when the match began, and the two
-            // machines reached the ROM's main loop one emulated frame apart - identical inputs
-            // applied one ROM frame out of step, which compounds into a visible AI desync.
+            // (2) Poll the plugin and run the round-start state machine, and (3) decide whether
+            // the emulator may advance. Both used to be ~250 lines inline here; they now live in
+            // m2ftg::NetSession so the YLAD/K2 hosts can drive the identical sequence instead of
+            // growing a second copy of it. See NetSession.h.
             //
-            // So frame 0 is anchored to the ROM's OWN progress instead of to a wall-clock moment:
-            //   Idle      -> reset the board, pin the texture budget
-            //   Resetting -> wait for frame_counter to restart (proving the reset landed)
-            //   Settling  -> wait for frame_counter to reach ANCHOR - the same value on both peers
-            //   Announced -> HOLD the emulator here and open the barrier
-            //   (barrier)  -> seed the RNG (instantaneous, so it needs no settling) and run frame 0
-            // Both machines therefore enter frame 0 with their ROM at the same counter value, by
-            // construction rather than by luck.
-            enum class RoundPrep { Idle, Resetting, Settling, Announced };
-            static RoundPrep s_prep = RoundPrep::Idle;
-            static uint32_t s_anchorCounter = 0;
-            // A few frames into the ROM's main loop: far enough past the post-reset boot to be
-            // steady state, small enough that starting a match stays snappy.
-            constexpr uint32_t NETPLAY_ANCHOR = 8;
-            // The ROM's own per-frame counter in emulated RAM - and the SAME address in both
-            // games. That is not the coincidence it looks like: Sonic the Fighters was built on
-            // Fighting Vipers' engine and inherited its low-RAM global block. The rest of the
-            // layout did not come across (the module reads 0x50004C / 0x500064 / 0x5000A2 /
-            // 0x50016C / 0x500248 / 0x500704 in FV and none of those in StF), so this was
-            // measured rather than assumed: both games were logged advancing it by exactly 1
-            // per module_main call, over two sample bursts 340 frames apart.
-            constexpr uint32_t RVA_ROM_FRAME_COUNTER = 0x500020;
-            // Netplay needs the whole determinism set - reset, RNG seeding, texture-budget pin
-            // and this counter - which is exactly the set of games DebugWindows describes.
-            const bool netplayPossible = gGeneral.GetGameId() == YAMPGeneral::GameId::StF
-                || gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
+            // Drive() runs HERE rather than at the top of the frame on purpose: Status() above is
+            // deliberately last frame's answer, so the frame on which a barrier releases still
+            // routes its pads and runs its coin protocol against a stable view.
+            net_.Drive();
 
-            static bool s_netplayRoundRequested = false;
-            bool holdForBarrier = false;
-            if (net::IsAvailable())
-            {
-                const yampnet_api* api = net::Api();
-                yampnet_session* sess = net::Session();
-                api->poll(sess);
-                net::DriveSession();   // connect -> discovery -> host/join (idempotent)
-
-                const yampnet_state ns = api->get_state(sess);
-
-                // Room is up but no round yet: open the barrier. Both peers do this; the barrier
-                // is what makes them agree on when frame 0 is.
-                // Room is up, but only start when we are allowed to: the command-line harness
-                // auto-starts, a UI session waits for the host's Start button.
-                // IsBoardBooted is a HARD precondition, not a nicety. Announcing before the board
-                // is up means the barrier can release while ResetBoard/SeedHostRng/
-                // SetTextureBudgetDeterministic are all still no-ops on this machine, and the
-                // round then starts with this peer's simulation un-reset and un-seeded. Because
-                // every peer gates its own announce, the barrier itself comes to mean "both
-                // boards are ready", which is what it was always supposed to mean.
-                if (ns == YAMPNET_STATE_IN_ROOM && !s_netplayRoundRequested
-                    && netplayPossible && net::ShouldStartRound() && IsBoardBooted())
-                {
-                    if (s_prep == RoundPrep::Idle)
-                    {
-                        // Reset first, then let the ROM come back up on its own. The texture
-                        // budget is pinned NOW rather than at frame 0 so the post-reset boot runs
-                        // under the same rules on both machines too.
-                        const bool didReset = ResetBoard();
-                        const bool didBudget = SetTextureBudgetDeterministic(true);
-                        if (didReset && didBudget)
-                        {
-                            s_prep = RoundPrep::Resetting;
-                            net::Logf("board reset; waiting for the ROM to restart");
-                        }
-                        else
-                        {
-                            net::Logf("ABORT: board reset failed (reset=%d texBudget=%d)",
-                                      static_cast<int>(didReset), static_cast<int>(didBudget));
-                            net::ClearStartRequest();
-                        }
-                    }
-
-                    uint32_t romFrame = 0;
-                    const bool haveRomFrame =
-                        ReadEmulatedRam32(RVA_ROM_FRAME_COUNTER, romFrame);
-
-                    // The counter still holds its PRE-reset value for a while, so "it is small
-                    // again" is what proves the reset actually landed. Anchoring without this
-                    // check would latch onto a stale value that differs per machine.
-                    if (s_prep == RoundPrep::Resetting && haveRomFrame && romFrame <= 1)
-                    {
-                        s_prep = RoundPrep::Settling;
-                    }
-
-                    if (s_prep == RoundPrep::Settling && haveRomFrame && romFrame >= NETPLAY_ANCHOR)
-                    {
-                        yampnet_match_config mc = {};
-                        mc.frame_delay = static_cast<uint8_t>(
-                            settings != nullptr && settings->m_netFrameDelay > 0
-                                ? settings->m_netFrameDelay : 3);
-                        mc.input_redundancy = 10;
-                        mc.stall_timeout_ms = 10000;
-                        // Round number: counts up per round so late packets from the PREVIOUS
-                        // round cannot poison this one. A guest's count would drift from the
-                        // host's (neither knows how many rounds the other played), so the plugin
-                        // makes the HOST authoritative - a guest adopts whatever round the host
-                        // announces, exactly as it adopts the seed. Wraps at 32 (5 bits on the
-                        // wire), which is harmless: adoption keeps both sides on the same value.
-                        static uint32_t s_roundNumber = 0;
-                        ++s_roundNumber;
-                        if (api->begin_round(sess, s_roundNumber, &mc) == YAMPNET_OK)
-                        {
-                            s_prep = RoundPrep::Announced;
-                            s_anchorCounter = romFrame;
-                            s_netplayRoundRequested = true;
-                            net::Logf("anchored at ROM frame_counter=%u; barrier opened, emulator "
-                                      "held until the peer arrives", romFrame);
-                        }
-                    }
-                }
-
-                // Announced but the barrier has not released: FREEZE the emulator. Without this
-                // the ROM keeps running while we wait for the peer, and the anchor we just took
-                // is meaningless by the time the round actually starts - the whole point is that
-                // both machines sit at the same counter value when frame 0 begins.
-                holdForBarrier = (s_prep == RoundPrep::Announced
-                                  && ns != YAMPNET_STATE_IN_MATCH
-                                  && s_netplayFrame == UINT32_MAX);
-
-                // Barrier released: frame 0 starts now.
-                if (ns == YAMPNET_STATE_IN_MATCH && s_netplayFrame == UINT32_MAX)
-                {
-                    s_netplayFrame = 0;
-                    const uint32_t seed = api->get_match_seed(sess);
-                    const int32_t me = api->get_local_player(sess);
-
-                    // The board was already reset and settled at the anchor above; all that is
-                    // left is the RNG. Seeding writes the Mersenne Twister state directly and
-                    // consumes no emulated frames, which is exactly why it can happen here while
-                    // the reset could not: the ROM's `rand` is HLE'd onto a host generator that is
-                    // otherwise seeded per process, so without this each machine rolls its own
-                    // numbers and the CPU behaves differently on each client with identical inputs.
-                    const bool didSeed = SeedHostRng(seed);
-
-                    uint32_t romFrame = 0;
-                    ReadEmulatedRam32(RVA_ROM_FRAME_COUNTER, romFrame);
-                    net::Logf("match start: player=%d seed=0x%08X rngSeeded=%d anchor=%u romFrame=%u",
-                              me, seed, static_cast<int>(didSeed), s_anchorCounter, romFrame);
-
-                    // The RNG is the one step left that can still fail here, and a match with an
-                    // unseeded generator is guaranteed to diverge. Refuse it rather than play it.
-                    if (!didSeed)
-                    {
-                        net::Logf("ABORT: RNG seeding failed on this peer - refusing the round "
-                                  "rather than desyncing");
-                        SetTextureBudgetDeterministic(false);
-                        net::ClearStartRequest();
-                        api->end_round(sess);
-                        s_netplayRoundRequested = false;
-                        s_prep = RoundPrep::Idle;
-                        s_netplayFrame = UINT32_MAX;
-                    }
-                }
-
-                // Back to a state with no round in it - the session ended, or the lobby left the
-                // room. Re-arm: the next round has to announce again, and the Start press that
-                // opened the last barrier must not carry over into it.
-                if (ns == YAMPNET_STATE_IDLE || ns == YAMPNET_STATE_FAILED
-                    || ns == YAMPNET_STATE_ONLINE)
-                {
-                    if (s_netplayRoundRequested || s_prep != RoundPrep::Idle)
-                    {
-                        net::ClearStartRequest();
-                        // Un-pin the budget: it was pinned as part of a round that is not
-                        // happening, and leaving it on would slow local play for no reason.
-                        SetTextureBudgetDeterministic(false);
-                    }
-                    s_netplayRoundRequested = false;
-                    s_prep = RoundPrep::Idle;
-                    s_netplayFrame = UINT32_MAX;
-                }
-            }
-
-            // NETPLAY GATE. Under lockstep the emulator may only advance once every player's input
-            // for this frame is known, so module_main is skipped entirely on a stall - that skip IS
-            // the stall. The plugin also overwrites BOTH pads with the transmitted inputs (its own
-            // included), which is why this runs after the local pad fill above: whatever csl_pad
-            // produced is a local prediction that the network's copy must replace, or the two
-            // machines simulate different inputs and desync.
-            // The on-screen status overlay that used to live here is now drawn by the UI layer
-            // (YAMPUserInterface::DrawNetplayOverlay), next to the lobby whose state it reports -
-            // it has to cover the command-line and lobby paths alike, and it must not be a second
-            // place where session state is interpreted.
-
-            // NOTE: an earlier version HELD the emulator at frame 0 until the barrier released, to
-            // stop the host drifting through attract mode while it waited. That was wrong, and
-            // self-defeating: the board only reports "booted" (+0x6B9300 == 2) once module_main has
-            // actually run, so holding meant the board never booted, and ResetBoard() - which is
-            // gated on that - silently did nothing (the log showed reset=0). Both machines then
-            // started a round with no reset AND no shared state.
-            // The reset is the stronger mechanism, so the emulator now runs freely until the
-            // barrier and both sides are re-initialised at match start instead. Pre-barrier
-            // divergence does not matter when the board is about to be reset out from under it.
-            // Held at the anchor while the barrier waits for the peer. Same mechanism as a
-            // lockstep stall - module_main simply does not run - so the last frame keeps being
-            // re-presented and the overlay explains the wait.
-            bool advanceFrame = !holdForBarrier;
-            if (net::IsAvailable() && s_netplayFrame != UINT32_MAX)
-            {
-                const yampnet_step st =
-                    net::Api()->step(net::Session(), s_netplayFrame, &execute_info);
-                advanceFrame = (st == YAMPNET_STEP_READY);
-
-                if (st == YAMPNET_STEP_TIMEOUT || st == YAMPNET_STEP_DISCONNECTED)
-                {
-                    net::Logf("round ended (step=%d); returning to local play",
-                              static_cast<int>(st));
-                    // Tell the player. Both ends of a lost match see this: the peer that went
-                    // away is gone, and the one still running would otherwise just find itself
-                    // back in attract mode with no explanation.
-                    net::NotePeerLost(st == YAMPNET_STEP_TIMEOUT
-                                          ? "The other player stopped responding."
-                                          : "The other player disconnected.");
-                    SetTextureBudgetDeterministic(false);
-                    net::ClearStartRequest();
-                    net::Api()->end_round(net::Session());
-                    s_netplayFrame = UINT32_MAX;   // back to local play
-                    // end_round leaves us IN_ROOM, so re-arm the request flag or Start match would
-                    // never open a second barrier.
-                    s_netplayRoundRequested = false;
-                    s_prep = RoundPrep::Idle;
-                    advanceFrame = true;
-                }
-
-                // Divergence detected. Stop AT the divergence rather than playing on: both
-                // screens then hold the last frame the two machines still agreed on, and the
-                // frame number in the log is the one to investigate. Continuing would only pile
-                // consequences on top of the cause.
-                uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
-                if (net::Api()->get_desync(net::Session(), &dFrame, &dLocal, &dRemote) != 0)
-                {
-                    net::Logf("DESYNC at frame %u (local frame_counter=%u, peer=%u) - ending the "
-                              "round; the two emulators stopped agreeing here",
-                              dFrame, dLocal, dRemote);
-                    SetTextureBudgetDeterministic(false);
-                    net::ClearStartRequest();
-                    net::Api()->end_round(net::Session());
-                    s_netplayFrame = UINT32_MAX;
-                    s_netplayRoundRequested = false;
-                    s_prep = RoundPrep::Idle;
-                    advanceFrame = true;
-                }
-            }
+            // Step() also overwrites BOTH pads in execute_info with the transmitted inputs, which
+            // is why it runs after the local pad fill above: whatever csl_pad produced is a local
+            // prediction that the network's copy must replace, or the two machines simulate
+            // different inputs and desync.
+            // The on-screen status overlay that used to live here is drawn by the UI layer
+            // (YAMPUserInterface::DrawNetplayOverlay), next to the lobby whose state it reports.
+            const bool advanceFrame = net_.Step(execute_info);
 
             // The host zeroes output_texid every frame and module_main fills it in. On a stalled
             // frame module_main never runs, so it would stay 0 - and 0 is not a valid handle (the
@@ -998,20 +756,9 @@ namespace m2ftg
                 if (execute_info.output_texid != 0)
                     s_lastOutputTexId = execute_info.output_texid;
 
-                if (s_netplayFrame != UINT32_MAX)
-                {
-                    // Desync canary. The ROM's frame_counter advances exactly once per emulated
-                    // frame (measured; see the note above), so at a given netplay frame it MUST
-                    // read the same on both machines. It is the cheapest value that is both
-                    // guaranteed-equal and sensitive: it stops advancing in lockstep the moment
-                    // one side executes a different amount of game code.
-                    uint32_t stateCheck = 0;
-                    if (ReadEmulatedRam32(RVA_ROM_FRAME_COUNTER, stateCheck))
-                    {
-                        net::Api()->submit_state_check(net::Session(), s_netplayFrame, stateCheck);
-                    }
-                    ++s_netplayFrame;
-                }
+                // (4) The frame really ran, so submit the desync canary and advance the netplay
+                // frame index. Only reachable here - a stalled frame must not advance it.
+                net_.EndFrame();
             }
             else
             {

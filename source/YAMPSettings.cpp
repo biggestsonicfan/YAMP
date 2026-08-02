@@ -3,7 +3,7 @@
 #include "YAMPGeneral.h" // UTF8ToWchar / WcharToUTF8, for the string-valued settings
 #include "m2ftg/DisplayModes.h"
 
-#include "m2ftg/LJ/HleHooks.h"
+#include "m2ftg/HleHooks.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
