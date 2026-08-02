@@ -110,6 +110,7 @@ struct yampnet_session
     uint32_t desync_remote = 0;
     yampnet_match_config match = {};
     uint64_t wait_since_ms = 0;      // when the current stall began; 0 = not stalling
+    uint64_t last_wait_report_ms = 0;
     bool seeded_delay_frames = false;
     bool room_logged = false;
 
@@ -153,6 +154,10 @@ struct yampnet_session
 namespace
 {
     using namespace yampnet;
+
+    // How often the barrier reports why it is still waiting. Often enough to be useful while a
+    // player stares at the waiting screen, rare enough not to bury the log.
+    constexpr uint64_t kWaitReportIntervalMs = 5000;
 
     // Pads live at validated offsets inside YAMP's execute_info - the layout handshake at create()
     // is what makes this pointer arithmetic safe.
@@ -373,6 +378,34 @@ namespace
             // be lost, and it is also how the host's seed reaches a guest that joined late.
             s->SendAnnounce();
 
+            // A barrier that never releases is almost always a connectivity problem, and "waiting
+            // for the peer" says nothing about which half failed. Report which of the two steps we
+            // are stuck on: not knowing where the peer is (the server never told us) or knowing
+            // and hearing nothing back (a NAT or firewall is eating the punch).
+            const uint64_t now = GetTickCount64();
+            if (now - s->last_wait_report_ms > kWaitReportIntervalMs)
+            {
+                s->last_wait_report_ms = now;
+                if (!s->transport.PeerKnown())
+                {
+                    s->Log(YAMPNET_LOG_WARN,
+                           "still waiting: the server has not given us the peer's address yet");
+                }
+                else if (!s->transport.PeerHeard())
+                {
+                    s->Log(YAMPNET_LOG_WARN,
+                           "still waiting: punching %s but nothing has come back - check that UDP "
+                           "%u is not blocked by a firewall on either machine",
+                           s->transport.PeerAddrText(), yampnet::kRpcnP2PPort);
+                }
+                else
+                {
+                    s->Log(YAMPNET_LOG_WARN,
+                           "still waiting: peer %s is reachable but has not announced this round",
+                           s->transport.PeerAddrText());
+                }
+            }
+
             if (s->lockstep.BarrierReleased())
             {
                 SeedDelayFrames(s);
@@ -389,6 +422,15 @@ namespace
 
     const char* ApiGetError(yampnet_session* s) { return (s && s->error[0]) ? s->error : ""; }
 
+    // The transport reports peer discovery and NAT progress through this; it has no idea what a
+    // yampnet_session is, and the session is the only thing that knows where logs go.
+    void TransportLog(void* ctx, const char* msg)
+    {
+        auto* s = static_cast<yampnet_session*>(ctx);
+        if (s)
+            s->Log(YAMPNET_LOG_INFO, "%s", msg);
+    }
+
     yampnet_result ApiConnect(yampnet_session* s, const yampnet_rpcn_config* cfg)
     {
         if (!s || !cfg) return YAMPNET_ERR_ARG;
@@ -400,6 +442,8 @@ namespace
         tc.password = cfg->token;          // token field carries the password/auth secret
         tc.com_id = cfg->communication_id;
         tc.fingerprint_hex = cfg->cert_fingerprint;
+        tc.log = &TransportLog;
+        tc.log_ctx = s;
 
         if (!s->transport.Start(tc))
         {
@@ -543,6 +587,7 @@ namespace
 
         s->state = YAMPNET_STATE_SYNCING;
         s->wait_since_ms = GetTickCount64();
+        s->last_wait_report_ms = s->wait_since_ms;
         s->SendAnnounce();
         return YAMPNET_OK;
     }

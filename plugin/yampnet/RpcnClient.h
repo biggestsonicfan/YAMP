@@ -50,6 +50,19 @@ namespace yampnet
         TooSoon = 4,
     };
 
+    // Server-pushed notifications (packet_type 2). Values are the declaration order of the
+    // server's NotificationType enum (notifications.rs); the ones below are the only ones a
+    // two-player room ever produces. These are NOT optional extras: UserJoinedRoom is how a HOST
+    // learns that a guest exists at all, and it is the only way it can learn an address to punch
+    // towards before the guest's own datagrams start arriving.
+    enum class RpcnNotification : uint16_t
+    {
+        UserJoinedRoom = 0,
+        UserLeftRoom = 1,
+        RoomDestroyed = 2,
+        SignalingHelper = 12,
+    };
+
     inline constexpr uint32_t kRpcnHeaderSize = 15;
     inline constexpr uint16_t kRpcnDefaultPort = 31313;
     inline constexpr uint16_t kRpcnSignalingPort = 3657;   // server-side UDP helper
@@ -112,6 +125,11 @@ namespace yampnet
         // settings a match will be played under (see YAMPNET_ROOM_FLAG_* in YampNet.h). The server
         // stores it verbatim apart from SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000), which it
         // clears here and sets itself once the room is full - so never rely on that bit.
+        //
+        // The room is created WITH SIGNALING ENABLED (sigOptParam). That single field is what makes
+        // the server exchange peer addresses on its own: without it `need_signaling` is false in
+        // room_manager.rs, the join reply carries no signaling_data and the host's UserJoinedRoom
+        // notification carries no address - which left the host with nobody to punch towards.
         uint64_t CreateRoom(const char* com_id, uint32_t world_id, uint32_t max_slot,
                             const char* password, uint32_t flag_attr);
         uint64_t JoinRoom(const char* com_id, uint64_t room_id, const char* password);
@@ -146,6 +164,28 @@ namespace yampnet
         // Parses a RequestSignalingInfos reply into an address. Returns false if malformed.
         static bool ParseSignalingAddr(const uint8_t* payload, uint32_t size,
                                        uint32_t* out_ipv4_be, uint16_t* out_port);
+
+        // Pulls the peer address out of a JoinRoomResponse's signaling_data (field 2, repeated
+        // Matching2SignalingInfo). Present only when the room was created with sigOptParam, which
+        // is why CreateRoom always sets it. Returns the FIRST entry - in a two-slot room that is
+        // the host - so a guest needs no RequestSignalingInfos round trip at all.
+        static bool ParseJoinSignalingAddr(const uint8_t* payload, uint32_t size,
+                                           uint32_t* out_ipv4_be, uint16_t* out_port);
+
+        // Parses a UserJoinedRoom notification: the joiner's npid, plus its signaling address when
+        // the room asked for signaling. `out_has_addr` distinguishes "no address in this
+        // notification" (the caller should ask for one) from "address of 0.0.0.0:0".
+        static bool ParseJoinedNotification(const uint8_t* payload, uint32_t size,
+                                            char* out_npid, uint32_t npid_cap,
+                                            uint32_t* out_ipv4_be, uint16_t* out_port,
+                                            bool* out_has_addr);
+
+        // Parses a SignalingHelper notification (MatchingSignalingInfo): the npid and address of a
+        // peer that just asked the server for OUR address. The server sends it precisely so both
+        // ends punch, so it is the fallback path when a room has no signaling of its own.
+        static bool ParseSignalingHelper(const uint8_t* payload, uint32_t size,
+                                         char* out_npid, uint32_t npid_cap,
+                                         uint32_t* out_ipv4_be, uint16_t* out_port);
 
         // Reads whatever is available and returns one decoded packet at a time. Returns false when
         // nothing more is pending. Never blocks.

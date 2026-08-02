@@ -335,6 +335,25 @@ namespace yampnet
             w.Varint(11, slot_mask);                                         // passwordSlotMask
         }
         w.Wrapped(16, 0);                      // teamId
+
+        // sigOptParam - THE FIELD THAT MAKES PEERS REACHABLE. room_manager.rs only runs its
+        // signaling exchange when the room carries one of these and `should_signal()` is true
+        // (type != None and flag bit 0 clear). With it, joining a room makes the server hand the
+        // GUEST the host's address in the join reply and push the HOST the guest's address in its
+        // UserJoinedRoom notification. Without it neither side is told anything, and the host -
+        // having no address to send to - stays silent, so its NAT never opens and the guest's
+        // packets are dropped before they arrive. Mesh (1) is the "everyone connects to everyone"
+        // topology; for two players it is the same thing as star but needs no hub id.
+        // All three fields are uint8/uint16 WRAPPERS and all three are read with get_verified(),
+        // so omitting any one of them is Malformed rather than a default.
+        {
+            const uint32_t sig = w.BeginSub(17);
+            w.Wrapped(1, 1);                   // type = SignalingMesh
+            w.Wrapped(2, 0);                   // flag = 0 - bit 0 set would disable signaling
+            w.Wrapped(3, 0);                   // hubMemberId - unused by mesh
+            w.EndSub(sig);
+        }
+
         if (!w.Ok())
         {
             Fail("CreateRoom: protobuf overflow");
@@ -392,7 +411,11 @@ namespace yampnet
         // Bits 1 and 2 would add onlineName / avatarUrl; the npid is all we display.
         w.Varint(1, 1);                        // option
         w.Varint(2, world_id);                 // worldId
-        w.Varint(5, 32);                       // rangeFilter_max - ask for a usable page
+        // The range filter is 1-BASED and capped at 20 (SCE_NP_MATCHING2_RANGE_FILTER_MAX). The
+        // server logs "startIndex was 0!" / "max was invalid: 32" and substitutes its own values
+        // for anything outside that, so sending 0/32 worked only by the server's good grace.
+        w.Varint(4, 1);                        // rangeFilter_startIndex
+        w.Varint(5, 20);                       // rangeFilter_max - the server's ceiling
         if (!w.Ok())
         {
             Fail("SearchRoom: protobuf overflow");
@@ -617,6 +640,142 @@ namespace yampnet
             }
         }
         return got_ip;
+    }
+
+    namespace
+    {
+        // SignalingAddr { bytes ip = 1; uint16 port = 2; } - the port is a WRAPPER submessage.
+        // Shared by every message that embeds an address: the RequestSignalingInfos reply, the
+        // join reply's signaling_data, and both notifications.
+        bool ReadSignalingAddr(PbReader addr, uint32_t* out_ipv4_be, uint16_t* out_port)
+        {
+            bool got_ip = false;
+            while (addr.Next())
+            {
+                if (addr.Field() == 1 && addr.WireType() == kWireLen && addr.AsBytesLen() >= 4)
+                {
+                    if (out_ipv4_be) memcpy(out_ipv4_be, addr.AsBytes(), 4);
+                    got_ip = true;
+                }
+                else if (addr.Field() == 2 && addr.WireType() == kWireLen)
+                {
+                    if (out_port) *out_port = static_cast<uint16_t>(addr.AsWrapped());
+                }
+            }
+            return got_ip;
+        }
+
+        void CopyString(const PbReader& r, char* out, uint32_t cap)
+        {
+            if (!out || cap == 0)
+                return;
+            uint32_t n = r.AsBytesLen();
+            if (n > cap - 1) n = cap - 1;
+            memcpy(out, r.AsBytes(), n);
+            out[n] = '\0';
+        }
+    }
+
+    bool RpcnClient::ParseJoinSignalingAddr(const uint8_t* payload, uint32_t size,
+                                            uint32_t* out_ipv4_be, uint16_t* out_port)
+    {
+        if (!StripDataPacket(payload, size))
+            return false;
+
+        // JoinRoomResponse { RoomDataInternal room_data = 1; repeated Matching2SignalingInfo
+        // signaling_data = 2; OptParam opt_param = 3; }
+        PbReader top(payload, size);
+        while (top.Next())
+        {
+            if (top.Field() != 2 || top.WireType() != kWireLen)
+                continue;
+
+            // Matching2SignalingInfo { uint16 member_id = 1; SignalingAddr addr = 2; }
+            PbReader info = top.Sub();
+            while (info.Next())
+            {
+                if (info.Field() == 2 && info.WireType() == kWireLen
+                    && ReadSignalingAddr(info.Sub(), out_ipv4_be, out_port))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool RpcnClient::ParseJoinedNotification(const uint8_t* payload, uint32_t size,
+                                             char* out_npid, uint32_t npid_cap,
+                                             uint32_t* out_ipv4_be, uint16_t* out_port,
+                                             bool* out_has_addr)
+    {
+        if (out_npid && npid_cap) out_npid[0] = '\0';
+        if (out_has_addr) *out_has_addr = false;
+        if (!StripDataPacket(payload, size))
+            return false;
+
+        // NotificationUserJoinedRoom { uint64 room_id = 1; RoomMemberUpdateInfo update_info = 2;
+        //                              SignalingAddr signaling = 3; }
+        bool got_npid = false;
+        PbReader top(payload, size);
+        while (top.Next())
+        {
+            if (top.Field() == 3 && top.WireType() == kWireLen)
+            {
+                if (ReadSignalingAddr(top.Sub(), out_ipv4_be, out_port) && out_has_addr)
+                    *out_has_addr = true;
+                continue;
+            }
+            if (top.Field() != 2 || top.WireType() != kWireLen)
+                continue;
+
+            // RoomMemberUpdateInfo { RoomMemberDataInternal roomMemberDataInternal = 1; ... }
+            //   -> RoomMemberDataInternal { UserInfo userInfo = 1; ... }
+            //     -> UserInfo { string npId = 1; ... }
+            PbReader update = top.Sub();
+            while (update.Next())
+            {
+                if (update.Field() != 1 || update.WireType() != kWireLen)
+                    continue;
+                PbReader member = update.Sub();
+                while (member.Next())
+                {
+                    if (member.Field() != 1 || member.WireType() != kWireLen)
+                        continue;
+                    PbReader ui = member.Sub();
+                    while (ui.Next())
+                    {
+                        if (ui.Field() != 1 || ui.WireType() != kWireLen)
+                            continue;
+                        CopyString(ui, out_npid, npid_cap);
+                        got_npid = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return got_npid;
+    }
+
+    bool RpcnClient::ParseSignalingHelper(const uint8_t* payload, uint32_t size,
+                                          char* out_npid, uint32_t npid_cap,
+                                          uint32_t* out_ipv4_be, uint16_t* out_port)
+    {
+        if (out_npid && npid_cap) out_npid[0] = '\0';
+        if (!StripDataPacket(payload, size))
+            return false;
+
+        // MatchingSignalingInfo { string npid = 1; SignalingAddr addr = 2; }
+        bool got_addr = false;
+        PbReader top(payload, size);
+        while (top.Next())
+        {
+            if (top.Field() == 1 && top.WireType() == kWireLen)
+                CopyString(top, out_npid, npid_cap);
+            else if (top.Field() == 2 && top.WireType() == kWireLen)
+                got_addr = ReadSignalingAddr(top.Sub(), out_ipv4_be, out_port);
+        }
+        return got_addr;
     }
 
     bool RpcnClient::Poll(RpcnPacket* out)

@@ -14,6 +14,18 @@ namespace yampnet
         // if it stops hearing from them, so the keepalive has to keep running for the whole
         // session, not just at login.
         constexpr uint64_t kKeepaliveIntervalMs = 2000;
+
+        // Hole punching while we have not heard back, then a slower heartbeat purely to hold the
+        // mapping open. Players can sit in a room for minutes before starting a round, and a NAT
+        // will drop an idle UDP mapping in well under that.
+        constexpr uint64_t kPunchIntervalMs = 250;
+        constexpr uint64_t kHolePunchIdleMs = 1000;
+
+        constexpr uint64_t kSignalingRetryMs = 2000;
+
+        // Not a game packet: shorter than a PacketHeader, so the lockstep layer discards it even
+        // if one is delivered. Its only job is to make our NAT create a mapping towards the peer.
+        constexpr uint8_t kPunchPacket[4] = { 'Y', 'N', 'P', '!' };
     }
 
     void RpcnTransport::Fail(const char* fmt, ...)
@@ -23,11 +35,59 @@ namespace yampnet
         vsnprintf(m_error, sizeof(m_error), fmt, args);
         va_end(args);
         m_stage = Stage::Failed;
+        Note("failed: %s", m_error);
+    }
+
+    void RpcnTransport::Note(const char* fmt, ...)
+    {
+        if (!m_log)
+            return;
+        char buf[256];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+        m_log(m_log_ctx, buf);
+    }
+
+    const char* RpcnTransport::PeerAddrText() const
+    {
+        static char text[32];
+        if (!m_peer_ip || !m_peer_port)
+            return "unknown";
+        const uint8_t* o = reinterpret_cast<const uint8_t*>(&m_peer_ip);   // network order
+        snprintf(text, sizeof(text), "%u.%u.%u.%u:%u", o[0], o[1], o[2], o[3], m_peer_port);
+        return text;
+    }
+
+    void RpcnTransport::SetPeer(uint32_t ip, uint16_t port, const char* source)
+    {
+        if (!ip || !port)
+            return;
+        const bool changed = (ip != m_peer_ip || port != m_peer_port);
+        m_peer_ip = ip;
+        m_peer_port = port;
+        m_signaling_retry_ms = 0;
+        if (m_stage == Stage::Hosting || m_stage == Stage::Joining)
+            m_stage = Stage::Linked;
+        if (changed)
+        {
+            // Punch immediately rather than waiting out the interval - this is the moment the
+            // hole has to be opened, and the peer may already be sending.
+            m_last_punch_ms = 0;
+            Note("peer %s at %s (via %s)", m_peer_npid[0] ? m_peer_npid : "?", PeerAddrText(),
+                 source);
+        }
     }
 
     bool RpcnTransport::Start(const Config& cfg)
     {
         Stop();
+
+        // Before the first Fail() can happen. Stop() deliberately leaves these alone so a
+        // reconnect keeps logging.
+        m_log = cfg.log;
+        m_log_ctx = cfg.log_ctx;
 
         if (!cfg.server || !cfg.npid || !cfg.password || !cfg.com_id)
         {
@@ -78,9 +138,12 @@ namespace yampnet
         m_is_host = false;
         m_peer_ip = 0;
         m_peer_port = 0;
+        m_peer_heard = false;
         m_peer_npid[0] = '\0';
         m_pending_serverlist = m_pending_worldlist = m_pending_room = m_pending_signaling = 0;
         m_pending_search = 0;
+        m_signaling_retry_ms = 0;
+        m_last_punch_ms = 0;
         m_room_count = 0;
         m_error[0] = '\0';
     }
@@ -96,13 +159,120 @@ namespace yampnet
         m_client.SendSignalingPing();
     }
 
+    void RpcnTransport::PumpPunch()
+    {
+        if (!PeerKnown())
+            return;
+        const uint64_t now = GetTickCount64();
+        const uint64_t interval = m_peer_heard ? kHolePunchIdleMs : kPunchIntervalMs;
+        if (m_last_punch_ms != 0 && now - m_last_punch_ms < interval)
+            return;
+        m_last_punch_ms = now;
+        m_client.SendTo(m_peer_ip, m_peer_port, kPunchPacket, sizeof(kPunchPacket));
+    }
+
+    void RpcnTransport::PumpSignalingRetry()
+    {
+        // Only when we know WHO the peer is but not WHERE. The usual cause is a peer that has not
+        // yet been seen by the server's UDP helper, which resolves itself within a keepalive or
+        // two - so this quietly retries instead of failing the session.
+        if (m_signaling_retry_ms == 0 || PeerKnown() || m_pending_signaling != 0 || !m_peer_npid[0])
+            return;
+        if (GetTickCount64() < m_signaling_retry_ms)
+            return;
+        m_signaling_retry_ms = 0;
+        m_pending_signaling = m_client.RequestSignalingInfos(m_peer_npid);
+    }
+
+    void RpcnTransport::OnNotification(const RpcnPacket& pkt)
+    {
+        switch (static_cast<RpcnNotification>(pkt.command))
+        {
+        case RpcnNotification::UserJoinedRoom:
+        {
+            // The host's cue that it has a peer at all. Everything it needs to start punching is
+            // in here, provided the room was created with signaling on.
+            char npid[20] = {};
+            uint32_t ip = 0;
+            uint16_t port = 0;
+            bool has_addr = false;
+            if (!RpcnClient::ParseJoinedNotification(pkt.payload, pkt.payload_size, npid,
+                                                     sizeof(npid), &ip, &port, &has_addr))
+                break;
+            if (npid[0] && strcmp(npid, m_npid) == 0)
+                break;   // our own join echoed back
+            if (npid[0])
+                strncpy_s(m_peer_npid, npid, _TRUNCATE);
+
+            Note("%s joined the room", m_peer_npid[0] ? m_peer_npid : "a peer");
+
+            if (has_addr && ip && port)
+            {
+                SetPeer(ip, port, "join notification");
+            }
+            else if (m_peer_npid[0] && !PeerKnown() && m_pending_signaling == 0)
+            {
+                // No address in the notification: an older room, or one the server decided needed
+                // no signaling. Ask directly - which also makes the server tell the PEER about us.
+                m_pending_signaling = m_client.RequestSignalingInfos(m_peer_npid);
+            }
+            break;
+        }
+
+        case RpcnNotification::UserLeftRoom:
+        case RpcnNotification::RoomDestroyed:
+        {
+            if (!PeerKnown() && !m_peer_npid[0])
+                break;
+            Note("peer left the room");
+            m_peer_ip = 0;
+            m_peer_port = 0;
+            m_peer_heard = false;
+            m_peer_npid[0] = '\0';
+            m_signaling_retry_ms = 0;
+            if (m_stage == Stage::Linked)
+                m_stage = m_is_host ? Stage::Hosting : Stage::Joining;
+            break;
+        }
+
+        case RpcnNotification::SignalingHelper:
+        {
+            // Pushed to the TARGET of a RequestSignalingInfos, carrying the caller's address. The
+            // server sends it for exactly one reason: so the side that was asked about also starts
+            // transmitting. Honouring it is what unblocks a room with no signaling of its own.
+            char npid[20] = {};
+            uint32_t ip = 0;
+            uint16_t port = 0;
+            if (!RpcnClient::ParseSignalingHelper(pkt.payload, pkt.payload_size, npid,
+                                                  sizeof(npid), &ip, &port))
+                break;
+            if (npid[0] && strcmp(npid, m_npid) == 0)
+                break;
+            if (m_peer_npid[0] && npid[0] && strcmp(npid, m_peer_npid) != 0)
+                break;   // somebody else entirely - not the peer we are in a room with
+            if (npid[0])
+                strncpy_s(m_peer_npid, npid, _TRUNCATE);
+            SetPeer(ip, port, "signaling helper");
+            break;
+        }
+
+        default:
+            break;
+        }
+    }
+
     bool RpcnTransport::PumpReplies()
     {
         RpcnPacket pkt;
         while (m_client.Poll(&pkt))
         {
+            if (pkt.type == 2)
+            {
+                OnNotification(pkt);
+                continue;
+            }
             if (pkt.type != 1)
-                continue;   // ServerInfo greeting / notifications - nothing to do with them yet
+                continue;   // ServerInfo greeting - nothing to do with it
 
             const auto cmd = static_cast<RpcnCommand>(pkt.command);
 
@@ -188,7 +358,8 @@ namespace yampnet
 
                 if (m_is_host)
                 {
-                    // Nothing more to do: the guest will find us and transmit first.
+                    // Wait for a UserJoinedRoom notification, which is what tells us both that a
+                    // guest exists and where it is.
                     m_stage = Stage::Hosting;
                 }
                 else
@@ -211,8 +382,24 @@ namespace yampnet
                         Fail("joined a room with no other member");
                         return false;
                     }
-                    m_pending_signaling = m_client.RequestSignalingInfos(m_peer_npid);
+
                     m_stage = Stage::Joining;
+
+                    // The host's address is already in this reply when the room has signaling on,
+                    // so the common case needs no extra round trip. Fall back to asking when it is
+                    // absent - an older host's room, or one the server chose not to signal.
+                    uint32_t ip = 0;
+                    uint16_t port = 0;
+                    if (RpcnClient::ParseJoinSignalingAddr(pkt.payload, pkt.payload_size, &ip,
+                                                           &port)
+                        && ip && port)
+                    {
+                        SetPeer(ip, port, "join reply");
+                    }
+                    else
+                    {
+                        m_pending_signaling = m_client.RequestSignalingInfos(m_peer_npid);
+                    }
                 }
                 continue;
             }
@@ -226,13 +413,15 @@ namespace yampnet
                     || !RpcnClient::ParseSignalingAddr(pkt.payload, pkt.payload_size, &ip, &port)
                     || !ip || !port)
                 {
-                    Fail("could not resolve peer '%s' (ErrorType=%u)", m_peer_npid,
+                    // NOT fatal, and it used to be. A peer that has not yet been seen by the UDP
+                    // helper answers NotFound, which is a timing accident rather than a broken
+                    // session - it fixes itself within a keepalive or two.
+                    Note("no address for '%s' yet (ErrorType=%u); retrying", m_peer_npid,
                          static_cast<unsigned>(pkt.error));
-                    return false;
+                    m_signaling_retry_ms = GetTickCount64() + kSignalingRetryMs;
+                    continue;
                 }
-                m_peer_ip = ip;
-                m_peer_port = port;
-                m_stage = Stage::Linked;
+                SetPeer(ip, port, "signaling lookup");
                 continue;
             }
         }
@@ -252,6 +441,8 @@ namespace yampnet
 
         PumpReplies();
         PumpKeepalive();
+        PumpSignalingRetry();
+        PumpPunch();
     }
 
     bool RpcnTransport::Host(uint32_t max_slot, const char* password, uint32_t flag_attr)
@@ -263,6 +454,10 @@ namespace yampnet
         }
         m_is_host = true;
         m_room_flags = 0;   // adopted from the server's reply, like the room id
+        m_peer_ip = 0;
+        m_peer_port = 0;
+        m_peer_heard = false;
+        m_peer_npid[0] = '\0';
         m_pending_room = m_client.CreateRoom(m_com_id, m_world_id, max_slot, password, flag_attr);
         return m_pending_room != 0;
     }
@@ -276,6 +471,10 @@ namespace yampnet
         }
         m_is_host = false;
         m_room_flags = 0;
+        m_peer_ip = 0;
+        m_peer_port = 0;
+        m_peer_heard = false;
+        m_peer_npid[0] = '\0';
         m_pending_room = m_client.JoinRoom(m_com_id, room_id, password);
         return m_pending_room != 0;
     }
@@ -316,19 +515,35 @@ namespace yampnet
             if (m_client.IsSignalingSource(ip, port))
                 continue;
 
-            // First contact from the guest: adopt it as the peer. This is how the host learns an
-            // address it could not have looked up, and it is what makes the return path work.
-            if (!m_peer_ip)
+            if (!m_peer_heard)
             {
+                // First contact. Take the source we actually hear from in preference to the one we
+                // were told about: a peer behind a symmetric NAT reaches us from a different port
+                // than the server observed, and that address is the only one that can work. Only
+                // the port may differ though - a datagram from an unrelated IP is not our peer.
+                const bool plausible = !m_peer_ip || ip == m_peer_ip;
+                if (!plausible)
+                    continue;
+
+                m_peer_heard = true;
+                const bool moved = (port != m_peer_port || ip != m_peer_ip);
                 m_peer_ip = ip;
                 m_peer_port = port;
-                if (m_stage == Stage::Hosting)
+                if (m_stage == Stage::Hosting || m_stage == Stage::Joining)
                     m_stage = Stage::Linked;
+                Note(moved ? "peer reached us from %s (not the advertised port); using that"
+                           : "peer link established with %s", PeerAddrText());
             }
             else if (ip != m_peer_ip || port != m_peer_port)
             {
                 continue;   // stray datagram from somewhere else - ignore
             }
+
+            // A punch is not game traffic; it exists only to open the NAT. Swallow it here so the
+            // lockstep layer never sees a runt packet.
+            if (got == static_cast<int>(sizeof(kPunchPacket))
+                && memcmp(buf, kPunchPacket, sizeof(kPunchPacket)) == 0)
+                continue;
 
             if (out_peer)
                 *out_peer = 0;
