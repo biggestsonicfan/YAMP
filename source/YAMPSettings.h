@@ -96,7 +96,7 @@ public:
 	// disabled by default for the same reason: this ON with that hook ON is the one
 	// combination that yields two-second rounds. Consumed once at module load.
 	bool m_stfFixBackupTimeIndex = true;
-	// Which of the module's 76 HLE ROM hooks to keep disabled (bit i = hook i, in the DLL's
+	// Which of the module's HLE ROM hooks to keep disabled (bit i = hook i, in the DLL's
 	// own table order - see m2ftg::HleHooks). A disabled hook has its original i960
 	// instruction restored in the ROM image, so the ROM's own code runs there instead, which
 	// is what makes a patched rom_code1.bin take effect. Enforced every frame; applied live.
@@ -106,7 +106,7 @@ public:
 	// cannot be resolved until game.elf has been loaded - see HleHooks::ResolveRetarget for
 	// the accepted forms. Read from the ini's [HleRetarget] section and applied once, before
 	// module_start; never written back, so a hand-authored section survives Apply.
-	std::string m_stfHleRetarget[m2ftg::HleHooks::COUNT];
+	std::string m_stfHleRetarget[m2ftg::HleHooks::MAX_COUNT];
 
 	// --- Netplay (RPCN) ---------------------------------------------------------------------
 	// Persisted so a session can be resumed without retyping. m_netToken is the account

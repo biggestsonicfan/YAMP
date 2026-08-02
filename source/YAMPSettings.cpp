@@ -13,6 +13,25 @@
 static constexpr std::string_view INI_FILE_NAME = "settings.ini";
 static constexpr uint32_t SETTINGS_VERSION = 1;
 
+// Scopes an HLE-hook ini name to the running game.
+//
+// settings.ini sits next to YAMP.exe and every title shares it, but the hook mask and the
+// retarget list are both indexed by position in ONE game's hook table - and those tables have
+// different lengths and completely different contents. Sharing a key would mean a hook the user
+// disabled in Sonic the Fighters silently disabling whatever Fighting Vipers keeps at that
+// index, which for a Core hook is a hang.
+//
+// StF keeps the bare name so ini files written before Fighting Vipers had a hook table keep
+// working; every other game gets a ".<tag>" suffix.
+static std::wstring HleKeyW(const wchar_t* base)
+{
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	{
+		return base;
+	}
+	return std::wstring(base) + L"." + UTF8ToWchar(gGeneral.GetGameTag());
+}
+
 static float GetPrivateProfileFloatW(LPCWSTR lpAppName, LPCWSTR lpKeyName, float fDefault, LPCWSTR lpFileName)
 {
 	wchar_t buf[32];
@@ -178,15 +197,23 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		{
 			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
 		}
-		// 76 bits, so it does not fit the profile API's integer reads - stored as hex text.
-		// The default is DEFAULT_DISABLE_MASK, not 0: hook 16 fights the backup-RAM TIME fix
+		// Up to 96 bits, so it does not fit the profile API's integer reads - stored as hex
+		// text. The default is the game's own default mask, not 0: StF's hook 16 fights the
+		// backup-RAM TIME fix
 		// (see HleHooks.h). NB an ini written by an older build already carries an explicit
 		// 0 here, which is indistinguishable from a deliberate "enable everything" - those
 		// users get the hook back until they clear the checkbox or delete the two lines.
-		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksLo",
-			m2ftg::HleHooks::DEFAULT_DISABLE_MASK[0], iniPath.c_str());
-		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksHi",
-			m2ftg::HleHooks::DEFAULT_DISABLE_MASK[1], iniPath.c_str());
+		//
+		// The KEY IS PER-GAME, because the value is a set of bit INDICES into one game's hook
+		// table and every game's table is different. settings.ini lives next to YAMP.exe and is
+		// shared by every title, so a single key would carry StF's choices into Fighting Vipers
+		// and silently disable whatever FV happens to keep at those indices - a Content hook in
+		// one game is a Core hook in the other. StF keeps the unsuffixed key so existing ini
+		// files still load.
+		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksLo").c_str(),
+			m2ftg::HleHooks::DefaultDisableMask()[0], iniPath.c_str());
+		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksHi").c_str(),
+			m2ftg::HleHooks::DefaultDisableMask()[1], iniPath.c_str());
 		// Belt and braces with the strip on save: a hand-edited ini must not be able to make
 		// YAMP unbootable either, since a hung board also takes the settings UI down with it.
 		m2ftg::HleHooks::MaskStripKinds(m_stfHleDisableMask, m2ftg::HleHooks::SESSION_ONLY_KINDS);
@@ -198,8 +225,13 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		// non-StF program ROM can be protected from it. The live disable mask cannot serve here,
 		// because Core bits are stripped from the ini by design (see SESSION_ONLY_KINDS) and a
 		// homebrew ROM's whole problem is the Core hooks.
-		const wchar_t* SECTION_NAME = L"HleRetarget";
-		for (size_t i = 0; i < m2ftg::HleHooks::COUNT; i++)
+		//
+		// Per-game section for the same reason the disable mask has a per-game key: Hook33 is
+		// StF's `rand` and FV's `char_add2`-era slot, and pointing one game's retarget list at
+		// the other's installer would stamp traps into unrelated code before the CPU runs.
+		const std::wstring section = HleKeyW(L"HleRetarget");
+		const wchar_t* SECTION_NAME = section.c_str();
+		for (size_t i = 0; i < m2ftg::HleHooks::MAX_COUNT; i++)
 		{
 			wchar_t key[16];
 			swprintf_s(key, L"Hook%u", static_cast<unsigned>(i));
@@ -316,8 +348,9 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		// Core hooks stay session-only, so a restart always gets back to a bootable state.
 		uint64_t persisted[2] = { m_stfHleDisableMask[0], m_stfHleDisableMask[1] };
 		m2ftg::HleHooks::MaskStripKinds(persisted, m2ftg::HleHooks::SESSION_ONLY_KINDS);
-		WritePrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksLo", persisted[0], iniPath.c_str());
-		WritePrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksHi", persisted[1], iniPath.c_str());
+		// Same per-game key as the load side - see HleKeyW.
+		WritePrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksLo").c_str(), persisted[0], iniPath.c_str());
+		WritePrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksHi").c_str(), persisted[1], iniPath.c_str());
 	}
 
 	{

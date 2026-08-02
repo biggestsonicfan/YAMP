@@ -3,6 +3,7 @@
 #include "../../YAMPGeneral.h"
 #include "../ELF/ElfRom.h"
 #include "../../net/NetPlugin.h"
+#include "LJHost.h" // GameDesc / CurrentGame() - the DLL name to look the module up by
 
 #include "../../imgui/imgui.h"
 
@@ -57,8 +58,13 @@ namespace
 	constexpr uint64_t ITEM_NUMERIC = 1;
 
 	// RVAs inside stf-pxd-w64-d3d12_retail.dll (fixed preferred base 0x180000000).
+	//
+	// The four below drive the DEBUG MENU panes, which are StF-only: their window tree, item
+	// labels and RVA_NOTES are all StF's. The addresses the NETPLAY DETERMINISM helpers need -
+	// boot state, CPU context, memory map, RESET, the RNG holder and the texture-budget
+	// handler - are per-game and live in the DwGame table further down, because Fighting
+	// Vipers needs every one of them and has different values for all of them.
 	constexpr uintptr_t RVA_ROOT_WINDOW = 0x1E8850;   // "DEBUG MENU" window header
-	constexpr uintptr_t RVA_BOOT_STATE = 0x6B9300;    // ROM/CPU boot phase; 2 = board booted
 	constexpr uintptr_t RVA_RUN_STATE = 0x6C19E0;     // written by STEP/GO/RESET handlers
 	constexpr uintptr_t RVA_STUB_RET0 = 0x4C780;      // `xor eax,eax; ret` — stripped handlers
 
@@ -66,7 +72,7 @@ namespace
 	// DLL's own data and code; the only piece missing from the retail DLL is the text output,
 	// which the stripped CALL STACK handler (+0x4C6C0) discarded — it still performs the walk
 	// correctly.
-	constexpr uintptr_t RVA_CPU_CTX_PTR = 0x58A960;   // -> i960 context (set by the CPU init)
+	// (StF's value; the live one comes from DwGame::rvaCpuCtxPtr - FV's is 0x58CF60.)
 	// The emulated register file is embedded in the context at +0x58 as 64 consecutive u32
 	// slots, indexed straight off the instruction's register field: the interpreter's operand
 	// fetch is *(u32*)(ctx + 0x58 + regIndex * 4) with a 5-bit index (+0x180027120) or a 6-bit
@@ -100,7 +106,9 @@ namespace
 	// Slot +0x20 is the 32-bit read: void read(void* out, uint32_t addr); slot +0x28 is its
 	// paired 32-bit write: void write(uint32_t addr, const void* src). Unmapped regions
 	// point at a bare `ret` stub, so an out-of-range address is inert rather than fatal.
-	constexpr uintptr_t RVA_MEMMAP_TBL = 0x172660;
+	// (StF's table is at 0x172660, FV's at 0x170750 - see DwGame::rvaMemmapTbl. Both were read
+	// out of the DLL's own dispatch, which indexes an array of 8-byte pointers by `index * 0xE`
+	// and so pins the record size at 0x70 as well as the base.)
 	constexpr size_t MEMMAP_RECORD_SIZE = 0x70;
 	constexpr size_t MEMMAP_READ32 = 0x20;
 	constexpr size_t MEMMAP_WRITE32 = 0x28;
@@ -161,11 +169,68 @@ namespace
 		{ 0x1E50D4, "Stage-select variable, read by live game logic (including module_main)." },
 	};
 
+	// ---- Per-game addresses ------------------------------------------------------------------
+	//
+	// Everything the netplay determinism layer touches, for each game that has it. The DEBUG
+	// MENU panes above stay StF-only (their descriptor tree and notes are StF's), but the
+	// helpers below - board booted, reset, RNG seeding, texture budget, emulated-RAM access -
+	// are what a netplay round is built on and all of them now work for Fighting Vipers too.
+	//
+	// FV values were read out of fv-pxd-w64-d3d12_retail.dll; see docs/fv-hle-hooks.md.
+	struct DwGame
+	{
+		uintptr_t rvaBootState;        // ROM/CPU boot phase; 2 = board booted
+		uintptr_t rvaCpuCtxPtr;        // -> i960 context (set by the CPU init)
+		uintptr_t rvaMemmapTbl;        // 64 x 0x70 emulated memory-map records
+		uintptr_t rvaResetHandler;     // DEBUG MENU "RESET": run-state 0 + real board init
+		uintptr_t rvaRngHolder;        // -> struct holding the host Mersenne Twister(s)
+		// Offsets within that struct of each twister the ROM actually draws from. StF has one
+		// (behind `rand`); FV has TWO - `rand` at +0x20 and the VS stage picker at +0x08 - and
+		// seeding only the first leaves the stage choice free to disagree between peers.
+		const uintptr_t* rngStreams;
+		size_t rngStreamCount;
+		uintptr_t rvaTexBudgetHandler; // the wall-clock "has the upload budget expired?" handler
+		uintptr_t rvaHleTable;         // installer input, so the handler above can be repointed
+		size_t hleCount;
+	};
+
+	constexpr uintptr_t STF_RNG_STREAMS[] = { 0x20 };
+	constexpr uintptr_t FV_RNG_STREAMS[] = { 0x20, 0x08 };
+
+	constexpr DwGame DW_STF = {
+		0x6B9300, 0x58A960, 0x172660, 0x4C840,
+		0x68BB88, STF_RNG_STREAMS, std::size(STF_RNG_STREAMS),
+		0x52FD0, 0x1E8870, 76,
+	};
+	constexpr DwGame DW_FV = {
+		0x6BB900, 0x58CF60, 0x170750, 0x4B3E0,
+		0x68E188, FV_RNG_STREAMS, std::size(FV_RNG_STREAMS),
+		0x51C20, 0x1E5840, 95,
+	};
+
+	static const DwGame* CurrentDw()
+	{
+		switch (gGeneral.GetGameId())
+		{
+		case YAMPGeneral::GameId::StF: return &DW_STF;
+		case YAMPGeneral::GameId::FV:  return &DW_FV;
+		default:                       return nullptr;
+		}
+	}
+
 	static uint8_t* ModuleBase()
 	{
-		// The DLL links with a fixed preferred base and no dynamic relocation, but resolve the
-		// real base anyway instead of assuming 0x180000000.
-		return reinterpret_cast<uint8_t*>(GetModuleHandleW(L"stf-pxd-w64-d3d12_retail.dll"));
+		// Every LJ m2ftg DLL ships with ASLR set, so resolve the real base by name rather than
+		// assuming the preferred 0x180000000 - the mistake that cost FV its first bring-up.
+		return reinterpret_cast<uint8_t*>(GetModuleHandleW(m2ftg::CurrentGame().dll_name));
+	}
+
+	// Board booted, for a game that has a descriptor. Returns false (rather than reading a
+	// wild address) for any game that does not.
+	static bool BoardBooted(const DwGame* game, const uint8_t* base) noexcept
+	{
+		return game != nullptr && base != nullptr
+			&& *reinterpret_cast<const uint32_t*>(base + game->rvaBootState) == 2;
 	}
 
 	// Calls a handler inside the game DLL. The handlers are tiny and take no arguments (they
@@ -192,8 +257,13 @@ namespace
 		{
 			return false;
 		}
+		const DwGame* game = CurrentDw();
+		if (game == nullptr)
+		{
+			return false;
+		}
 		void* reader = *reinterpret_cast<void**>(
-			base + RVA_MEMMAP_TBL + index * MEMMAP_RECORD_SIZE + MEMMAP_READ32);
+			base + game->rvaMemmapTbl + index * MEMMAP_RECORD_SIZE + MEMMAP_READ32);
 		if (reader == nullptr)
 		{
 			return false;
@@ -219,8 +289,13 @@ namespace
 		{
 			return false;
 		}
+		const DwGame* game = CurrentDw();
+		if (game == nullptr)
+		{
+			return false;
+		}
 		void* writer = *reinterpret_cast<void**>(
-			base + RVA_MEMMAP_TBL + index * MEMMAP_RECORD_SIZE + MEMMAP_WRITE32);
+			base + game->rvaMemmapTbl + index * MEMMAP_RECORD_SIZE + MEMMAP_WRITE32);
 		if (writer == nullptr)
 		{
 			return false;
@@ -461,7 +536,7 @@ namespace
 		ImGui::Separator();
 		ImGui::TextUnformatted("DISASM (live IP)");
 
-		uint8_t* ctx = booted ? *reinterpret_cast<uint8_t**>(base + RVA_CPU_CTX_PTR) : nullptr;
+		uint8_t* ctx = booted ? *reinterpret_cast<uint8_t**>(base + DW_STF.rvaCpuCtxPtr) : nullptr;
 		uint32_t ip = 0;
 		if (ctx == nullptr || !CurrentI960Ip(ctx, ip))
 		{
@@ -489,7 +564,7 @@ namespace
 			return;
 		}
 
-		uint8_t* ctx = *reinterpret_cast<uint8_t**>(base + RVA_CPU_CTX_PTR);
+		uint8_t* ctx = *reinterpret_cast<uint8_t**>(base + DW_STF.rvaCpuCtxPtr);
 		if (ctx == nullptr)
 		{
 			ImGui::TextDisabled("No CPU context.");
@@ -769,10 +844,8 @@ uint32_t m2ftg::I960Profile::Bucket(size_t index)
 namespace
 {
 	// --- Deterministic texture-upload budget (see the header) --------------------------------
-	constexpr uintptr_t RVA_HLE_TABLE_LOCAL = 0x1E8870;
-	constexpr size_t HLE_ENTRY_COUNT = 76;
-	constexpr uintptr_t RVA_TEX_BUDGET_HANDLER = 0x52FD0;
-
+	// (The table, its length and the handler to repoint all come from DwGame - StF's budget
+	// handler is 0x52FD0 across 4 records, FV's is 0x51C20 across 4 of its own.)
 	struct HleEntry
 	{
 		uint32_t romOffset;
@@ -785,6 +858,8 @@ namespace
 
 	HleHandlerFn g_originalTexBudget = nullptr;
 	uint8_t* g_texBudgetBase = nullptr;
+	// Captured when the wrapper is installed, so the hot path needs no game lookup.
+	uintptr_t g_texBudgetCtxRva = 0;
 
 	// Runs the DLL's own handler first so its return value (the trapped instruction's length, 4 or
 	// 8) stays exactly right, then replaces the wall-clock answer it wrote into g0.
@@ -794,11 +869,12 @@ namespace
 
 		if (g_texBudgetBase != nullptr)
 		{
-			uint8_t* ctx = *reinterpret_cast<uint8_t**>(g_texBudgetBase + RVA_CPU_CTX_PTR);
+			uint8_t* ctx = *reinterpret_cast<uint8_t**>(g_texBudgetBase + g_texBudgetCtxRva);
 			if (ctx != nullptr)
 			{
 				// g0 = 0: "the budget has not expired", so the unpack loop runs to completion
-				// instead of stopping wherever this machine happened to be after 9 ms.
+				// instead of stopping wherever this machine happened to be after the deadline
+				// (9 ms in StF; 12 ms, or 8 in some master states, in FV).
 				*reinterpret_cast<uint32_t*>(ctx + 0x98) = 0;
 			}
 		}
@@ -808,29 +884,23 @@ namespace
 
 bool m2ftg::SetTextureBudgetDeterministic(bool enable)
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
-	{
-		return false;
-	}
+	const DwGame* game = CurrentDw();
 	uint8_t* base = ModuleBase();
-	if (base == nullptr)
-	{
-		return false;
-	}
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	if (!BoardBooted(game, base))
 	{
 		return false;
 	}
 
 	g_texBudgetBase = base;
-	const uint64_t original = reinterpret_cast<uint64_t>(base + RVA_TEX_BUDGET_HANDLER);
+	g_texBudgetCtxRva = game->rvaCpuCtxPtr;
+	const uint64_t original = reinterpret_cast<uint64_t>(base + game->rvaTexBudgetHandler);
 	const uint64_t replacement = reinterpret_cast<uint64_t>(&DeterministicTexBudget);
 
 	// The table lives in .data and the installer writes it at boot, so it is already writable -
 	// no VirtualProtect dance needed.
-	auto* table = reinterpret_cast<HleEntry*>(base + RVA_HLE_TABLE_LOCAL);
+	auto* table = reinterpret_cast<HleEntry*>(base + game->rvaHleTable);
 	size_t patched = 0;
-	for (size_t i = 0; i < HLE_ENTRY_COUNT; ++i)
+	for (size_t i = 0; i < game->hleCount; ++i)
 	{
 		if (enable && table[i].handler == original)
 		{
@@ -850,67 +920,98 @@ bool m2ftg::SetTextureBudgetDeterministic(bool enable)
 	return patched != 0;
 }
 
-bool m2ftg::SeedHostRng(uint32_t seed)
+namespace
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
-	{
-		return false;
-	}
-	uint8_t* base = ModuleBase();
-	if (base == nullptr)
-	{
-		return false;
-	}
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
-	{
-		return false;
-	}
-
-	// Layout from the generator at DLL+0x8D40 (see the header): the holder global points at a
-	// struct whose +0x20 is the Mersenne Twister state object.
-	constexpr uintptr_t RVA_RNG_HOLDER = 0x68BB88;
-	constexpr uintptr_t OFF_STATE = 0x008;    // u32 [624]
-	constexpr uintptr_t OFF_INDEX = 0x9C8;    // circular index, 0..623
+	// Layout from the generator (StF DLL+0x8D40 / FV DLL+0x8D00, the same code): the holder
+	// global points at a struct whose slots hold Mersenne Twister state objects.
+	constexpr uintptr_t MT_OFF_STATE = 0x008;    // u32 [624]
+	constexpr uintptr_t MT_OFF_INDEX = 0x9C8;    // circular index, 0..623
 	constexpr uint32_t MT_N = 624;
 
+	// Seeds one twister in place. Returns false without writing anything if the object fails
+	// its sanity check, so a wrong address costs nothing rather than scribbling 2.5 KB.
+	static bool SeedOneTwister(uint8_t* holder, uintptr_t slot, uint32_t seed) noexcept
+	{
+		__try
+		{
+			uint8_t* mt = *reinterpret_cast<uint8_t**>(holder + slot);
+			if (mt == nullptr)
+			{
+				return false;
+			}
+
+			// A live twister always has its index inside the state array.
+			uint32_t& index = *reinterpret_cast<uint32_t*>(mt + MT_OFF_INDEX);
+			if (index >= MT_N)
+			{
+				return false;
+			}
+
+			// Standard init_genrand:
+			//     mt[0] = seed; mt[i] = 1812433253 * (mt[i-1] ^ (mt[i-1]>>30)) + i.
+			uint32_t* state = reinterpret_cast<uint32_t*>(mt + MT_OFF_STATE);
+			state[0] = seed;
+			for (uint32_t i = 1; i < MT_N; ++i)
+			{
+				const uint32_t prev = state[i - 1];
+				state[i] = 1812433253u * (prev ^ (prev >> 30)) + i;
+			}
+			// This generator twists in place off a circular index rather than regenerating in
+			// blocks, so a freshly seeded state starts at element 0.
+			index = 0;
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+}
+
+bool m2ftg::SeedHostRng(uint32_t seed)
+{
+	const DwGame* game = CurrentDw();
+	uint8_t* base = ModuleBase();
+	if (!BoardBooted(game, base))
+	{
+		return false;
+	}
+
+	uint8_t* holder = nullptr;
 	__try
 	{
-		uint8_t* holder = *reinterpret_cast<uint8_t**>(base + RVA_RNG_HOLDER);
-		if (holder == nullptr)
-		{
-			return false;
-		}
-		uint8_t* mt = *reinterpret_cast<uint8_t**>(holder + 0x20);
-		if (mt == nullptr)
-		{
-			return false;
-		}
-
-		// Sanity: a live twister always has its index inside the state array. If this is not the
-		// object we think it is, bail rather than scribble 2.5 KB over something else.
-		uint32_t& index = *reinterpret_cast<uint32_t*>(mt + OFF_INDEX);
-		if (index >= MT_N)
-		{
-			return false;
-		}
-
-		// Standard init_genrand: mt[0] = seed; mt[i] = 1812433253 * (mt[i-1] ^ (mt[i-1]>>30)) + i.
-		uint32_t* state = reinterpret_cast<uint32_t*>(mt + OFF_STATE);
-		state[0] = seed;
-		for (uint32_t i = 1; i < MT_N; ++i)
-		{
-			const uint32_t prev = state[i - 1];
-			state[i] = 1812433253u * (prev ^ (prev >> 30)) + i;
-		}
-		// This generator twists in place off a circular index rather than regenerating in blocks,
-		// so a freshly seeded state starts at element 0.
-		index = 0;
-		return true;
+		holder = *reinterpret_cast<uint8_t**>(base + game->rvaRngHolder);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{
 		return false;
 	}
+	if (holder == nullptr)
+	{
+		return false;
+	}
+
+	// EVERY stream the ROM draws from has to be seeded, and each one gets a DIFFERENT seed.
+	//
+	// FV has two: `rand` (hook 43) and the VS stage picker (hook 30), which is its own
+	// generator object rather than a second draw from the first. Seeding only `rand` would
+	// leave both peers agreeing on the fight and disagreeing on the stage - a desync that
+	// happens before the first frame of the round and looks nothing like an RNG problem.
+	//
+	// Deriving each stream's seed from the shared one keeps a single value on the wire while
+	// making sure two streams seeded from the same match do not run in lockstep with each
+	// other, which would be a needless correlation between unrelated draws.
+	bool anySeeded = false;
+	for (size_t i = 0; i < game->rngStreamCount; ++i)
+	{
+		// Weyl-style decorrelation; any fixed odd stride would do.
+		const uint32_t streamSeed = seed + static_cast<uint32_t>(i) * 0x9E3779B9u;
+		if (SeedOneTwister(holder, game->rngStreams[i], streamSeed))
+		{
+			anySeeded = true;
+		}
+	}
+	return anySeeded;
 }
 
 bool m2ftg::ReadEmulatedRam32(uint32_t address, uint32_t& out)
@@ -925,39 +1026,23 @@ bool m2ftg::ReadEmulatedRam32(uint32_t address, uint32_t& out)
 
 bool m2ftg::IsBoardBooted()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
-	{
-		return false;
-	}
-	uint8_t* base = ModuleBase();
-	if (base == nullptr)
-	{
-		return false;
-	}
-	return *reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) == 2;
+	return BoardBooted(CurrentDw(), ModuleBase());
 }
 
 bool m2ftg::ResetBoard()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
-	{
-		return false;
-	}
+	const DwGame* game = CurrentDw();
 	uint8_t* base = ModuleBase();
-	if (base == nullptr)
-	{
-		return false;
-	}
 	// Calling the reset before the board has finished booting would re-init a CPU whose ROM is
 	// still loading, so gate on the same boot dword the menu actions use.
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	if (!BoardBooted(game, base))
 	{
 		return false;
 	}
 
-	// DEBUG MENU item 5, "RESET": writes run-state 0 and calls the DLL's real i960/board init.
-	constexpr uintptr_t RVA_RESET_HANDLER = 0x4C840;
-	InvokeDwAction(base + RVA_RESET_HANDLER);
+	// The DEBUG MENU's "RESET" item: writes run-state 0 and calls the DLL's real i960/board
+	// init. Unlike STEP/GO/REGS it is NOT a stub in either retail build.
+	InvokeDwAction(base + game->rvaResetHandler);
 	return true;
 }
 
@@ -979,7 +1064,7 @@ void m2ftg::DrawDebugWindows()
 	}
 
 	const auto* root = reinterpret_cast<const DwMenuWindow*>(base + RVA_ROOT_WINDOW);
-	const uint32_t bootState = *reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE);
+	const uint32_t bootState = *reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState);
 	const bool booted = bootState == 2;
 
 	ImGui::SetNextWindowPos({ 10.0f, 40.0f }, ImGuiCond_FirstUseEver);
@@ -1037,7 +1122,7 @@ void m2ftg::UpdateDamageAssignment()
 	}
 	// Before the board is up there is no block to write, and the ROM's own init_game_assignments
 	// runs during boot - a write landing before it would simply be overwritten.
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	if (*reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState) != 2)
 	{
 		return;
 	}
@@ -1084,7 +1169,7 @@ void m2ftg::UpdateGameDebugFlag()
 	static bool baselineKnown = false;
 	static uint32_t baselineBits = 0;
 	static bool applied = false;
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	if (*reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState) != 2)
 	{
 		baselineKnown = false;
 		applied = false;

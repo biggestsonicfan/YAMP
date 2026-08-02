@@ -5,6 +5,7 @@
 #include "../../DebugLog.h"
 #include "../ELF/ElfRom.h"
 #include "../../net/NetPlugin.h"
+#include "LJHost.h" // GameDesc / CurrentGame() - the DLL name to look the module up by
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -14,23 +15,18 @@ namespace
 	using m2ftg::HleHooks::Info;
 	using Kind = m2ftg::HleHooks::Kind;
 
-	// RVAs inside stf-pxd-w64-d3d12_retail.dll (fixed preferred base 0x180000000).
+	// The installer's input table is, in both games, N records of {uint32 romOffset, pad,
+	// uint64 handler}. It lives in .data, not .rdata, so it is writable without
+	// VirtualProtect - but this code never needs to touch it for enabling/disabling, because
+	// it works on the ROM image instead.
 	//
-	// RVA_HLE_TABLE is the installer's input: 76 records of {uint32 romOffset, pad, uint64
-	// handler}. It lives in .data, not .rdata, so it is writable without VirtualProtect - but
-	// this code never needs to touch it, because it works on the ROM image instead.
-	//
-	// The installer (FUN_18004B070, board bring-up stage 2) does, for every record whose
-	// romOffset is below 0x200000:
+	// The installer (StF FUN_18004B070 / FV FUN_180049C50, board bring-up stage 2) does, for
+	// every record whose romOffset is below 0x200000:
 	//     savedWords[i] = *(uint64*)(romBase + romOffset);          // original instruction(s)
 	//     *(uint32*)(romBase + romOffset) = 0x4000000 | (i * 4);    // trap word
 	// The trap word's low bits are the record index, so the emulator's opcode dispatch can
 	// find the handler and the saved original again. Restoring the ROM word from savedWords
 	// therefore un-does a hook completely and reversibly, at any time.
-	constexpr uintptr_t RVA_HLE_TABLE = 0x1E8870;
-	constexpr uintptr_t RVA_SAVED_WORDS = 0x68E540;  // uint64[] - originals saved by the installer
-	constexpr uintptr_t RVA_ROM_BASE = 0x9F7CD0;     // 1 MB i960 program ROM (slot 0)
-	constexpr uintptr_t RVA_BOOT_STATE = 0x6B9300;   // ROM/CPU boot phase; 2 = board booted
 	constexpr uint32_t ROM_SIZE = 0x100000;
 	constexpr uint32_t TRAP_OPCODE = 0x4000000;
 
@@ -42,23 +38,29 @@ namespace
 	};
 	static_assert(sizeof(HleTableEntry) == 0x10, "HLE record is 16 bytes in the DLL");
 
+	// Both DLLs ship with ASLR, so this is a real lookup every time rather than a constant -
+	// see SetGameDllRange in HostCdevice for the same lesson learned the hard way.
 	uint8_t* ModuleBase()
 	{
-		return reinterpret_cast<uint8_t*>(GetModuleHandleW(L"stf-pxd-w64-d3d12_retail.dll"));
+		return reinterpret_cast<uint8_t*>(GetModuleHandleW(m2ftg::CurrentGame().dll_name));
 	}
 
-	// The two shared tails every handler ends in, and the whole reason the table splits so
+	// The two shared tails every handler ends in, and the whole reason each table splits so
 	// cleanly into "the original still runs" and "the original is gone":
-	//   0x39D0  executes the saved original instruction (recomputes the opcode-table index
-	//           exactly like the CPU's fetch path and tail-jumps its handler)
-	//   0x3A70  returns only the original's length (4 or 8) - the instruction is skipped
-	// A handler that ends by returning a length inline is doing the same thing as 0x3A70.
-	constexpr uintptr_t RVA_TAIL_EXEC_ORIGINAL = 0x39D0;
-	constexpr uintptr_t RVA_TAIL_SKIP_ORIGINAL = 0x3A70;
+	//   StF 0x39D0 / FV 0x39E0   executes the saved original instruction (recomputes the
+	//                            opcode-table index exactly like the CPU's fetch path and
+	//                            tail-jumps its handler)
+	//   StF 0x3A70 / FV 0x3A80   returns only the original's length (4 or 8) - skipped
+	// A handler that ends by returning a length inline is doing the same thing as the skip
+	// tail; a handler that ends in a call or jump to the exec tail runs ADDITIVELY. That is
+	// exactly what Info::replacesInstruction records, and it is why a bare jump to the exec
+	// tail (StF 0x52D70, FV 0x51880) classifies as Inert.
 
+	// ---- Sonic the Fighters --------------------------------------------------------------
+	//
 	// All 76 hooks, in the DLL's own table order. Sites are symbolised with the module's
 	// 800-entry ROM symbol table (DLL+0x1742D0), which is AM2's own naming.
-	constexpr Info HOOKS[m2ftg::HleHooks::COUNT] =
+	constexpr Info STF_HOOKS[] =
 	{
 		{ 0x0122F4, 0x526A0, "init_fix+0x74",                     Kind::Core,    true,  "Forces g0 = 0 in the board hardware-init check." },
 		{ 0x00735C, 0x52700, "main+0xa34",                        Kind::Core,    false, "REQUIRED FOR ANY PICTURE. Sets the module's composite-enable flag (DLL+0x6B9172), which gates the whole pass that draws into the presented 1024x768 texture - with this hook off, that pass binds and clears the display target every frame but never draws into it, so the screen stays black even though 2D and 3D render correctly into their own targets. Also clears the host tile/sprite buffer, then runs the original. Its ROM site is the `cmpobe 0,r11,main_loop` that enters the main loop only after init passes, so it fires exactly once, on a clean boot." },
@@ -137,11 +139,226 @@ namespace
 		{ 0x07D874, 0x53D80, "rm_char_disp_int+0xb8",             Kind::Content, true,  "Honey P2 character card (second site)." },
 		{ 0x07D978, 0x53D80, "rm_char_move2+0x80",                Kind::Content, true,  "Honey P2 character card (third site)." },
 	};
+
+	// ---- Fighting Vipers -----------------------------------------------------------------
+	//
+	// All 95 hooks, in the DLL's own table order (installer FUN_180049C50, table DLL+0x1E5840).
+	// Sites are symbolised with FV's own 732-entry ROM symbol table (DLL+0x172390).
+	//
+	// FV shares StF's engine, so the first eight records line up almost item for item - board
+	// init, composite enable, frame yield, the interrupt handshake and the vsync trio - and
+	// then the two tables diverge completely. The differences that matter to netplay are called
+	// out in the notes: the wall-clock texture budget (39-42), and the fact that FV draws from
+	// TWO host RNG streams (43 and 30) where StF has one.
+	constexpr Info FV_HOOKS[] =
+	{
+		{ 0x012398, 0x51240, "init_fix+0x74", Kind::Core,     true,   "Forces g0 = 0 in the board hardware-init check." },
+		{ 0x007954, 0x512A0, "main+0x914", Kind::Core,     true,   "REQUIRED FOR ANY PICTURE. Sets the module's composite-enable flag (DLL+0x6BB772 - StF's 0x6B9172 plus the same +0x2600 delta as the boot-state global) and clears the 0x2000-byte host tile/sprite buffer at [DLL+0xAFA2D8]." },
+		{ 0x007958, 0x51320, "main_loop", Kind::Core,     true,   "Per-frame yield: clears r3, raises ctx+0x1B0 and calls the host yield (FUN_18004E990) every main-loop iteration." },
+		{ 0x002238, 0x513B0, "interrupt_wait", Kind::Core,     true,   "Interrupt handshake: raises the pending-interrupt bit (ctx+0x188 |= 1) when ctx+0x18C bit 0 is armed." },
+		{ 0x002240, 0x51420, "interrupt_wait+0x8", Kind::Core,     true,   "Second half of the interrupt handshake: host yield + ctx+0x1B0, then skips the original (returns 8)." },
+		{ 0x0118D4, 0x51450, "interrupt_wait_b+0x88", Kind::Core,     true,   "Vsync wait: supplies the host frame counter (DLL+0xAFA2E0) in g0 and raises the pending-interrupt bit." },
+		{ 0x0118DC, 0x514E0, "interrupt_wait_b+0x90", Kind::Core,     true,   "Vsync wait: supplies the host frame counter in r3." },
+		{ 0x0118E4, 0x51550, "interrupt_wait_b+0x98", Kind::Core,     true,   "Vsync wait loop: returns -8 to re-execute until the host frame counter advances (r3 != g0)." },
+		{ 0x001A88, 0x03A80, "ucb_adr_init+0x4", Kind::Removed,  true,   "Instruction deleted - the handler IS the bare skip tail (0x3A80), so nothing runs in its place." },
+		{ 0x04AA74, 0x515C0, "send_tex_default+0x17C", Kind::Core,     true,   "Texture DMA completion: copies r4 into r3 and skips the original." },
+		{ 0x04AABC, 0x515C0, "send_tex_default+0x1C4", Kind::Core,     true,   "Texture DMA completion (site 2)." },
+		{ 0x04AB04, 0x515C0, "send_tex_default+0x20C", Kind::Core,     true,   "Texture DMA completion (site 3)." },
+		{ 0x00708C, 0x515E0, "main+0x4C", Kind::Host,     true,   "Injects the whole 0x60-byte backup-RAM / DIP block from the module config (DLL+0x1EA590: +4, +5, +9, +0xA) into the board's backup RAM at [DLL+0x6CC188]+0x91+0x3320..0x3378, mirroring it into DLL+0xB96600. THE GAME ASSIGNMENTS / DIP INJECTOR - StF's equivalent is its hook 8 (set_window_data+0x564)." },
+		{ 0x004128, 0x03A80, "chg_pol_color_send+0xC8", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x063DF8, 0x51760, "kill_osage_sub+0x30", Kind::Content,  true,   "Returns 0x28, skipping ten instructions of the osage (cloth/hair) term - FV's twin of StF's calc_kaze hook." },
+		{ 0x007944, 0x51770, "main+0x904", Kind::Core,     true,   "Forces r3 = 1 to pass the board self-test / checksum path. A modified ROM will not boot without these." },
+		{ 0x008234, 0x51770, "WARNING_INT+0x14", Kind::Core,     true,   "Self-test / checksum bypass: forces r3 = 1 (site 2)." },
+		{ 0x0089F0, 0x51810, "ADV_FBI_PIC_INT+0x88", Kind::Content,  true,   "Forces r3 = 0 in the FBI-warning attract picture." },
+		{ 0x041F04, 0x517E0, "sound_request_special", Kind::Host,     true,   "WHOLE-FUNCTION HLE: routes the special (voice / announcer) sound request in g0 to the host mixer, then performs the i960 ret itself (FUN_1800248D0) and returns 0." },
+		{ 0x00B784, 0x51880, "GAME_INT+0x8", Kind::Inert,    false,  "Trap runs the original unchanged - the handler is a bare jmp to the exec-original tail (0x39E0). A debug probe whose body was compiled out of the retail build." },
+		{ 0x0024D0, 0x51880, "player_entry+0x14", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x008864, 0x51890, "ADV_DSP+0x98", Kind::Host,     false,  "In the module's VS/host context (config+0xA), writes 0x30 into emulated RAM 0x500704, then runs the original." },
+		{ 0x0025A8, 0x518B0, "pushed_st1_data_bd_ex+0x54", Kind::Host,     false,  "In the module's VS/host context (config+0xA), zeroes ctx+0x88 and skips the original; otherwise runs it unchanged." },
+		{ 0x0025D8, 0x518B0, "random_check1", Kind::Host,     false,  "Host-context register guard (site 2)." },
+		{ 0x002714, 0x518B0, "pushed_st2_data_bd_ex+0x54", Kind::Host,     false,  "Host-context register guard (site 3)." },
+		{ 0x002750, 0x518B0, "random_check2", Kind::Host,     false,  "Host-context register guard (site 4)." },
+		{ 0x00AA98, 0x51920, "SEL_INT", Kind::Host,     false,  "Raises host event flag 0x2000 and flushes the queued host sound commands on entry to character select, then runs the original." },
+		{ 0x00AF2C, 0x51880, "SEL_DSP+0x10", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00B098, 0x51880, "sel_dsp_next+0x20", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00B124, 0x519E0, "sel_wait_chk+0x40", Kind::Host,     false,  "Raises host event flag 0x4000 (select wait), then runs the original." },
+		{ 0x00B648, 0x51A00, "set_vs_cnt_and_stage_num_sel+0x3C", Kind::Content,  false,  "VS mode only: picks the stage with the HOST MT RNG (generator [DLL+0x68E188+0x08], value % 9 through a 9-byte table) instead of the ROM's own sequence, then runs the original. NETPLAY-CRITICAL: second RNG stream, must be seeded." },
+		{ 0x00B4C4, 0x51A70, "_draw_lp_d+0x78", Kind::Content,  false,  "Rewrites the draw-loop word at [RAM 0x500814]: clears bits 1-2 and ORs 0x1FC000, then runs the original." },
+		{ 0x00E150, 0x51880, "JUDGE_DSP_INT+0x5D0", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00EC88, 0x51880, "VIC_INT", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00F014, 0x51880, "VIC_INT+0x38C", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00F150, 0x51880, "VIC_INT+0x4C8", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00EAC0, 0x51B10, "vs_game_continue_check_ex+0x18", Kind::Host,     true,   "VS mode only: 2P continue/credit bypass - redirects the i960 IP to 0xF7BC and ORs bit 0/2 into the credit words at RAM 0x500248 / 0x50024C." },
+		{ 0x00F814, 0x51880, "vs_conti+0x58", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x0349EC, 0x51880, "MES_ROUND_INT+0x4", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x04C3D8, 0x51C20, "send_beta_data+0x138", Kind::Core,     true,   "TEXTURE-UPLOAD BUDGET, AND THE ONE HOOK THAT READS A WALL CLOCK: g0 = (elapsed_us >= budget), where the budget is 12 ms normally and 8 ms while master state (DLL+0xAFA30B) is 6 or 7. Times FUN_180064D90() against DLL+0x690130. A fast machine and a slow one do different amounts of work in the same emulated frame - the exact divergence StF's SetTextureBudgetDeterministic pins." },
+		{ 0x04C550, 0x51C20, "send_lod_data+0xE0", Kind::Core,     true,   "Texture-upload budget check (site 2)." },
+		{ 0x04C7E4, 0x51C20, "send_lod_data_q_sub_norm+0x54", Kind::Core,     true,   "Texture-upload budget check (site 3)." },
+		{ 0x04C920, 0x51C20, "send_lod_data_q_sub_anim+0x54", Kind::Core,     true,   "Texture-upload budget check (site 4)." },
+		{ 0x006DC8, 0x51CE0, "rand", Kind::Host,     true,   "WHOLE-FUNCTION HLE of the ROM's rand: draws a 16-bit value from the host Mersenne Twister (generator FUN_180008D00, state object [DLL+0x68E188+0x20]), writes it into g0 and performs the i960 ret itself. NETPLAY-CRITICAL: primary RNG stream." },
+		{ 0x038B60, 0x51EA0, "select_init_wait+0x4C", Kind::Content,  true,   "Zeroes ctx+0x94 in the select-init wait." },
+		{ 0x038B70, 0x51EA0, "select_init_wait+0x5C", Kind::Content,  true,   "Zeroes ctx+0x94 in the select-init wait (site 2)." },
+		{ 0x038E54, 0x03A80, "old_set_skip+0x1C", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x038E58, 0x03A80, "old_set_skip+0x20", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x038E5C, 0x03A80, "old_set_skip+0x24", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x038E70, 0x03A80, "old_set_skip+0x38", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x039E04, 0x03A80, "old_set_skip_P2+0x1C", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x039E08, 0x03A80, "old_set_skip_P2+0x20", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x039E0C, 0x03A80, "old_set_skip_P2+0x24", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x039E20, 0x03A80, "old_set_skip_P2+0x38", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x038E74, 0x03A80, "old_set_skip+0x3C", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x039E24, 0x03A80, "old_set_skip_P2+0x3C", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x0531E4, 0x51D10, "adv_fade_in6+0x8", Kind::Host,     false,  "When r3 == 0x15, clears 0xC00 bytes of the host tile buffer at [DLL+0xAFA2D8]+0x9024 and raises its +0x98895 flag, then runs the original." },
+		{ 0x07BAF8, 0x51D60, "fcc_loop+0xBC", Kind::Content,  false,  "Divide-by-zero guard: if either float register ctx+0x70 / +0x74 is zero, returns 0x30 (skips twelve instructions); otherwise runs the original." },
+		{ 0x07B9B4, 0x51D90, "finish_coli_check+0xB8", Kind::Content,  false,  "Divide-by-zero guard: if either float register ctx+0x78 / +0x7C is zero, returns 0x38; otherwise runs the original." },
+		{ 0x05046C, 0x51DC0, "name_init+0x68", Kind::Content,  false,  "Name-entry: when r3 == 8, redirects the i960 IP to ROM 0x504A4; otherwise runs the original." },
+		{ 0x009CBC, 0x03A80, "ADV_REPLAY_WAIT1B+0x10", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x009CC8, 0x51880, "ADV_REPLAY_WAIT1B+0x1C", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x009CCC, 0x03A80, "ADV_REPLAY_WAIT1B+0x20", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x031BA8, 0x51F00, "kuc_arm+0x18", Kind::Host,     false,  "2P join check: lets the round start when either player's state byte is 9 and the 8-slot host credit array (DLL+0xC92BB8) has a free slot, by copying ctx+0x8C into ctx+0x90; then runs the original." },
+		{ 0x00C4E0, 0x51FE0, "ROUND_INT", Kind::Host,     false,  "Banks the 2P-join flag (DLL+0x6C4058+2) once the credit word at RAM 0x5000A2 exceeds 9, then runs the original." },
+		{ 0x00ED0C, 0x52020, "VIC_INT+0x84", Kind::Host,     false,  "Reports the match result to the Lost Judgment host for minigame progress: raises event flag 0x200 and writes round+1 and both players' character ids to DLL+0x1EB5A0 +0x1674/+0x1678/+0x167C, when master state (DLL+0xAFA30B) is 9. StF's twin writes the same three fields to DLL+0x1EE4A0+0x1674." },
+		{ 0x00E014, 0x51880, "JUDGE_DSP_INT+0x494", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x0114BC, 0x51880, "RANK_INT+0xC", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x00B4C0, 0x51880, "_draw_lp_d+0x74", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x026B64, 0x51880, "damage_unit+0x120", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x026B70, 0x51880, "damage_unit+0x12C", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x026C44, 0x51880, "damage_unit+0x200", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x026C9C, 0x51880, "damage_unit+0x258", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x078888, 0x51880, "cage_break_init", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x027160, 0x51880, "zibaku_ckeck+0x64", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x031D58, 0x51880, "kuc_motion+0x74", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x0182E0, 0x51880, "calc_unit_mat+0x1180", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x005D6C, 0x03A80, "set_obj_fifo+0x34", Kind::Removed,  true,   "Instruction deleted - the handler is the bare skip tail, so nothing runs in its place." },
+		{ 0x052C40, 0x51880, "adv_special_command+0x1C", Kind::Inert,    false,  "Trap runs the original unchanged (stripped probe point)." },
+		{ 0x01EFD0, 0x52110, "camera_control+0x130", Kind::Content,  true,   "Camera clamp: ctx+0x94 = min(ctx+0x90 + K, limit), using two rdata float constants." },
+		{ 0x01B2EC, 0x521A0, "option_control+0xAC", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x90 = 2." },
+		{ 0x01CB44, 0x521A0, "copy_option_data+0x18", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x90 = 2 (site 2)." },
+		{ 0x012678, 0x521A0, "efc_rob_set_set+0x1E0", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x90 = 2 (site 3)." },
+		{ 0x06D128, 0x521C0, "kanban_dsp:+0x64", Kind::Content,  false,  "When config+0x8 is set, forces r3 = 2." },
+		{ 0x06D338, 0x521E0, "trailer_dsp+0x3C", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x68 = 2." },
+		{ 0x06D748, 0x521E0, "trailer_dsp_b0+0x64", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x68 = 2 (site 2)." },
+		{ 0x02F3CC, 0x52200, "adv_subobj_set+0xF00", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x6C = 2." },
+		{ 0x02FF3C, 0x52200, "adv_subobj_set+0x1A70", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x6C = 2 (site 2)." },
+		{ 0x0300C4, 0x52200, "adv_subobj_set+0x1BF8", Kind::Content,  false,  "When config+0x8 is set, forces ctx+0x6C = 2 (site 3)." },
+		{ 0x0337D4, 0x52220, "set_rank_total_win", Kind::Content,  false,  "Ranking arithmetic, stash half: saves ctx+0x70 into host scratch DLL+0xC92BC8." },
+		{ 0x033814, 0x52260, "time_points_zero+0x4", Kind::Content,  false,  "Ranking arithmetic, stash half: saves ctx+0x78 into host scratch DLL+0xC92BC4." },
+		{ 0x033824, 0x522A0, "time_points_zero+0x14", Kind::Content,  false,  "Ranking arithmetic, stash half: saves ctx+0x70 into host scratch DLL+0xC92BC0." },
+		{ 0x020504, 0x52240, "cc_ranking+0x184", Kind::Content,  false,  "Ranking arithmetic, restore half: g0 = host scratch DLL+0xC92BC8." },
+		{ 0x02054C, 0x52280, "cc_ranking+0x1CC", Kind::Content,  false,  "Ranking arithmetic, restore half: g0 = host scratch DLL+0xC92BC4 * 2." },
+		{ 0x02059C, 0x522C0, "cc_ranking+0x21C", Kind::Content,  false,  "Ranking arithmetic, restore half: g0 = host scratch DLL+0xC92BC0." },	};
+
+	// ---- Per-game descriptor -------------------------------------------------------------
+	//
+	// Everything above this line is data; everything below is game-agnostic and reads the
+	// running game's descriptor. A game with no entry here simply has no HLE hook feature -
+	// Update() and ApplyRetarget() become no-ops rather than misfiring on another DLL's
+	// addresses, which is what the old `GetGameId() != StF` early-outs bought.
+	struct GameHooks
+	{
+		const Info* hooks;
+		size_t count;
+		uintptr_t rvaTable;       // installer input, .data
+		uintptr_t rvaSavedWords;  // uint64[] - originals saved by the installer
+		uintptr_t rvaRomBase;     // 1 MB i960 program ROM (slot 0)
+		uintptr_t rvaBootState;   // ROM/CPU boot phase; 2 = board booted
+		uint64_t defaultDisable[2];
+		const m2ftg::HleHooks::ConventionSite* convention;
+		size_t conventionCount;
+	};
+
+	using m2ftg::HleHooks::ConventionSite;
+
+	// Homebrew-ROM convention sites. The wire contract behind each symbol is documented in
+	// HleHooks.h; only the hook INDEX differs between the games, and only for `rand`.
+	constexpr ConventionSite STF_CONVENTION[] = {
+		{ "__yamp_hook_composite_enable", 1, 0 },
+		{ "__yamp_hook_frame_yield",      2, 0 },
+		{ "__yamp_hook_geo_wait",         3, 0 },
+		{ "__yamp_hook_geo_wait",         4, 8 },
+		{ "__yamp_hook_vblank",           5, 0 },
+		{ "__yamp_hook_vblank",           6, 8 },
+		{ "__yamp_hook_vblank",           7, 16 },
+		{ "__yamp_hook_rand",            33, 0 },
+	};
+	// FV agrees on 1-7 (its 3/4 are interrupt_wait rather than geo_func, but they are the same
+	// two-instruction handshake the geo_wait contract describes) and puts `rand` at 43.
+	constexpr ConventionSite FV_CONVENTION[] = {
+		{ "__yamp_hook_composite_enable", 1, 0 },
+		{ "__yamp_hook_frame_yield",      2, 0 },
+		{ "__yamp_hook_geo_wait",         3, 0 },
+		{ "__yamp_hook_geo_wait",         4, 8 },
+		{ "__yamp_hook_vblank",           5, 0 },
+		{ "__yamp_hook_vblank",           6, 8 },
+		{ "__yamp_hook_vblank",           7, 16 },
+		{ "__yamp_hook_rand",            43, 0 },
+	};
+
+	constexpr GameHooks GAME_STF = {
+		STF_HOOKS, std::size(STF_HOOKS),
+		0x1E8870, 0x68E540, 0x9F7CD0, 0x6B9300,
+		{ 1ull << m2ftg::HleHooks::HOOK_STF_GAME_INT_TIME, 0 },
+		STF_CONVENTION, std::size(STF_CONVENTION),
+	};
+	constexpr GameHooks GAME_FV = {
+		FV_HOOKS, std::size(FV_HOOKS),
+		0x1E5840, 0x690B40, 0x9FA2D0, 0x6BB900,
+		{ 0, 0 },   // FV's GAME_INT hook is Inert - nothing to disable by default
+		FV_CONVENTION, std::size(FV_CONVENTION),
+	};
+
+	static_assert(std::size(STF_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
+	static_assert(std::size(FV_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
+
+	const GameHooks* CurrentHooks()
+	{
+		switch (gGeneral.GetGameId())
+		{
+		case YAMPGeneral::GameId::StF: return &GAME_STF;
+		case YAMPGeneral::GameId::FV:  return &GAME_FV;
+		default:                       return nullptr;
+		}
+	}
+
+	// Used wherever a caller asks for a mask and the game has no table.
+	constexpr uint64_t NO_MASK[2] = { 0, 0 };
+}
+
+size_t m2ftg::HleHooks::Count()
+{
+	const GameHooks* game = CurrentHooks();
+	return game != nullptr ? game->count : 0;
+}
+
+bool m2ftg::HleHooks::Supported()
+{
+	return CurrentHooks() != nullptr;
 }
 
 const m2ftg::HleHooks::Info& m2ftg::HleHooks::Get(size_t index)
 {
-	return HOOKS[index < COUNT ? index : 0];
+	// A caller with no game running still gets a readable record rather than a null deref;
+	// the settings UI asks for Count() first, so it never lands here.
+	static constexpr Info NONE = { 0, 0, "-", Kind::Inert, false, "" };
+	const GameHooks* game = CurrentHooks();
+	if (game == nullptr)
+	{
+		return NONE;
+	}
+	return game->hooks[index < game->count ? index : 0];
+}
+
+const uint64_t* m2ftg::HleHooks::DefaultDisableMask()
+{
+	const GameHooks* game = CurrentHooks();
+	return game != nullptr ? game->defaultDisable : NO_MASK;
+}
+
+const m2ftg::HleHooks::ConventionSite* m2ftg::HleHooks::Convention(size_t& count)
+{
+	const GameHooks* game = CurrentHooks();
+	count = game != nullptr ? game->conventionCount : 0;
+	return game != nullptr ? game->convention : nullptr;
 }
 
 const char* m2ftg::HleHooks::KindName(Kind kind)
@@ -172,12 +389,12 @@ const char* m2ftg::HleHooks::KindDescription(Kind kind)
 
 bool m2ftg::HleHooks::MaskTest(const uint64_t mask[2], size_t index)
 {
-	return index < COUNT && (mask[index >> 6] & (1ull << (index & 63))) != 0;
+	return index < MAX_COUNT && (mask[index >> 6] & (1ull << (index & 63))) != 0;
 }
 
 void m2ftg::HleHooks::MaskSet(uint64_t mask[2], size_t index, bool disabled)
 {
-	if (index >= COUNT)
+	if (index >= MAX_COUNT)
 	{
 		return;
 	}
@@ -196,9 +413,10 @@ void m2ftg::HleHooks::MaskForKinds(uint64_t mask[2], unsigned kinds)
 {
 	mask[0] = 0;
 	mask[1] = 0;
-	for (size_t i = 0; i < COUNT; i++)
+	const size_t count = Count();
+	for (size_t i = 0; i < count; i++)
 	{
-		if ((kinds & KindBit(HOOKS[i].kind)) != 0)
+		if ((kinds & KindBit(Get(i).kind)) != 0)
 		{
 			MaskSet(mask, i, true);
 		}
@@ -208,9 +426,10 @@ void m2ftg::HleHooks::MaskForKinds(uint64_t mask[2], unsigned kinds)
 bool m2ftg::HleHooks::MaskStripKinds(uint64_t mask[2], unsigned kinds)
 {
 	bool changed = false;
-	for (size_t i = 0; i < COUNT; i++)
+	const size_t count = Count();
+	for (size_t i = 0; i < count; i++)
 	{
-		if ((kinds & KindBit(HOOKS[i].kind)) != 0 && MaskTest(mask, i))
+		if ((kinds & KindBit(Get(i).kind)) != 0 && MaskTest(mask, i))
 		{
 			MaskSet(mask, i, false);
 			changed = true;
@@ -221,7 +440,8 @@ bool m2ftg::HleHooks::MaskStripKinds(uint64_t mask[2], unsigned kinds)
 
 void m2ftg::HleHooks::Update()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	const GameHooks* game = CurrentHooks();
+	if (game == nullptr)
 	{
 		return;
 	}
@@ -234,7 +454,7 @@ void m2ftg::HleHooks::Update()
 
 	// Nothing to restore until the installer has run; it does so in board bring-up stage 2,
 	// which is also when the boot state reaches 2.
-	if (*reinterpret_cast<const uint32_t*>(base + RVA_BOOT_STATE) != 2)
+	if (*reinterpret_cast<const uint32_t*>(base + game->rvaBootState) != 2)
 	{
 		return;
 	}
@@ -256,22 +476,24 @@ void m2ftg::HleHooks::Update()
 	// It costs nothing to reverse: the reconciler runs every frame, so leaving a room restores the
 	// player's own mask on the next one.
 	//
-	// DEFAULT_DISABLE_MASK is the one exception, and it does not weaken the argument: it is a
-	// compiled-in constant, not a setting, so every peer on the same build already agrees on it
-	// without exchanging anything - exactly the property the paragraph above is buying. Restoring
-	// hook 16 here would instead make both peers agree on a two-second round.
-	static const uint64_t NETPLAY_MASK[2] = { DEFAULT_DISABLE_MASK[0], DEFAULT_DISABLE_MASK[1] };
+	// The game's default mask is the one exception, and it does not weaken the argument: it is
+	// a compiled-in constant, not a setting, so every peer on the same build already agrees on
+	// it without exchanging anything - exactly the property the paragraph above is buying.
+	// Restoring StF's hook 16 here would instead make both peers agree on a two-second round.
+	// (FV's default mask is empty, so for FV this is simply "restore everything".)
+	const uint64_t* netplayMask = game->defaultDisable;
 	const bool netplayLocked = net::SessionInProgress();
-	const uint64_t* wanted = netplayLocked ? NETPLAY_MASK : settings->m_stfHleDisableMask;
+	const uint64_t* wanted = netplayLocked ? netplayMask : settings->m_stfHleDisableMask;
 
-	const auto* table = reinterpret_cast<const HleTableEntry*>(base + RVA_HLE_TABLE);
-	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + RVA_SAVED_WORDS);
-	auto* rom = reinterpret_cast<uint8_t*>(base + RVA_ROM_BASE);
+	const auto* table = reinterpret_cast<const HleTableEntry*>(base + game->rvaTable);
+	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + game->rvaSavedWords);
+	auto* rom = reinterpret_cast<uint8_t*>(base + game->rvaRomBase);
 
-	// Enforced every frame rather than applied once. It is only 76 aligned dword compares,
-	// and it means the setting can be toggled live, survives a board reset re-installing the
-	// traps, and needs no bookkeeping about what was applied when.
-	for (size_t i = 0; i < COUNT; i++)
+	// Enforced every frame rather than applied once. It is only a few dozen aligned dword
+	// compares, and it means the setting can be toggled live, survives a board reset
+	// re-installing the traps, and needs no bookkeeping about what was applied when.
+	const size_t count = game->count;
+	for (size_t i = 0; i < count; i++)
 	{
 		const uint32_t romOffset = table[i].romOffset;
 		// Same guard the installer uses; anything outside the ROM image was never hooked.
@@ -286,7 +508,7 @@ void m2ftg::HleHooks::Update()
 		// itself a trap means the save area has not been filled yet (or something else has
 		// already rewritten the ROM). Leave that entry alone rather than bake a trap in as
 		// if it were the ROM's own instruction.
-		if (originalWord >= TRAP_OPCODE && originalWord < TRAP_OPCODE + COUNT * 4)
+		if (originalWord >= TRAP_OPCODE && originalWord < TRAP_OPCODE + count * 4)
 		{
 			continue;
 		}
@@ -300,7 +522,7 @@ void m2ftg::HleHooks::Update()
 	}
 }
 
-uint32_t m2ftg::HleHooks::detail::g_hitCounts[COUNT] = {};
+uint32_t m2ftg::HleHooks::detail::g_hitCounts[MAX_COUNT] = {};
 
 // Set by ApplyRetarget when game.elf declared any convention symbol; the settings UI uses it to
 // decide whether the homebrew health checks apply (they would false-alarm on stock StF).
@@ -308,12 +530,12 @@ static bool g_usedConvention = false;
 
 uint32_t m2ftg::HleHooks::HitCount(size_t index)
 {
-	return index < COUNT ? detail::g_hitCounts[index] : 0;
+	return index < MAX_COUNT ? detail::g_hitCounts[index] : 0;
 }
 
 void m2ftg::HleHooks::ResetHitCounts()
 {
-	for (size_t i = 0; i < COUNT; i++)
+	for (size_t i = 0; i < MAX_COUNT; i++)
 	{
 		detail::g_hitCounts[i] = 0;
 	}
@@ -375,12 +597,14 @@ bool m2ftg::HleHooks::UsedConvention()
 	return g_usedConvention;
 }
 
-size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
+size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[MAX_COUNT])
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	const GameHooks* game = CurrentHooks();
+	if (game == nullptr)
 	{
 		return 0;
 	}
+	const size_t count = game->count;
 
 	uint8_t* base = ModuleBase();
 	if (base == nullptr)
@@ -390,17 +614,17 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
 	}
 
 	// Fold the ROM's own declarations in underneath the ini, so an explicit line still wins.
-	std::string retarget[COUNT];
-	for (size_t i = 0; i < COUNT; i++)
+	std::string retarget[MAX_COUNT];
+	for (size_t i = 0; i < count; i++)
 	{
 		retarget[i] = iniRetarget[i];
 	}
 
 	g_usedConvention = false;
 	size_t declared = 0;
-	for (size_t c = 0; c < CONVENTION_COUNT; c++)
+	for (size_t c = 0; c < game->conventionCount; c++)
 	{
-		const ConventionSite& site = CONVENTION[c];
+		const ConventionSite& site = game->convention[c];
 		uint32_t address = 0;
 		if (!ElfRom::ResolveSymbol(site.symbol, address))
 		{
@@ -428,10 +652,10 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
 	if (g_usedConvention)
 	{
 		// Opting in means the ROM owns the hook map: anything it did not name must NOT stay
-		// pointed at Sonic the Fighters' own offsets, which in a different program ROM are
+		// pointed at the host game's own offsets, which in a different program ROM are
 		// arbitrary instructions.
 		size_t suppressed = 0;
-		for (size_t i = 0; i < COUNT; i++)
+		for (size_t i = 0; i < count; i++)
 		{
 			if (retarget[i].empty()) { retarget[i] = "off"; suppressed++; }
 		}
@@ -439,9 +663,9 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
 			declared, suppressed);
 	}
 
-	auto* table = reinterpret_cast<HleTableEntry*>(base + RVA_HLE_TABLE);
+	auto* table = reinterpret_cast<HleTableEntry*>(base + game->rvaTable);
 	size_t changed = 0;
-	for (size_t i = 0; i < COUNT; i++)
+	for (size_t i = 0; i < count; i++)
 	{
 		const uint32_t want = ResolveRetarget(retarget[i], i);
 		if (want == 0)
@@ -467,7 +691,7 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
 			continue;
 		}
 
-		DebugLogFile("[HleHooks] hook %zu (%s): ROM 0x%06X -> %s\n", i, HOOKS[i].site, table[i].romOffset,
+		DebugLogFile("[HleHooks] hook %zu (%s): ROM 0x%06X -> %s\n", i, game->hooks[i].site, table[i].romOffset,
 			want == RETARGET_SUPPRESS ? "not installed" : "retargeted");
 		table[i].romOffset = want;
 		changed++;
@@ -475,21 +699,27 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[COUNT])
 
 	if (changed != 0)
 	{
-		DebugLogFile("[HleHooks] retargeted %zu of %zu hook records before module_start\n", changed, COUNT);
+		DebugLogFile("[HleHooks] retargeted %zu of %zu hook records before module_start\n", changed, count);
 	}
 	return changed;
 }
 
-bool m2ftg::HleHooks::GetInstalledOffsets(uint32_t out[COUNT])
+bool m2ftg::HleHooks::GetInstalledOffsets(uint32_t out[MAX_COUNT])
 {
+	const GameHooks* game = CurrentHooks();
+	if (game == nullptr)
+	{
+		return false;
+	}
+
 	const uint8_t* base = ModuleBase();
 	if (base == nullptr)
 	{
 		return false;
 	}
 
-	const auto* table = reinterpret_cast<const HleTableEntry*>(base + RVA_HLE_TABLE);
-	for (size_t i = 0; i < COUNT; i++)
+	const auto* table = reinterpret_cast<const HleTableEntry*>(base + game->rvaTable);
+	for (size_t i = 0; i < game->count; i++)
 	{
 		out[i] = table[i].romOffset;
 	}

@@ -46,12 +46,18 @@ static bool IsM2ftgGame()
 }
 
 // Netplay hangs off the LJ m2ftg host loop, but holding two emulators in lockstep needs the
-// determinism work as well (board reset, host-RNG seeding, the texture-budget pin) — and all
-// three of those are reconstructed from StF's DLL. So StF is the only game that can currently
-// sustain a session, and it is the only one that gets the page.
+// determinism work as well: board reset, host-RNG seeding, the texture-budget pin, and the ROM
+// frame counter the round anchors and desync-checks against. All of it is now reconstructed for
+// Fighting Vipers too (see docs/fv-hle-hooks.md and the DwGame table in DebugWindows.cpp), so
+// both games get the page.
+//
+// FV's RNG needed the one genuinely new piece: it draws from TWO host twisters, not one, and
+// seeding only `rand` would leave the two peers agreeing on the fight and disagreeing on the
+// stage. SeedHostRng seeds every stream in the game's descriptor.
 static bool IsNetplayGame()
 {
-	return gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
+	return gGeneral.GetGameId() == YAMPGeneral::GameId::StF
+		|| gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
 }
 
 // The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
@@ -335,8 +341,8 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	// the box (HleHooks.h), and that alone must not read as "the user has been poking at things".
 	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag ||
 		!m_stfFixBackupTimeIndex ||
-		m_stfHleDisableMask[0] != m2ftg::HleHooks::DEFAULT_DISABLE_MASK[0] ||
-		m_stfHleDisableMask[1] != m2ftg::HleHooks::DEFAULT_DISABLE_MASK[1])
+		m_stfHleDisableMask[0] != m2ftg::HleHooks::DefaultDisableMask()[0] ||
+		m_stfHleDisableMask[1] != m2ftg::HleHooks::DefaultDisableMask()[1])
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -1292,29 +1298,42 @@ void YAMPUserInterface::DrawDebug()
 				"means every match lasts about two seconds. Both off = stock behaviour (working timer, but the\n"
 				"menu page freezes); both on is the only broken combination.");
 		}
-
-		DrawStfHleHooks();
 	}
+
+	// NOT inside the isStf block: every LJ m2ftg game with a hook table gets this panel, which
+	// is Sonic the Fighters AND Fighting Vipers. It self-gates on HleHooks::Count(), so a game
+	// without a table draws nothing rather than an empty list.
+	DrawStfHleHooks();
 }
 
 void YAMPUserInterface::DrawStfHleHooks()
 {
 	namespace Hle = m2ftg::HleHooks;
 
+	const size_t hookCount = Hle::Count();
+	if (hookCount == 0)
+	{
+		// No hook table for this game - the panel would be an empty list with misleading prose.
+		return;
+	}
+
 	if (!ImGui::CollapsingHeader("HLE ROM hooks"))
 	{
 		return;
 	}
 
+	const char* gameName = m2ftg::CurrentGame().display_name;
+
 	ImGui::PushTextWrapPos();
-	ImGui::TextUnformatted("At board start-up the game DLL overwrites 76 individual i960 instructions in the program ROM "
+	ImGui::Text("At board start-up the game DLL overwrites %zu individual i960 instructions in the program ROM "
 		"with traps that run native code instead. Disabling a hook restores the ROM's original instruction, so the ROM's "
-		"own code runs there again - which is what a patched rom_code1.bin needs in order to take effect. Applied live.");
+		"own code runs there again - which is what a patched rom_code1.bin needs in order to take effect. Applied live.",
+		hookCount);
 	ImGui::Spacing();
-	ImGui::TextUnformatted("A wholly different program ROM - homebrew rather than a patch - needs more than that: every "
-		"offset below is a Sonic the Fighters address, so the installer corrupts 76 unrelated instructions before the "
+	ImGui::Text("A wholly different program ROM - homebrew rather than a patch - needs more than that: every "
+		"offset below is a %s address, so the installer corrupts %zu unrelated instructions before the "
 		"CPU runs any of them, which is too early to repair here. For that, the settings.ini [HleRetarget] section moves "
-		"or drops each hook before the installer runs. See the 'At' column.");
+		"or drops each hook before the installer runs. See the 'At' column.", gameName, hookCount);
 	ImGui::PopTextWrapPos();
 	ImGui::Spacing();
 
@@ -1330,15 +1349,24 @@ void YAMPUserInterface::DrawStfHleHooks()
 	// about. Re-enabling it is still one click away - its own checkbox in the list below.
 	if (ImGui::Button("Restore defaults"))
 	{
-		m_stfHleDisableMask[0] = Hle::DEFAULT_DISABLE_MASK[0];
-		m_stfHleDisableMask[1] = Hle::DEFAULT_DISABLE_MASK[1];
+		m_stfHleDisableMask[0] = Hle::DefaultDisableMask()[0];
+		m_stfHleDisableMask[1] = Hle::DefaultDisableMask()[1];
 		m_pageModified = true;
 	}
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently just hook 16\n"
-			"(GAME_INT+0x4), which fights the backup-RAM TIME correction and would cut matches to\n"
-			"about two seconds. Untick it below if you want the module's stock behaviour.");
+		// StF ships one hook disabled; FV ships none, and saying "except the ones YAMP ships
+		// disabled" in front of an empty exception list reads as though something is hidden.
+		if (Hle::DefaultDisableMask()[0] != 0 || Hle::DefaultDisableMask()[1] != 0)
+		{
+			ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently just hook 16\n"
+				"(GAME_INT+0x4), which fights the backup-RAM TIME correction and would cut matches to\n"
+				"about two seconds. Untick it below if you want the module's stock behaviour.");
+		}
+		else
+		{
+			ImGui::SetTooltip("Every hook enabled, which is this game's stock behaviour.");
+		}
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Disable game-behaviour hooks"))
@@ -1386,11 +1414,11 @@ void YAMPUserInterface::DrawStfHleHooks()
 	}
 
 	size_t disabledCount = 0;
-	for (size_t i = 0; i < Hle::COUNT; i++)
+	for (size_t i = 0; i < hookCount; i++)
 	{
 		disabledCount += Hle::MaskTest(m_stfHleDisableMask, i) ? 1 : 0;
 	}
-	ImGui::Text("%zu of %zu hooks disabled", disabledCount, Hle::COUNT);
+	ImGui::Text("%zu of %zu hooks disabled", disabledCount, hookCount);
 	ImGui::TextColored(WARNING_COLOUR, "Core hooks are session-only: they apply live but are never saved, so a restart always boots.");
 	ImGui::Spacing();
 
@@ -1399,8 +1427,8 @@ void YAMPUserInterface::DrawStfHleHooks()
 	// Invocation counters. The rate is the useful number - "once per frame" is the shape a
 	// correctly placed render/vsync hook should have - so hold a one-second baseline and show
 	// hits/sec next to the running total.
-	static uint32_t s_rateBaseline[Hle::COUNT] = {};
-	static float s_ratePerSecond[Hle::COUNT] = {};
+	static uint32_t s_rateBaseline[Hle::MAX_COUNT] = {};
+	static float s_ratePerSecond[Hle::MAX_COUNT] = {};
 	static double s_lastRateSample = 0.0;
 	{
 		const double now = ImGui::GetTime();
@@ -1411,7 +1439,7 @@ void YAMPUserInterface::DrawStfHleHooks()
 		else if (now - s_lastRateSample >= 1.0)
 		{
 			const float elapsed = static_cast<float>(now - s_lastRateSample);
-			for (size_t i = 0; i < Hle::COUNT; i++)
+			for (size_t i = 0; i < hookCount; i++)
 			{
 				const uint32_t total = Hle::HitCount(i);
 				s_ratePerSecond[i] = static_cast<float>(total - s_rateBaseline[i]) / elapsed;
@@ -1421,13 +1449,13 @@ void YAMPUserInterface::DrawStfHleHooks()
 		}
 	}
 
-	uint32_t installed[Hle::COUNT];
+	uint32_t installed[Hle::MAX_COUNT];
 	const bool haveInstalled = Hle::GetInstalledOffsets(installed);
 	if (haveInstalled)
 	{
 		size_t retargeted = 0;
 		size_t suppressed = 0;
-		for (size_t i = 0; i < Hle::COUNT; i++)
+		for (size_t i = 0; i < hookCount; i++)
 		{
 			if (installed[i] >= 0x200000)
 			{
@@ -1515,7 +1543,7 @@ void YAMPUserInterface::DrawStfHleHooks()
 	if (ImGui::Button("Reset hit counts"))
 	{
 		Hle::ResetHitCounts();
-		for (size_t i = 0; i < Hle::COUNT; i++)
+		for (size_t i = 0; i < hookCount; i++)
 		{
 			s_rateBaseline[i] = 0;
 			s_ratePerSecond[i] = 0.0f;
@@ -1539,7 +1567,7 @@ void YAMPUserInterface::DrawStfHleHooks()
 		ImGui::TableSetupColumn("ROM site", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableHeadersRow();
 
-		for (size_t i = 0; i < Hle::COUNT; i++)
+		for (size_t i = 0; i < hookCount; i++)
 		{
 			const Hle::Info& info = Hle::Get(i);
 			ImGui::TableNextRow();

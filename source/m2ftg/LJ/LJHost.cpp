@@ -712,7 +712,18 @@ namespace m2ftg
             // A few frames into the ROM's main loop: far enough past the post-reset boot to be
             // steady state, small enough that starting a match stays snappy.
             constexpr uint32_t NETPLAY_ANCHOR = 8;
+            // The ROM's own per-frame counter in emulated RAM - and the SAME address in both
+            // games. That is not the coincidence it looks like: Sonic the Fighters was built on
+            // Fighting Vipers' engine and inherited its low-RAM global block. The rest of the
+            // layout did not come across (the module reads 0x50004C / 0x500064 / 0x5000A2 /
+            // 0x50016C / 0x500248 / 0x500704 in FV and none of those in StF), so this was
+            // measured rather than assumed: both games were logged advancing it by exactly 1
+            // per module_main call, over two sample bursts 340 frames apart.
             constexpr uint32_t RVA_ROM_FRAME_COUNTER = 0x500020;
+            // Netplay needs the whole determinism set - reset, RNG seeding, texture-budget pin
+            // and this counter - which is exactly the set of games DebugWindows describes.
+            const bool netplayPossible = gGeneral.GetGameId() == YAMPGeneral::GameId::StF
+                || gGeneral.GetGameId() == YAMPGeneral::GameId::FV;
 
             static bool s_netplayRoundRequested = false;
             bool holdForBarrier = false;
@@ -736,7 +747,7 @@ namespace m2ftg
                 // every peer gates its own announce, the barrier itself comes to mean "both
                 // boards are ready", which is what it was always supposed to mean.
                 if (ns == YAMPNET_STATE_IN_ROOM && !s_netplayRoundRequested
-                    && net::ShouldStartRound() && IsBoardBooted())
+                    && netplayPossible && net::ShouldStartRound() && IsBoardBooted())
                 {
                     if (s_prep == RoundPrep::Idle)
                     {
@@ -995,7 +1006,7 @@ namespace m2ftg
                     // guaranteed-equal and sensitive: it stops advancing in lockstep the moment
                     // one side executes a different amount of game code.
                     uint32_t stateCheck = 0;
-                    if (ReadEmulatedRam32(0x500020, stateCheck))
+                    if (ReadEmulatedRam32(RVA_ROM_FRAME_COUNTER, stateCheck))
                     {
                         net::Api()->submit_state_check(net::Session(), s_netplayFrame, stateCheck);
                     }

@@ -6,16 +6,26 @@
 
 namespace m2ftg
 {
-	// Sonic the Fighters' m2ftg module does not run the arcade ROM unmodified. During board
-	// bring-up it overwrites 76 individual i960 instructions in the program ROM image with a
-	// trap word, each of which dispatches to a native x64 handler inside the DLL - "HLE hooks".
-	// Some of them are what makes the emulator work at all (the frame yield, the vsync wait,
-	// the self-test bypass); the rest re-implement or delete game logic, which is what makes
-	// the ROM's own behaviour unmoddable: patching rom_code1.bin at a hooked address has no
+	// The LJ m2ftg modules do not run their arcade ROM unmodified. During board bring-up each
+	// one overwrites individual i960 instructions in the program ROM image with a trap word,
+	// each of which dispatches to a native x64 handler inside the DLL - "HLE hooks". Some of
+	// them are what makes the emulator work at all (the frame yield, the vsync wait, the
+	// self-test bypass); the rest re-implement or delete game logic, which is what makes the
+	// ROM's own behaviour unmoddable: patching rom_code1.bin at a hooked address has no
 	// effect, because the instruction there is never executed.
 	//
-	// This module enumerates all 76 and can disable any subset of them at runtime, restoring
-	// the ROM's original instruction so the (possibly modified) ROM code runs instead.
+	// This module enumerates them and can disable any subset at runtime, restoring the ROM's
+	// original instruction so the (possibly modified) ROM code runs instead.
+	//
+	// Two games are described here, and the mechanism is identical in both - same installer
+	// contract, same 16-byte record, same two shared handler tails, same reversible restore.
+	// Only the addresses and the hook set differ:
+	//
+	//     Sonic the Fighters   76 hooks   table DLL+0x1E8870
+	//     Fighting Vipers      95 hooks   table DLL+0x1E5840
+	//
+	// Everything game-specific lives in the GameHooks table in the .cpp; the API below is
+	// game-agnostic and reads the current game's descriptor through Count()/Get().
 	namespace HleHooks
 	{
 		enum class Kind : uint8_t
@@ -50,8 +60,21 @@ namespace m2ftg
 			const char* note;
 		};
 
-		inline constexpr size_t COUNT = 76;
+		// Upper bound across every game described here, and the size of every per-hook array
+		// (masks, hit counts, retarget strings). The LIVE count is Count(), which depends on
+		// the game that is running - iterate with that, size with this.
+		//
+		// It must stay <= 128, because the disable mask is a uint64_t[2].
+		inline constexpr size_t MAX_COUNT = 96;
+		static_assert(MAX_COUNT <= 128, "the disable mask is a uint64_t[2]");
 
+		// Hooks in the running game's table, or 0 if this game has no HLE hook table (which
+		// is every game but StF and FV). Supported() is the same test, spelled for clarity.
+		size_t Count();
+		bool Supported();
+
+		// Valid for index < Count(). Out-of-range returns the first record rather than
+		// reading past the table.
 		const Info& Get(size_t index);
 		const char* KindName(Kind kind);
 		const char* KindDescription(Kind kind);
@@ -98,25 +121,30 @@ namespace m2ftg
 		//
 		// Disabled by DEFAULT rather than forced, so it stays visible and re-enableable in the
 		// HLE ROM hooks list like every other hook.
-		inline constexpr size_t HOOK_GAME_INT_TIME = 16;
-		inline constexpr uint64_t DEFAULT_DISABLE_MASK[2] = { 1ull << HOOK_GAME_INT_TIME, 0 };
+		//
+		// Fighting Vipers has no counterpart: its GAME_INT+0x8 hook (19) is Inert, so FV's
+		// default mask is empty. DefaultDisableMask() returns the running game's, always two
+		// words, and never null - an unsupported game gets a zero mask.
+		inline constexpr size_t HOOK_STF_GAME_INT_TIME = 16;
+		const uint64_t* DefaultDisableMask();
 
 		// Restores or re-applies each hook to match the "Disable DLL HLE ROM hooks" setting.
-		// Call once per frame; no-op unless the game is StF and the board has booted. Works
-		// live - the original instruction words come from the DLL's own save area, which the
-		// installer fills before it writes the traps.
+		// Call once per frame; no-op unless the running game has a hook table and its board
+		// has booted. Works live - the original instruction words come from the DLL's own save
+		// area, which the installer fills before it writes the traps.
 		void Update();
 
 		// ---- Pre-install retargeting (for program ROMs that are not Sonic the Fighters) ----
 		//
-		// Every offset in the table above is a Sonic the Fighters address. Point the module at
-		// a different program - a homebrew Model 2B build, say - and the installer still stamps
-		// all 76 traps at those offsets, corrupting 76 unrelated instructions before the i960
-		// executes a single one. Update() cannot undo that in time: it runs from the UI draw,
-		// which is a full module_main call behind the first frame of emulation.
+		// Every offset in the table above is an address in that game's own program ROM. Point
+		// the module at a different program - a homebrew Model 2B build, say - and the
+		// installer still stamps every trap at those offsets, corrupting that many unrelated
+		// instructions before the i960 executes a single one. Update() cannot undo that in
+		// time: it runs from the UI draw, which is a full module_main call behind the first
+		// frame of emulation.
 		//
 		// The fix is to change what the installer is told to patch, before it runs. The table
-		// at DLL+0x1E8870 is in .data (writable, no VirtualProtect needed) and the installer
+		// is in .data (writable, no VirtualProtect needed) and the installer
 		// skips any record whose romOffset is >= 0x200000 - so rewriting romOffset ahead of
 		// module_start either drops a hook entirely or moves it to wherever the new program
 		// keeps its equivalent code. Nothing is corrupted and there is no race, because the
@@ -164,23 +192,19 @@ namespace m2ftg
 		// instruction of a REAL, CALLED function; a bare `ret` body is enough, and no sacrificial
 		// slot is wanted because the handler never falls through. It must not be inlined away:
 		// with no `call` there is no frame for the handler's return to unwind.
+		//
+		// The hook INDICES below are per-game - the two tables happen to agree on 1-7 but not
+		// on `rand`, which is hook 33 in StF and 43 in FV - so the site list lives in the
+		// GameHooks descriptor and is reached through Convention().
 		struct ConventionSite
 		{
 			const char* symbol;
 			uint8_t hook;
 			uint8_t byteOffset;
 		};
-		inline constexpr ConventionSite CONVENTION[] = {
-			{ "__yamp_hook_composite_enable", 1, 0 },
-			{ "__yamp_hook_frame_yield",      2, 0 },
-			{ "__yamp_hook_geo_wait",         3, 0 },
-			{ "__yamp_hook_geo_wait",         4, 8 },
-			{ "__yamp_hook_vblank",           5, 0 },
-			{ "__yamp_hook_vblank",           6, 8 },
-			{ "__yamp_hook_vblank",           7, 16 },
-			{ "__yamp_hook_rand",            33, 0 },
-		};
-		inline constexpr size_t CONVENTION_COUNT = sizeof(CONVENTION) / sizeof(CONVENTION[0]);
+		// The running game's convention sites. Returns null and sets count to 0 when the game
+		// has no hook table.
+		const ConventionSite* Convention(size_t& count);
 
 		// Rewrites the installer's table. Must be called with the game DLL loaded and BEFORE
 		// module_start, which is what runs the installer. No-op unless the game is StF.
@@ -192,7 +216,7 @@ namespace m2ftg
 		// than left at Sonic the Fighters' own address - which for a different program ROM would
 		// stamp a trap into unrelated code. An ELF with no convention symbols behaves exactly as
 		// before, so nothing that works today changes.
-		size_t ApplyRetarget(const std::string retarget[COUNT]);
+		size_t ApplyRetarget(const std::string retarget[MAX_COUNT]);
 
 		// True if the last ApplyRetarget placed hooks from ELF symbols rather than the ini.
 		bool UsedConvention();
@@ -215,7 +239,7 @@ namespace m2ftg
 		// dispatcher to reimplement (GameDesc i960 RVAs are zero); counts stay at 0 there.
 		namespace detail
 		{
-			extern uint32_t g_hitCounts[COUNT];
+			extern uint32_t g_hitCounts[MAX_COUNT];
 		}
 
 		// Called for every fetched instruction word - keep it trivial.
@@ -231,7 +255,7 @@ namespace m2ftg
 				return;
 			}
 			const uint32_t index = operand >> 2;
-			if (index < COUNT)
+			if (index < MAX_COUNT)
 			{
 				detail::g_hitCounts[index]++;
 			}
@@ -244,6 +268,6 @@ namespace m2ftg
 		// so it reflects what really happened rather than what was asked for. RETARGET_SUPPRESS
 		// (or any value >= 0x200000) means the installer skipped it. False if the module is not
 		// loaded yet.
-		bool GetInstalledOffsets(uint32_t out[COUNT]);
+		bool GetInstalledOffsets(uint32_t out[MAX_COUNT]);
 	}
 }
