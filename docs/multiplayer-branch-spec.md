@@ -260,7 +260,7 @@ Shared by **every** game (all four m2ftg boards and all three VF5FS builds). Mov
 
 Rationale: an XInput pad has a known button contract and keeps real names; a DirectInput pad (arcade encoders, fight sticks, PSX/Saturn adapters, most third-party pads) does not, so its inputs are numbered. A binding therefore only fires on the *kind* of pad it was made on — "A" and "Button 1" must not silently alias. Axes must be bindable because plenty of panels have no hat at all; they are numbered rather than named X/Y/Z because DirectInput does not guarantee an axis lands in the `DIJOYSTATE2` slot matching its reported name.
 
-**Defaults.** Keyboard keeps the historical StF layout — WASD, K/L/J = P/K/G, F = Start, Tab = Back, I/O/U/M = P+G / P+K / K+G / P+K+G; Coin/Test/Service use MAME's `5`, F2, F3, **Player 1 only** (one cabinet fixture). Player 2 has no keyboard defaults — run the wizard. Pad defaults follow the module's own slot template: A=P, B=K, Y=G, LT=P+G, LB=P+K+G, RT=P+K, RB=K+G; X free.
+**Defaults.** Keyboard follows MAME's arcade layout — arrow keys, Z/X/C = P/K/G, `1` = Start, Tab = Back, I/O/U/M = P+G / P+K / K+G / P+K+G; Coin/Test/Service use MAME's `5`, F2, F3, **Player 1 only** (one cabinet fixture). Player 2 has no keyboard defaults — run the wizard. Pad defaults follow the module's own slot template: A=P, B=K, Y=G, LT=P+G, LB=P+K+G, RT=P+K, RB=K+G; X free.
 
 **`MODULE_ASSIGN[8]` — the module-facing table.** This is the single source of truth for what each button bit *means* to the module, and it is fixed: remapping is entirely host-side. Two module facts it depends on, both read out of the StF DLL:
 

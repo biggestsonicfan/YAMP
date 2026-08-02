@@ -100,13 +100,15 @@ namespace Input
 	using KeyBinds = std::array<std::array<uint32_t, Action_Count>, 2>;
 	using PadBinds = std::array<std::array<uint32_t, Action_Count>, 2>;
 
-	// Keyboard defaults keep the historical StF layout (WASD + K/L/J, F to start, Tab back;
-	// combo keys match the old fixed assigns: I=P+G, O=P+K, U=K+G, M=P+K+G). Coin and the two
-	// service-panel switches use MAME's keys ('5', F2, F3); the panel is one cabinet fixture, so
-	// only Player 1 gets it. Player 2 has no keyboard defaults - run the wizard to set them up.
+	// Keyboard defaults follow MAME's arcade layout: the arrow keys for the stick, Z/X/C for
+	// Punch / Kick / Guard, '1' to start and '5' to insert a coin. The combo keys keep the old
+	// fixed assigns (I=P+G, O=P+K, U=K+G, M=P+K+G) and Back stays on Tab. Coin and the two
+	// service-panel switches ('5', F2, F3) are one cabinet fixture, so only Player 1 gets them.
+	// Player 2 has no keyboard defaults - run the wizard to set them up.
 	inline constexpr KeyBinds DEFAULT_KEY_BINDS = { {
-		//  Up   Down  Left  Right  Punch Kick  Guard Start Coin  P+G  P+K  K+G  P+K+G Back               Test              Service
-		{ { 'W', 'S',  'A',  'D',   'K',  'L',  'J',  'F',  '5',  'I', 'O', 'U', 'M',  0x09 /* VK_TAB */, 0x71 /* VK_F2 */, 0x72 /* VK_F3 */ } },
+		//  Up                  Down                Left                Right               Punch Kick Guard Start Coin  P+G  P+K  K+G  P+K+G Back               Test              Service
+		{ { 0x26 /* VK_UP */,   0x28 /* VK_DOWN */, 0x25 /* VK_LEFT */, 0x27 /* VK_RIGHT */,
+		                                                                                    'Z',  'X', 'C',  '1',  '5',  'I', 'O', 'U', 'M',  0x09 /* VK_TAB */, 0x71 /* VK_F2 */, 0x72 /* VK_F3 */ } },
 		{ {  0,   0,    0,    0,     0,    0,    0,    0,    0,    0,   0,   0,   0,    0,                 0,                0 } },
 	} };
 
