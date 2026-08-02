@@ -6,6 +6,7 @@
 
 #include "../../wil/common.h"
 #include "../../DebugLog.h"
+#include "../../YAMPSettings.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/Patterns.h"
 #include "../../Utils/Trampoline.h"
@@ -291,8 +292,20 @@ namespace m2ftg
 		// Fixed at the source, by correcting the constant in the module's injector rather than
 		// policing the backup RAM afterwards: the byte is the operator's setting, so the service
 		// menu must stay free to change it, and re-asserting it per frame would fight the menu.
+		// Paired with HLE hook 16 (GAME_INT+0x4), which YAMP disables by default: that hook copies
+		// the same byte into `time` raw, so with this fix applied and that hook restored the round
+		// timer becomes 2 seconds. See HleHooks.h for that half.
 		void FixBackupRamTimeIndex(void* dll)
 		{
+			const YAMPSettings* settings = gGeneral.GetSettings();
+			if (settings != nullptr && !settings->m_stfFixBackupTimeIndex)
+			{
+				DebugLog("[%s] Backup-RAM TIME index: correction disabled in settings - the module's own "
+					"0x1E is left in place, and the service menu's GAME ASSIGNMENTS page will hang the board.\n",
+					gGeneral.GetGameTag());
+				return;
+			}
+
 			// The tail of the injector (StF's set_window_data+0x564 handler, module +0x529D0)
 			// that fills the +0x3340 half of the block. Anchored on the TST_*_ADD / TST_*_MUL
 			// constants either side of it, which are distinctive and are themselves confirmed

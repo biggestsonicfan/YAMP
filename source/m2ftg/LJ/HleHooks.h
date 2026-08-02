@@ -79,6 +79,28 @@ namespace m2ftg
 		// loaded, so a restart always recovers.
 		inline constexpr unsigned SESSION_ONLY_KINDS = KindBit(Kind::Core);
 
+		// ---- Hooks YAMP disables by default ------------------------------------------------
+		//
+		// Hook 16 (GAME_INT+0x4) copies backup RAM +0x3351 into `time` (RAM 0x500090) on every
+		// game interrupt. Those two are not the same unit: `time` is the round length in
+		// SECONDS (the ROM's own writers put 30 there literally, and its debug setter clamps to
+		// 0..99), while +0x3351 is `time_var_array_num`, an INDEX 0..9 into time_vars[] at ROM
+		// 0x8F3C4 (10,20,30,...,99). The ROM converts - `time = time_vars[+0x3351]` in main -
+		// and the service menu edits and displays +0x3351 as an index throughout.
+		//
+		// The module gets away with the raw copy only because its own injector writes seconds
+		// into that byte too (see FixBackupRamTimeIndex in Patch.cpp, which corrects it to the
+		// index the ROM expects). With the byte fixed, this hook would force `time` to 2 - a
+		// two-second round. It has no other effect: its handler is the single store plus the
+		// module's "run the original instruction" tail, so disabling it costs nothing and hands
+		// the round length back to the ROM, where the operator's GAME ASSIGNMENTS setting
+		// actually reaches it.
+		//
+		// Disabled by DEFAULT rather than forced, so it stays visible and re-enableable in the
+		// HLE ROM hooks list like every other hook.
+		inline constexpr size_t HOOK_GAME_INT_TIME = 16;
+		inline constexpr uint64_t DEFAULT_DISABLE_MASK[2] = { 1ull << HOOK_GAME_INT_TIME, 0 };
+
 		// Restores or re-applies each hook to match the "Disable DLL HLE ROM hooks" setting.
 		// Call once per frame; no-op unless the game is StF and the board has booted. Works
 		// live - the original instruction words come from the DLL's own save area, which the

@@ -326,12 +326,17 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_stfShowDebugFeatures = settings->m_stfShowDebugFeatures;
 	m_stfLooseRomFiles = settings->m_stfLooseRomFiles;
 	m_stfGameDebugFlag = settings->m_stfGameDebugFlag;
+	m_stfFixBackupTimeIndex = settings->m_stfFixBackupTimeIndex;
 	m_stfHleDisableMask[0] = settings->m_stfHleDisableMask[0];
 	m_stfHleDisableMask[1] = settings->m_stfHleDisableMask[1];
 
-	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session
+	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session.
+	// The hook mask is compared against its DEFAULT, not against zero: hook 16 is disabled out of
+	// the box (HleHooks.h), and that alone must not read as "the user has been poking at things".
 	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag ||
-		m_stfHleDisableMask[0] != 0 || m_stfHleDisableMask[1] != 0)
+		!m_stfFixBackupTimeIndex ||
+		m_stfHleDisableMask[0] != m2ftg::HleHooks::DEFAULT_DISABLE_MASK[0] ||
+		m_stfHleDisableMask[1] != m2ftg::HleHooks::DEFAULT_DISABLE_MASK[1])
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -1268,6 +1273,26 @@ void YAMPUserInterface::DrawDebug()
 				"Re-applied automatically if the game rewrites that memory. Takes effect immediately after Apply.");
 		}
 
+		if (ImGui::Checkbox("Correct the module's backup-RAM TIME setting", &m_stfFixBackupTimeIndex))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The module writes the round time into backup RAM +0x3351 as a raw second count (30),\n"
+				"but the ROM stores an index 0-9 into its own table of times (10,20,30...99) there. Index 30 is\n"
+				"off the end of the table. This writes the index the ROM expects instead. Requires a restart.\n"
+				"\n"
+				"TURN THIS OFF AND GAME ASSIGNMENTS STOPS WORKING: opening that page in the service menu freezes\n"
+				"YAMP outright - not just the game - and the process has to be killed. That is the module's stock\n"
+				"behaviour and the reason this option exists.\n"
+				"\n"
+				"IMPORTANT: leave HLE ROM hook 16 (GAME_INT+0x4) DISABLED while this is on. That hook copies the\n"
+				"same byte straight into the round timer without the table lookup, so this ON plus that hook ON\n"
+				"means every match lasts about two seconds. Both off = stock behaviour (working timer, but the\n"
+				"menu page freezes); both on is the only broken combination.");
+		}
+
 		DrawStfHleHooks();
 	}
 }
@@ -1299,9 +1324,21 @@ void YAMPUserInterface::DrawStfHleHooks()
 		m_pageModified = true;
 	};
 
-	if (ImGui::Button("Disable none"))
+	// Deliberately "the defaults" rather than "none": hook 16 is disabled out of the box because
+	// re-enabling it alongside the backup-RAM TIME fix makes every match last about two seconds
+	// (see HleHooks.h). A button that silently re-armed that is the same trap the tooltips warn
+	// about. Re-enabling it is still one click away - its own checkbox in the list below.
+	if (ImGui::Button("Restore defaults"))
 	{
-		setMask(0);
+		m_stfHleDisableMask[0] = Hle::DEFAULT_DISABLE_MASK[0];
+		m_stfHleDisableMask[1] = Hle::DEFAULT_DISABLE_MASK[1];
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently just hook 16\n"
+			"(GAME_INT+0x4), which fights the backup-RAM TIME correction and would cut matches to\n"
+			"about two seconds. Untick it below if you want the module's stock behaviour.");
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Disable game-behaviour hooks"))
@@ -2215,6 +2252,7 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_vf2DisablePepsi != m_vf2DisablePepsi ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
 		settings->m_useD3DDebugLayer != m_useD3DDebugLayer ||
+		settings->m_stfFixBackupTimeIndex != m_stfFixBackupTimeIndex ||
 		settings->m_stfLooseRomFiles != m_stfLooseRomFiles;
 
 	settings->m_resX = m_resolutions[m_currentResolutionIndex].width;
@@ -2264,6 +2302,8 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_stfShowDebugFeatures = m_stfShowDebugFeatures;
 	// Enforced every frame while the board is booted, so it also applies live.
 	settings->m_stfGameDebugFlag = m_stfGameDebugFlag;
+	// Read once when the module is patched, hence the restart warning above.
+	settings->m_stfFixBackupTimeIndex = m_stfFixBackupTimeIndex;
 	// Ditto: m2ftg::HleHooks::Update() reconciles the ROM image against this mask every frame.
 	settings->m_stfHleDisableMask[0] = m_stfHleDisableMask[0];
 	settings->m_stfHleDisableMask[1] = m_stfHleDisableMask[1];

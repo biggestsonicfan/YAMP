@@ -126,6 +126,7 @@ private:
 	bool m_stfShowDebugFeatures = false;
 	bool m_stfLooseRomFiles = false;
 	bool m_stfGameDebugFlag = false;
+	bool m_stfFixBackupTimeIndex = true;
 	uint64_t m_stfHleDisableMask[2] = { 0, 0 };
 
 	// StF binding-capture state ("press a key for X"). The queue holds (action, device mask

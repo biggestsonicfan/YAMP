@@ -165,6 +165,7 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_stfShowDebugFeatures = GetPrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", 0, iniPath.c_str()) != 0;
 		m_stfLooseRomFiles = GetPrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", 0, iniPath.c_str()) != 0;
 		m_stfGameDebugFlag = GetPrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", 0, iniPath.c_str()) != 0;
+		m_stfFixBackupTimeIndex = GetPrivateProfileIntW(SECTION_NAME, L"FixBackupRamTimeIndex", 1, iniPath.c_str()) != 0;
 		// Netplay lives in its own ini section: it is host configuration, not per-title state,
 		// and keeping it separate means a credential never lands in a game's settings block.
 		m_netServer = GetPrivateProfileStdStringA("Netplay", "Server", "", iniPath);
@@ -178,8 +179,14 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
 		}
 		// 76 bits, so it does not fit the profile API's integer reads - stored as hex text.
-		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksLo", 0, iniPath.c_str());
-		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksHi", 0, iniPath.c_str());
+		// The default is DEFAULT_DISABLE_MASK, not 0: hook 16 fights the backup-RAM TIME fix
+		// (see HleHooks.h). NB an ini written by an older build already carries an explicit
+		// 0 here, which is indistinguishable from a deliberate "enable everything" - those
+		// users get the hook back until they clear the checkbox or delete the two lines.
+		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksLo",
+			m2ftg::HleHooks::DEFAULT_DISABLE_MASK[0], iniPath.c_str());
+		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, L"DisabledHleHooksHi",
+			m2ftg::HleHooks::DEFAULT_DISABLE_MASK[1], iniPath.c_str());
 		// Belt and braces with the strip on save: a hand-edited ini must not be able to make
 		// YAMP unbootable either, since a hung board also takes the settings UI down with it.
 		m2ftg::HleHooks::MaskStripKinds(m_stfHleDisableMask, m2ftg::HleHooks::SESSION_ONLY_KINDS);
@@ -299,6 +306,7 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"ShowDLLDebugFeatures", m_stfShowDebugFeatures, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"LoadLooseRomFiles", m_stfLooseRomFiles, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"SetGameDebugFlag", m_stfGameDebugFlag, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"FixBackupRamTimeIndex", m_stfFixBackupTimeIndex, iniPath.c_str());
 		WritePrivateProfileStdStringA("Netplay", "Server", m_netServer, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "Npid", m_netNpid, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "Token", m_netToken, iniPath);

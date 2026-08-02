@@ -90,6 +90,12 @@ public:
 	// Sets the game's own debug flag in emulated RAM (the dword at 0x508000, flipped by
 	// XOR with 0x24), enforced every frame while the board is booted. Applied live.
 	bool m_stfGameDebugFlag = false;
+	// Corrects the module's injected backup-RAM TIME byte from a raw second count to the
+	// table index the ROM expects, without which the service menu's GAME ASSIGNMENTS page
+	// hangs the board (see m2ftg::FixBackupRamTimeIndex). Belongs with HLE hook 16, which is
+	// disabled by default for the same reason: this ON with that hook ON is the one
+	// combination that yields two-second rounds. Consumed once at module load.
+	bool m_stfFixBackupTimeIndex = true;
 	// Which of the module's 76 HLE ROM hooks to keep disabled (bit i = hook i, in the DLL's
 	// own table order - see m2ftg::HleHooks). A disabled hook has its original i960
 	// instruction restored in the ROM image, so the ROM's own code runs there instead, which

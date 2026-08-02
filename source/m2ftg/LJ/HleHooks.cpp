@@ -76,7 +76,7 @@ namespace
 		{ 0x00725C, 0x52B70, "main+0x934",                        Kind::Core,    true,  "Forces r3 = 1 in main's power-on test path." },
 		{ 0x03F45C, 0x52BF0, "sound_queue_output+0x10",           Kind::Host,    true,  "Routes the sound queue to the host mixer instead of the i960 sound board." },
 		{ 0x03F268, 0x52C70, "sound_request_special",             Kind::Host,    true,  "Special (voice / announcer) sound request -> host mixer." },
-		{ 0x00B0F8, 0x52CA0, "GAME_INT+0x4",                      Kind::Host,    false, "Writes a host-supplied byte into emulated RAM 0x500090 each game interrupt, then runs the original." },
+		{ 0x00B0F8, 0x52CA0, "GAME_INT+0x4",                      Kind::Host,    false, "DISABLED BY DEFAULT - re-enable it and matches last about two seconds. Copies backup RAM +0x3351 into `time` (RAM 0x500090) every game interrupt, then runs the original. The two are different units: `time` is the round length in SECONDS, while +0x3351 is time_var_array_num, an INDEX 0-9 into time_vars[] (ROM 0x8F3C4 = 10,20,30...99). The ROM converts between them (`time = time_vars[+0x3351]`), and the service menu edits that byte as an index. The module only gets away with the raw copy because its own injector wrote seconds into that byte as well - which is the bug that hung GAME ASSIGNMENTS, and which YAMP's \"Correct the module's backup-RAM TIME setting\" option fixes. With that option on (the default) this hook forces `time` to 2. Turn BOTH off together for the module's stock behaviour; leaving the fix on and this hook on is the one combination that gives two-second rounds. Disabling costs nothing else: the store is the handler's only side effect." },
 		{ 0x0096AC, 0x52CD0, "ADV_REPLAY_WAIT1A+0x128",           Kind::Host,    true,  "Supplies attract-mode replay data into emulated RAM 0x500028 from a host table." },
 		{ 0x0019BC, 0x52D70, "player_entry+0x14",                 Kind::Inert,   false, "Trap runs the original unchanged - a probe point whose body was compiled out of the retail build." },
 		{ 0x0083F4, 0x52D80, "ADV_DSP+0x108",                     Kind::Host,    false, "Clears the emulated input word during the host's attract context, then runs the original." },
@@ -255,7 +255,12 @@ void m2ftg::HleHooks::Update()
 	//
 	// It costs nothing to reverse: the reconciler runs every frame, so leaving a room restores the
 	// player's own mask on the next one.
-	static const uint64_t NETPLAY_MASK[2] = { 0, 0 };
+	//
+	// DEFAULT_DISABLE_MASK is the one exception, and it does not weaken the argument: it is a
+	// compiled-in constant, not a setting, so every peer on the same build already agrees on it
+	// without exchanging anything - exactly the property the paragraph above is buying. Restoring
+	// hook 16 here would instead make both peers agree on a two-second round.
+	static const uint64_t NETPLAY_MASK[2] = { DEFAULT_DISABLE_MASK[0], DEFAULT_DISABLE_MASK[1] };
 	const bool netplayLocked = net::SessionInProgress();
 	const uint64_t* wanted = netplayLocked ? NETPLAY_MASK : settings->m_stfHleDisableMask;
 
