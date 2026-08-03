@@ -1028,14 +1028,24 @@ const auto st = net.GetStatus();     // (1) top of frame, BEFORE input is polled
 net.Drive();                         // (2) poll the plugin + run the round-start machine
 const bool advance = net.Step(info); // (3) after the pads are filled; overwrites them
 ... arcade coin/start protocol, off the SYNCHRONISED pads ...
-if (advance) { module_main(...); net.EndFrame(); }   // (4) only if the frame really ran
+if (advance) { module_main(...); net.EndFrame(); }   // (4) after every call that ran
 ```
 
 - `GetStatus()` deliberately returns **last frame's** state, read before `Drive()` can advance it, so
   pad routing and the coin protocol see one stable answer for the whole frame. Merging (1) and (2)
   would shift `inMatch` a frame earlier on the barrier-release frame, changing both.
 - `EndFrame()` is separate from `Step()` because the netplay frame index must advance **only** on
-  frames that actually ran — a stall must not tick it.
+  frames that actually ran — a lockstep stall must not tick it.
+- **`EndFrame()` also decides for itself whether the call counted**, which is not the same question.
+  A lockstep stall is visible to the host (`advance` is false and `module_main` is skipped), but a
+  `module_main` call that *runs and does nothing* is not: the i960 loop returns as soon as the ROM
+  sets its yield flag, so a call can execute nothing at all. Measured over ~12,000 frames on two
+  machines, **~5% of VF2's calls do**, and which ones depends on host timing rather than simulation
+  state. Counting those as frames is what put two identical VF2 simulations one emulated frame apart
+  (§14.8d). So `EndFrame()` submits the canary and advances the index only when the emulated board
+  actually moved; otherwise it returns and the next host frame re-runs the same netplay frame with
+  the same inputs — the same path a stall already takes. A host still calls it after every
+  `module_main`; it must not try to make this judgement itself.
 
 A host that never calls these behaves exactly as it did before netplay existed.
 
@@ -1061,7 +1071,52 @@ The ROM's `rand` is HLE'd onto a host Mersenne Twister, so two machines roll dif
 
 > StF hid all three: its second ROM-facing stream is the VS stage picker (hook 22), gated on `is_vs_mode`, off by default. Latent, not absent. **StF and FV have not been re-verified on two machines since these fixes.**
 
-### 14.9 Room game flags — `DAMAGE`, `VERSION`, and the pattern for cabinet settings
+### 14.8d Frame accounting — `module_main` returning is not a frame
+
+VF2 spent two sessions marked "wired but diverging", on the reading that its two peers ran one
+emulated frame apart while StF and FV did not. **They were never diverging.** The simulations were
+bit-identical and only the frame *numbering* disagreed.
+
+`module_main` returning is a HOST event; the emulated board completing a frame is a GUEST one. The
+i960 CPU loop (VF2 `FUN_1800210C0`) executes instructions in batches of twelve and returns the
+moment the ROM's yield flag `ctx+0x1B0` is set — which it checks *inside* the batch — so a call can
+execute one instruction, or none that matter. Netplay counted every call as a frame, so each peer's
+netplay-frame-to-emulated-frame mapping drifted independently and the pair sat a frame apart,
+oscillating as each stalled at different moments.
+
+Caught by the timer trace (§15, `[Netplay] TimerTrace`) on a live round. Host and guest are
+identical in every field through netplay frames 0 and 1 — same ROM counter, same canary, same 2,988
+instructions, same timer counts — and then:
+
+```
+host   f=2 rom=11 chk=0x6A9A79A0 ins=2988 rearm=0 t3=6363,1,2988
+guest  f=2 rom=10 chk=0x4647F415 ins=0    rearm=0 t3=9351,1,0      <- executed NOTHING
+guest  f=1 rom=10 chk=0x4647F415                                    <- ...so it resent frame 1's value
+```
+
+The desync report confirms it arithmetically: `local 1788508576, peer 1179120661` is `0x6A9A79A0`
+against `0x4647F415` — the guest submitted, as frame 2, the value the host computed at frame **1**.
+A 64 KB FNV hash matching bit for bit is not coincidence.
+
+**Why StF and FV never showed it.** They stall the same way, but only during boot: measured on the
+same build, all 52 of StF's stalls occur at ROM frame 0-1, after which it advances exactly +1 per
+call for 1,428 consecutive calls. A round cannot start until the board is booted and anchored at
+frame 8, so their stalls are always outside a round. VF2's are spread evenly across the whole run.
+
+**The test** is deliberately conservative: a call counts as a stall only when the canary is
+unchanged AND no timer channel counted down AND none was re-armed (a re-arm is a guest store, so it
+proves the CPU ran). Against those 12,000 frames it caught 227 and 171 stalls with **zero false
+positives**; the ~14 per run it misses are counted as real frames, which is the safe direction to be
+wrong in. StF and FV were re-verified in sync after the change.
+
+> **What this retires.** VF2's desync canary is a work-RAM hash rather than the ROM frame counter,
+> and the reason recorded for that was wrong: it argued the counter "jitters" and is "bookkeeping
+> ABOUT the frame, not part of the simulation". The counter was accurate — those calls really did
+> run no frame — and treating an honest signal as noise is what kept the real fault hidden. Keep the
+> hash, because it is the stronger canary and it is what caught this within two frames; discard the
+> justification.
+
+### 14.9 Room game flags — `DAMAGE`, `VERSION`, `VS MODE`, and the pattern for cabinet settings
 
 Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NORMAL` by default and `REAL` for the harder damage scaling most competitive players prefer. It is exposed as a YAMP arcade dip switch and, because it changes what the ROM computes from a hit, it is also the first setting that had to be made a property of the **room**.
 
@@ -1144,6 +1199,8 @@ resolving to StF `0x1ED490` (site `0x6290F`) and FV `0x1EA590` (site `0x60F6F`) 
 | | `CertFingerprint` | 64 hex | `""` | **Leave empty** unless the server is self-signed (§14.6) |
 | | `CommunicationId` | string | `NPWR02113_00` | Any well-formed comm id works with `CreateMissing` on |
 | | `FrameDelay` | int | 3 | Higher hides more latency; too low stalls rather than desyncs |
+| | `TimerTrace` | 0/1 | 0 | **Diagnostic, no UI.** One line per emulated frame to `yampnet.log` carrying the i960's four timer channels and the instructions charged to them. The timers count INSTRUCTIONS, not wall clock, so the line is a direct readout of instructions-per-frame and two peers' logs diff line-for-line (§14.8d). Runs in and out of a round, so it can be validated on one machine. Costs a file open/append/close per frame — leave off for ordinary play |
+| | `ForceUnsupported` | 0/1 | 0 | **Diagnostic, no UI.** Lets a game whose `netplayReady` is false still open a round, so a game that is measured but not yet trusted can be observed at all — which is what §14.8d was found with. A round run under it is expected to be wrong |
 
 ---
 
@@ -1159,10 +1216,9 @@ Everything else described in this document is committed.
 
 ### Known-incomplete, deliberately
 
-- **VF2 netplay is wired but disabled** (`DwGame::netplayReady = false`). The two simulations run one emulated frame apart; the mechanism and the full ruled-out list are in [`vf2-hle-hooks.md`](vf2-hle-hooks.md). Flip the flag when it is closed.
 - **VF2's service menu corrupts the geometry on exit** — a board soft-reset the host does not survive. Same doc.
-- **Only one cabinet setting per game is published to the room.** Difficulty, country, free play and VS mode still are not, for StF or VF2 (§14.9).
-- **StF and FV have not been re-verified on two machines** since the RNG seeding fixes (§14.8c). A VS-mode round is the case that actually exercises what changed.
+- **Three cabinet settings per game are still unpublished:** difficulty (`+0x04`), country (`+0x05`) and free play (`+0x09`), for all three games (§14.9). DAMAGE, the VF2 version and VS mode are published. Difficulty and country need more than one bit each, so finishing this is a packing job rather than a flag apiece.
+- **The stall test in §14.8d is conservative and not provably exact** — it misses ~14 stalls per 4,000 frames (ROM counter unmoved but the canary or a timer moved), counting them as real frames. That is the safe direction and no round has drifted because of it, but it is the first place to look if a long match ever does.
 - **Netplay credentials share `settings.ini`** with per-game settings, so resetting game settings destroys the account configuration. They belong in their own file.
 - **HLE hook hit-counters read 0 for VF2**, because the instruction-fetch hook that feeds them is LJ-only. Absent rather than wrong, but it looks broken in the settings panel.
 
@@ -1226,7 +1282,8 @@ Ordered so each stage is independently runnable and verifiable.
 | Assuming base `0x180000000` | FV, and both VF5FS LJ/YLAD modules, are ASLR'd. Always resolve against the runtime base; call `SetGameDllRange`. |
 | Reusing an sl/gs layout across generations | K2's `+0x3C0` displacement fails **silently** (null file handles, fault far away). One header per generation, every offset `static_assert`ed. |
 | MSVC STL version drift | `StfDllMutex` exists because VS2022 17.10+ changed `std::mutex`'s internals. Re-check this if the toolchain moves. |
-| Netplay determinism | Not a netcode problem. The three helpers in §14.8 plus the `IsBoardBooted` gate and the frame-counter anchor are what make it work. |
+| Netplay determinism | Not a netcode problem. The three helpers in §14.8, the `IsBoardBooted` gate and the frame-counter anchor are what make it work. |
+| "The two peers diverged" | Check they are not simply *numbering* frames differently first (§14.8d). Two bit-identical simulations one frame apart look exactly like a desync, and the give-away is cheap: a peer's canary matching its neighbour's at an ADJACENT frame is not a divergence. |
 | Intel integrated GPU | StF's `CreatePipelineState` `E_FAIL`s on Intel iGPUs — force the NVIDIA adapter. (RDP forces Intel.) |
 | Shutdown | `wWinMain` still ends in `TerminateProcess` because clean shutdown crashes on mismatched allocators. **Outstanding.** |
 
