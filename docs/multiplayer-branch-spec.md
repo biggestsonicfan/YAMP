@@ -5,8 +5,8 @@
 | | |
 |---|---|
 | Baseline commit | `45c0d9ae273096679833d540a3714399c8a1d6e0` — *"Update ModUtils to fix compilation under VS2022"*, 2024-05-12 |
-| Branch | `multiplayer` (tip `9baa02e`, *"Launcher: Escape/Exit quit path with a confirmation prompt"*) |
-| Delta | 21 commits, 152 files, **+46,745 / −4,637** lines (see §16 for the one change still outside git) |
+| Branch | `master` (tip: *"Virtua Fighter 2 netplay, shared cabinet switches, and the 2.0/2.1 room flag"*) |
+| Delta | 29 commits, 159 files, **+50,242 / −4,628** lines (see §16 for the one change still outside git) |
 | Platform | Windows x64, MSVC (VS2022), C++17, premake5 |
 
 At the baseline, YAMP was a single-purpose launcher: it hosted **one** arcade module — Virtua Fighter 5: Final Showdown extracted from Yakuza 6 — with no audio, one hard-coded keyboard layout, and a DX11 render path. This branch turns it into a **multi-title, multi-engine-generation arcade module host** with audio, configurable input, integrity verification, a game launcher, homebrew ROM support and online play.
@@ -153,15 +153,22 @@ source/
     K2/                Kiwami 2 era: sl 0xF3C0 (gs 0x202140 stays opaque)
   m2ftg/               the Model 2 arcade host family
     (root)             m2ftg.h (module protocol), ImportSymbols.h, ModuleArgs, DisplayModes,
-                       HostUI, file_access.cpp
+                       HostUI, file_access.cpp, and the pieces EVERY m2ftg host shares:
+                       HleHooks, DebugWindows, NetSession, SystemSwitches
     ELF/               homebrew ROM support: ElfRom, CharRamFix
-    LJ/                StF / FV / MR host + Patch + HleHooks + DebugWindows
+    LJ/                StF / FV / MR host + Patch
     YLAD/              VF2 (Like a Dragon) host
     K2/                VF2 + Virtual On (Kiwami 2) host
   vf5fs/               VF5FS hosts ONLY (no platform code)
     (root)             vf5fs.h — the shared module_start protocol
     Y6/  LJ/  YLAD/    one host per build
 ```
+
+`HleHooks`, `DebugWindows`, `NetSession` and `SystemSwitches` were lifted out of `m2ftg/LJ/` in
+2026-08-02 when Virtua Fighter 2 needed them: none is LJ-specific, and leaving them there would have
+forced the YLAD host to include `LJ/` headers and reach for the LJ `GameDesc` table, which has no VF2
+entry. Each now carries its own per-game descriptor keyed off `GameId`, including the module's DLL
+name, so nothing in them assumes a particular host.
 
 Each move was verified **by include graph first**. `pxd/Y6` in particular looked like shared VF5FS code, but nothing outside `vf5fs/Y6` included any of it.
 
@@ -828,8 +835,9 @@ The headline feature of the branch. **Delay-based lockstep modelled directly on 
 YAMP.exe                                     yampnet.dll (optional)
   source/net/NetPlugin.cpp   ── LoadLibrary ──►  plugin/yampnet/Plugin.cpp
   source/net/YampNet.h  ◄──── shared plain-C ABI ────►
-  m2ftg/LJ/LJHost.cpp        ── step(frame, &execute_info) ──►  Lockstep + PadCodec
-  m2ftg/LJ/DebugWindows.cpp  (determinism helpers)               RpcnTransport → RPCN
+  m2ftg/NetSession.cpp       ── step(frame, &execute_info) ──►  Lockstep + PadCodec
+  m2ftg/DebugWindows.cpp     (determinism helpers)               RpcnTransport → RPCN
+    ▲ driven by LJ/LJHost.cpp (StF, FV) and YLAD/VF2.cpp (VF2)
 ```
 
 **Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
@@ -848,6 +856,12 @@ Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exp
 - ABI 2 added `get_room_id()` — the lobby needs it because there is no room browser on this transport, and before that the id existed only as a line in `yampnet.log`.
 - ABI 3 added **desync detection**: `submit_state_check(session, frame, value)` and `get_desync(session, &frame, &local, &remote)`. Lockstep guarantees identical *inputs*; it cannot guarantee the two emulators agree on what those inputs produced. The value YAMP submits is the ROM's own `frame_counter` at emulated `0x500020`, which advances exactly once per emulated frame and is therefore free of timing noise. The plugin carries the most recent one on every input packet. `get_desync` is **latched** — only the *first* disagreement is reported, because everything after it is a consequence rather than a cause.
 - ABI 6 added **room game flags**: `yampnet_room_config::game_flags` (in), `yampnet_room_info::game_flags` (out, per browser row) and `get_room_flags(session)`. These carry the **cabinet settings a match is played under**, which are properties of the *room*, not of a machine — see §14.9.
+
+> **Adding a flag BIT is not an ABI change.** The plugin carries `game_flags` verbatim between the
+> room and its peers (`dst.game_flags = src.flag_attr`) and never interprets it, so
+> `YAMPNET_ROOM_FLAG_VF2_VERSION20` (`0x2`, added 2026-08-02) needed no version bump and no plugin
+> rebuild — an existing `yampnet.dll` carries it correctly. Only a change to the *struct layouts* or
+> the function table forces a bump.
 
 Other notable config: `yampnet_rpcn_config::cert_fingerprint` (see §14.6), `yampnet_room_config::forced_seed` (0 = plugin generates and distributes; non-zero forces one, for replay/debug), `yampnet_match_config{frame_delay, input_redundancy, stall_timeout_ms}`.
 
@@ -997,7 +1011,57 @@ IN_MATCH  -> frame 0
 
 The generation counter wraps at 32 (5 bits). If **RNG seeding fails on this peer**, the round is *refused* rather than played — an unseeded generator is guaranteed to diverge. On round end (peer lost, timeout, or desync) the budget pin is released and the host returns to local play.
 
-### 14.9 Room game flags — `DAMAGE`, and the pattern for cabinet settings
+### 14.8b `m2ftg::NetSession` — the shared session driver
+
+Netplay originally lived inline in `LJHost.cpp::GameLoop`, which is why Fighting Vipers inherited it
+for free (same loop) and Virtua Fighter 2 could not (`YLAD/VF2.cpp` has its own ~700-line loop). The
+round-prep state machine, barrier, pad injection and desync canary — about 250 lines — were extracted
+into `m2ftg::NetSession` (`source/m2ftg/NetSession.{h,cpp}`), leaving `LJHost::GameLoop` 283 lines
+lighter. Five function statics became members and the two duplicated round-teardown paths
+(timeout/disconnect and desync) collapsed into one `EndRound()`.
+
+A host drives **four call points, and the order is part of the contract**:
+
+```cpp
+const auto st = net.GetStatus();     // (1) top of frame, BEFORE input is polled
+... poll input, fill execute_info.pad[] ...
+net.Drive();                         // (2) poll the plugin + run the round-start machine
+const bool advance = net.Step(info); // (3) after the pads are filled; overwrites them
+... arcade coin/start protocol, off the SYNCHRONISED pads ...
+if (advance) { module_main(...); net.EndFrame(); }   // (4) only if the frame really ran
+```
+
+- `GetStatus()` deliberately returns **last frame's** state, read before `Drive()` can advance it, so
+  pad routing and the coin protocol see one stable answer for the whole frame. Merging (1) and (2)
+  would shift `inMatch` a frame earlier on the barrier-release frame, changing both.
+- `EndFrame()` is separate from `Step()` because the netplay frame index must advance **only** on
+  frames that actually ran — a stall must not tick it.
+
+A host that never calls these behaves exactly as it did before netplay existed.
+
+**Which games can sustain a session** is derived, not listed: `m2ftg::RomFrameCounterAddress()`
+returns the game's ROM `frame_counter` address (0 = unmeasured), and both `NetSession::Drive()` and
+the UI's `IsNetplayGame()` test it. A game whose counter has been measured starts offering the
+netplay page automatically, and the UI cannot drift from what `NetSession` will actually agree to run.
+
+> `frame_counter` is at emulated `0x500020` in **all three** Model 2 games. That is inheritance, not
+> coincidence — VF2 (1994) is the ancestor, and FV and StF were built on its engine — but the rest of
+> the low-RAM layout did *not* carry over, so each was **measured** advancing by exactly 1 per
+> `module_main` call rather than assumed.
+
+### 14.8c Host RNG seeding — all five streams, before the reset
+
+The ROM's `rand` is HLE'd onto a host Mersenne Twister, so two machines roll different numbers unless YAMP seeds them from the shared match seed. Three defects in that, all found 2026-08-02 and all fixed:
+
+**There are FIVE generators, not one.** Each module builds its holder identically (StF `FUN_180064820`, VF2 `FUN_18005EF00`): allocate, write a count of **5**, vector-construct five `0x18`-byte objects, seed them from the performance counter. The state pointer sits at `+0x08` within each object, so the slots are `0x08 + N*0x18` — `0x08, 0x20, 0x38, 0x50, 0x68`. YAMP seeded one (StF) or two (FV, VF2); the rest kept their **wall-clock** seed and therefore differed between peers from the moment the module loaded. They were missed because the streams were derived by inspecting the HLE handlers, which only reveals what the ROM itself draws from — module code uses the others. The holder states its own count outright.
+
+**Seeding must happen BEFORE the board reset.** It used to run at the barrier, reasoned as "seeding consumes no emulated frames, which is why it can happen here while the reset could not". That was about cost and missed what matters: order. The reset makes the ROM re-run its whole initialisation, and that initialisation draws from the RNG — so every one of those draws came from the wall-clock seed. Measured: the two boards' high-score tables came out in different orders. It is now seeded before the reset, and **again** at the barrier — the second pass is a safety net that puts both peers in an identical generator state at frame 0 regardless of how many draws each boot consumed, since the post-reset boot is free-running rather than lockstepped.
+
+**All streams must seed, not any.** `SeedHostRng` returned "any succeeded", so a game whose second generator failed its sanity check reported success and started a half-seeded round — the exact silent desync the per-stream list exists to prevent. It is now all-or-nothing and logs each stream.
+
+> StF hid all three: its second ROM-facing stream is the VS stage picker (hook 22), gated on `is_vs_mode`, off by default. Latent, not absent. **StF and FV have not been re-verified on two machines since these fixes.**
+
+### 14.9 Room game flags — `DAMAGE`, `VERSION`, and the pattern for cabinet settings
 
 Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NORMAL` by default and `REAL` for the harder damage scaling most competitive players prefer. It is exposed as a YAMP arcade dip switch and, because it changes what the ROM computes from a hit, it is also the first setting that had to be made a property of the **room**.
 
@@ -1013,7 +1077,13 @@ Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NO
 
 **In the UI.** The room browser gains a **Damage** column, because it is not a preference a joiner keeps — it is how that match will play, and the two settings are very different games. The lobby's in-room panel states it for both players (`(set by the host)` for the guest). The dip switch itself is **frozen once a room exists** and shows the room's live value read-only: it is published at creation, so from that moment it describes the match rather than the machine, and letting it move could only mean a value that is silently ignored or one peer changing a damage rule mid-match. Everything before a room — offline, connecting, or logged in and browsing — stays editable, which is where the choice belongs. The `-net-host` harness path publishes the local setting too, so a command-line pair plays under the same rules the lobby would have produced.
 
-**Generalising.** Any future cabinet setting that changes the simulation follows this shape: a bit in `flagAttr`, published at create, adopted from the reply, resolved by one `net::Effective*` function, frozen in the UI for the life of the room, and applied on the module thread once per emulated frame.
+**The second one: Virtua Fighter 2's 2.0 / 2.1 version.** VF2 ships as two mechanically different games, so a mismatch desyncs. The setting is `m2ftg_config_t.is_vf20` (config `+0x07`, `DLL+0x6263F7`), published as `YAMPNET_ROOM_FLAG_VF2_VERSION20` and resolved by `net::EffectiveVf2Version20`.
+
+Two things made it cheaper than DAMAGE. **Adding a flag bit is not an ABI change** — the plugin carries `game_flags` verbatim (`dst.game_flags = src.flag_attr`) and never interprets it, so an existing `yampnet.dll` handles the new bit correctly. And it needs **no relaunch** despite `is_vf20` being a launch-time config field: its only reader is HLE hook 8 (`check_sram_all+0x47C`), the backup-RAM injector, which re-reads it every time the ROM initialises the board — so `NetSession` writes the config byte immediately **before** the round-start `ResetBoard()` and the game's own injector does the rest. Poking the operator block directly would have been the wrong mechanism.
+
+> **The gap this exposed.** Five VF2 config bytes reach the simulation — difficulty (`+0x04`), country (`+0x05`), version (`+0x07`), free play (`+0x09`), VS mode (`+0x0A`) — and only version is published. The same is true of StF, which publishes DAMAGE but not difficulty, country, free play or VS mode. Two installs that happen to agree hide it. Publishing the rest is unfinished work, and difficulty/country need more than one bit each, so it is a small packing job rather than a flag apiece.
+
+**Generalising.** Any future cabinet setting that changes the simulation follows this shape: a bit in `flagAttr`, published at create, adopted from the reply, resolved by one `net::Effective*` function, frozen in the UI for the life of the room, and applied where the module will actually read it — for a live RAM value that is the module thread once per emulated frame; for a config byte it is before the board reset.
 
 ---
 
@@ -1046,15 +1116,14 @@ Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NO
 | | `P<n>Controller` | int | — | **Legacy** XInput slot; honoured only when the id key is absent, rewritten in the new form on the next save |
 | | `P<n>Key<Action>` | int (VK) | see `DEFAULT_KEY_BINDS` | Live |
 | | `P<n>Pad<Action>` | int (`PadButton`) | see `DEFAULT_PAD_BINDS` | Live |
-| `VF2` | `Version20` | 0/1 | 0 | `is_vf20`. Restart |
-| | `DisablePepsi` | 0/1 | 0 | Restart |
+| `VF2` | `Version20` | 0/1 | 0 | `is_vf20`. Applied live at a netplay round start (before the board reset); otherwise restart. Published as a room flag — see §14.9 |
 | `Debug` | `DoNotApplyPatches` | 0/1 | 0 | |
 | | `UseDebugD3D` | 0/1 | 0 | |
 | | `ShowDLLDebugFeatures` | 0/1 | 0 | dw debug windows |
 | | `LoadLooseRomFiles` | 0/1 | 0 | Also gates `game.elf` parsing |
 | | `SetGameDebugFlag` | 0/1 | 0 | Live |
 | | `FixBackupRamTimeIndex` | 0/1 | **1** | Corrects the module's backup-RAM TIME byte (§9.3). Restart. Off = GAME ASSIGNMENTS freezes the emulator |
-| | `DisabledHleHooksLo` / `...Hi` | hex u64 | **`HleHooks::DEFAULT_DISABLE_MASK`** (bits 16 **and 17** set) | Bit i = hook i. **Core bits stripped on save and load.** Default is no longer 0 — see §9.3; an ini from an older build carries an explicit mask (`0`, or bit 16 only) and keeps hook 16 and/or 17 enabled until **Restore defaults** is pressed or the lines are deleted |
+| | `DisabledHleHooksLo` / `...Hi`<br>(and `.FV` / `.VF2`-suffixed twins) | hex u64 | **`HleHooks::DefaultDisableMask()`** — StF: bits 16 **and 17**; FV/VF2: 0 | Bit i = hook i. **Keyed per game**, because the value is a set of bit INDICES into one game's hook table and every game's table differs — `settings.ini` is shared by every title, so one key would carry StF's choices into Fighting Vipers and disable whatever FV keeps at those indices (a Content hook in one game is a Core hook in the other). StF keeps the unsuffixed names so existing files still load. **Core bits stripped on save and load.** Default is no longer 0 — see §9.3; an ini from an older build carries an explicit mask (`0`, or bit 16 only) and keeps hook 16 and/or 17 enabled until **Restore defaults** is pressed or the lines are deleted |
 | `HleRetarget` | `Hook<i>` | text | `""` | Per-hook site: literal offset, `off`/`none`/`-`, or `symbol[+hexoff]`. Read once before `module_start`; **never written back**, so a hand-authored section survives Apply |
 | `Netplay` | `Server` | string | `""` | RPCN host |
 | | `Npid` | string | `""` | |
@@ -1072,11 +1141,17 @@ Sonic the Fighters' service menu has a **GAME ASSIGNMENTS → DAMAGE** item, `NO
 | Path | Change |
 |---|---|
 | `source/Utils/Patterns.h` | Adds `#include <string>`. This is a one-line fix **inside the `ModUtils` submodule**, so it cannot be recorded by this repository — the gitlink only stores a commit SHA, and there is no upstream commit containing it. It must be pushed to `CookiePLMonster/ModUtils` (or a fork) and the submodule pointer then bumped here. Until that happens the file shows as `Submodule source/Utils contains modified content` and a fresh clone gets the unfixed header. **A fresh clone needs this to build.** |
-| `source/m2ftg/LJ/{Patch.cpp,Patch.h,LJHost.cpp}` | `FixBackupRamTimeIndex` — the GAME ASSIGNMENTS freeze fix (§9.3), 2026-08-01. Ordinary source, committable as-is. Built clean and smoke-run (StF, 600 frames, exit 0, `module_stop -> 0x0`); **not yet confirmed by opening the page by hand**, which the automated harness cannot do because it has no way to drive the TEST switch. |
 
-The Escape / Exit launcher work described in §6.3 and the `IsSettingsOpen()` / `CloseSettings()` accessors landed in commit `9baa02e`; there is no separate uncommitted delta for them.
+Everything else described in this document is committed.
 
----
+### Known-incomplete, deliberately
+
+- **VF2 netplay is wired but disabled** (`DwGame::netplayReady = false`). The two simulations run one emulated frame apart; the mechanism and the full ruled-out list are in [`vf2-hle-hooks.md`](vf2-hle-hooks.md). Flip the flag when it is closed.
+- **VF2's service menu corrupts the geometry on exit** — a board soft-reset the host does not survive. Same doc.
+- **Only one cabinet setting per game is published to the room.** Difficulty, country, free play and VS mode still are not, for StF or VF2 (§14.9).
+- **StF and FV have not been re-verified on two machines** since the RNG seeding fixes (§14.8c). A VS-mode round is the case that actually exercises what changed.
+- **Netplay credentials share `settings.ini`** with per-game settings, so resetting game settings destroys the account configuration. They belong in their own file.
+- **HLE hook hit-counters read 0 for VF2**, because the instruction-fetch hook that feeds them is LJ-only. Absent rather than wrong, but it looks broken in the settings panel.
 
 ## 17. Suggested reimplementation order
 

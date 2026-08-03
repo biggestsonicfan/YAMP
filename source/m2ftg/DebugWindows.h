@@ -138,5 +138,36 @@ namespace m2ftg
 		// no measured counter, which disables netplay for it rather than anchoring on a value
 		// that is not a frame count.
 		uint32_t RomFrameCounterAddress();
+
+		// Whether this game can currently sustain a netplay session.
+		//
+		// Separate from RomFrameCounterAddress() on purpose: VF2's counter IS measured and
+		// correct, but VF2 still diverges by one emulated frame (see docs/vf2-hle-hooks.md), so
+		// it must not offer netplay while that is unresolved. Tying the two together would mean
+		// either shipping a known-diverging game or throwing away a measured fact to express
+		// "not yet".
+		bool NetplaySupported();
+
+		// Sets the module's is_vf20 config byte, which selects Virtua Fighter 2 version 2.0 or
+		// 2.1. The two are different games mechanically, so netplay has to agree on it.
+		//
+		// Deliberately NOT a live setting: nothing re-reads it per frame. The module's
+		// backup-RAM injector (HLE hook 8) reads it each time the ROM initialises the board, so
+		// a write here takes effect on the NEXT board init - which is exactly what a netplay
+		// round already does before frame 0. Writing it without a reset changes nothing.
+		//
+		// Returns false, having written nothing, for a game with no such byte.
+		bool SetVf2Version20(bool version20);
+
+		// The value this peer submits to the desync canary for the current emulated frame.
+		//
+		// StF and FV submit the ROM's frame_counter, which advances exactly once per
+		// module_main in those games. VF2 hashes a slice of work RAM instead: its counter is
+		// bumped by an interrupt that can land either side of the module_main boundary, so it
+		// jitters by a frame even when the two simulations are identical - measured, and it was
+		// producing false desyncs on a game that was in sync. See the DwGame comment for the
+		// evidence. 0 if no game is running.
+		uint32_t StateCheckValue();
+
 	}
 

@@ -5,6 +5,7 @@
 #include "../YAMPSettings.h"
 #include "../net/NetPlugin.h"
 
+
 namespace
 {
 	// A few frames into the ROM's main loop: far enough past the post-reset boot to be steady
@@ -68,7 +69,7 @@ void m2ftg::NetSession::Drive()
 	// doubles as the "is this game supported" test: a game with no measured counter cannot
 	// anchor a round and must not try.
 	const uint32_t frameCounterAddr = RomFrameCounterAddress();
-	const bool netplayPossible = frameCounterAddr != 0;
+	const bool netplayPossible = frameCounterAddr != 0 && NetplaySupported();
 
 	// Room is up, but only start when we are allowed to: the command-line harness auto-starts,
 	// a UI session waits for the host's Start button.
@@ -84,20 +85,53 @@ void m2ftg::NetSession::Drive()
 	{
 		if (m_prep == Prep::Idle)
 		{
-			// Reset first, then let the ROM come back up on its own. The texture budget is
-			// pinned NOW rather than at frame 0 so the post-reset boot runs under the same
-			// rules on both machines too.
+			// Adopt the ROOM's cabinet settings before resetting, not after: the module's
+			// backup-RAM injector reads them while the board initialises, so this is the only
+			// window in which they can reach the simulation without relaunching the game.
+			// A host whose own switch has not moved sees no change; a guest silently plays the
+			// host's version instead of its own, which is the whole point.
+			const YAMPSettings* preset = gGeneral.GetSettings();
+			SetVf2Version20(net::EffectiveVf2Version20(preset != nullptr && preset->m_vf2Version20));
+
+			// SEED THE RNG BEFORE THE RESET, NOT AFTER.
+			//
+			// This used to happen at the barrier, on the reasoning that seeding "consumes no
+			// emulated frames, which is why it can happen here while the reset could not". That
+			// reasoning was about cost and missed the thing that actually matters: ORDER. The
+			// reset makes the ROM re-run its whole initialisation - and that initialisation
+			// DRAWS from the host RNG. Seeding afterwards leaves every one of those draws coming
+			// from the module's own wall-clock seed, so the two peers build different initial
+			// state and are already divergent before frame 0.
+			//
+			// Measured 2026-08-02: with the seeding late, the two boards' high-score tables came
+			// out in different orders (readable as three-letter initials at RAM 0x59C194+, on a
+			// 0x10 stride) along with ~50 bytes of related init state. That is ROM
+			// initialisation, not gameplay, and it is exactly what the post-reset boot builds.
+			//
+			// Seeding here is safe: the match seed is known as soon as the room exists (the host
+			// generates it at creation, the guest adopts it on join), and the generators are
+			// constructed once per process (`if (holder == 0)`), so a board reset does not
+			// discard them.
+			const uint32_t preSeed = net::IsAvailable()
+				? net::Api()->get_match_seed(net::Session()) : 0;
+			const bool didSeed = SeedHostRng(preSeed);
+
+			// Then reset, and let the ROM come back up on its own - now drawing from a generator
+			// both peers agree on. The texture budget is pinned NOW rather than at frame 0 so
+			// the post-reset boot runs under the same rules on both machines too.
 			const bool didReset = ResetBoard();
 			const bool didBudget = SetTextureBudgetDeterministic(true);
-			if (didReset && didBudget)
+			if (didReset && didBudget && didSeed)
 			{
 				m_prep = Prep::Resetting;
-				net::Logf("board reset; waiting for the ROM to restart");
+				net::Logf("RNG seeded 0x%08X, board reset; waiting for the ROM to restart",
+				          preSeed);
 			}
 			else
 			{
-				net::Logf("ABORT: board reset failed (reset=%d texBudget=%d)",
-				          static_cast<int>(didReset), static_cast<int>(didBudget));
+				net::Logf("ABORT: round prep failed (seed=%d reset=%d texBudget=%d)",
+				          static_cast<int>(didSeed), static_cast<int>(didReset),
+				          static_cast<int>(didBudget));
 				net::ClearStartRequest();
 			}
 		}
@@ -153,12 +187,13 @@ void m2ftg::NetSession::Drive()
 		const uint32_t seed = api->get_match_seed(sess);
 		const int32_t me = api->get_local_player(sess);
 
-		// The board was already reset and settled at the anchor above; all that is left is the
-		// RNG. Seeding writes the Mersenne Twister state directly and consumes no emulated
-		// frames, which is exactly why it can happen here while the reset could not: the ROM's
-		// `rand` is HLE'd onto a host generator that is otherwise seeded per process, so
-		// without this each machine rolls its own numbers and the CPU behaves differently on
-		// each client with identical inputs.
+		// RE-seed. The generators were already seeded before the reset, which is what makes the
+		// ROM's post-reset initialisation deterministic (see the note there). This second pass
+		// is a safety net rather than the main event: it puts both peers into an identical RNG
+		// state at frame 0 regardless of how many draws each one's init happened to consume, so
+		// a difference in draw COUNT during the boot cannot carry into the match.
+		//
+		// Same seed value on both sides, so re-seeding cannot itself introduce a difference.
 		const bool didSeed = SeedHostRng(seed);
 
 		uint32_t romFrame = 0;
@@ -233,8 +268,8 @@ bool m2ftg::NetSession::Step(m2ftg_execute_info_t& info)
 	uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
 	if (net::Api()->get_desync(net::Session(), &dFrame, &dLocal, &dRemote) != 0)
 	{
-		net::Logf("DESYNC at frame %u (local frame_counter=%u, peer=%u) - ending the round; the "
-		          "two emulators stopped agreeing here", dFrame, dLocal, dRemote);
+		net::Logf("DESYNC at frame %u (local=%u, peer=%u) - ending the round; the two emulators "
+		          "stopped agreeing here", dFrame, dLocal, dRemote);
 		EndRound(nullptr);
 		advanceFrame = true;
 	}
@@ -248,14 +283,15 @@ void m2ftg::NetSession::EndFrame()
 		return;
 	}
 
-	// Desync canary. The ROM's frame_counter advances exactly once per emulated frame
-	// (measured), so at a given netplay frame it MUST read the same on both machines. It is the
-	// cheapest value that is both guaranteed-equal and sensitive: it stops advancing in
-	// lockstep the moment one side executes a different amount of game code.
-	uint32_t stateCheck = 0;
-	if (ReadEmulatedRam32(RomFrameCounterAddress(), stateCheck))
-	{
-		net::Api()->submit_state_check(net::Session(), m_frame, stateCheck);
-	}
+	// Desync canary: at a given netplay frame this MUST read the same on both machines, and it
+	// stops matching the moment one side executes a different amount of game code.
+	//
+	// WHAT gets submitted is per-game, because the obvious choice is not universally sound. StF
+	// and FV submit the ROM's frame_counter, which in those games advances exactly once per
+	// module_main. VF2's does not: its counter is bumped by an interrupt that can land either
+	// side of the module_main boundary depending on host timing, so it jitters by a frame while
+	// the simulations stay identical - which produced false desyncs on a game that was in sync.
+	// VF2 therefore submits a hash of actual game state instead. See StateCheckValue().
+	net::Api()->submit_state_check(net::Session(), m_frame, StateCheckValue());
 	++m_frame;
 }

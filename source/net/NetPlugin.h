@@ -103,6 +103,9 @@ namespace net
         // The cabinet settings this room is played under - the host's, adopted by every peer.
         // Meaningless unless there is a room; the lobby only shows them from IN_ROOM onwards.
         bool real_damage = false;
+        // VF2 only: the room is played as version 2.0 when set, 2.1 when clear. The two
+        // versions are different games mechanically, so a mismatch desyncs.
+        bool vf2_version20 = false;
     };
     Status GetStatus();
 
@@ -113,7 +116,7 @@ namespace net
     void Disconnect();
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage.
-    bool HostRoom(const char* password, bool realDamage);
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -127,6 +130,8 @@ namespace net
         // The host's DAMAGE setting, shown in the browser so the room can be judged before
         // joining it: it is not a preference the joiner gets to keep, it is how that match plays.
         bool real_damage = false;
+        // The host's VF2 version, shown for the same reason: it is how that match plays.
+        bool vf2_version20 = false;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();
@@ -155,6 +160,9 @@ namespace net
     // authoritative for the host too - it changes nothing for a host whose switch has not moved,
     // and it stops a mid-session switch flip from silently splitting the pair.
     bool EffectiveRealDamage(bool localSetting);
+    // The same rule for VF2's version flag, and for the same reason: 2.0 and 2.1 are different
+    // games mechanically, so two peers on different versions diverge from identical inputs.
+    bool EffectiveVf2Version20(bool localSetting);
 
     // Called by the host loop when a round ends because the other player went away. Latches the
     // reason for the dialog; harmless to call repeatedly.

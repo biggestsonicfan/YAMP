@@ -302,7 +302,6 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"VF2";
 		m_vf2Version20 = GetPrivateProfileIntW(SECTION_NAME, L"Version20", m_vf2Version20, iniPath.c_str()) != 0;
-		m_vf2DisablePepsi = GetPrivateProfileIntW(SECTION_NAME, L"DisablePepsi", m_vf2DisablePepsi, iniPath.c_str()) != 0;
 	}
 }
 
@@ -395,6 +394,5 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"VF2";
 		WritePrivateProfileIntW(SECTION_NAME, L"Version20", m_vf2Version20, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"DisablePepsi", m_vf2DisablePepsi, iniPath.c_str());
 	}
 }

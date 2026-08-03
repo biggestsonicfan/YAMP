@@ -24,7 +24,7 @@ namespace m2ftg
 
         // module_start copies 0x100C bytes from params+0x38 into its config global (DAT_1801ed490).
         // Field names from YLAD's symbolized scene ctor (config.kind/difficulty/country/
-        // is_acf_skip/is_vf20/is_disable_pepsi/is_freeplay/is_vs_mode/is_sram_restore);
+        // is_acf_skip/is_vf20/is_freeplay/is_vs_mode/is_sram_restore);
         // byte offsets corrected 2026-07-27 against the StF DLL's actual field readers —
         // the settings fields are u8 each, so country is +0x05, NOT +0x08:
         //   +0x00 kind: {0=vf2, 1=fv, 2=stf, 3=omg, 4=mr} — also selects "%s/rom/%s_rom.par"
@@ -33,7 +33,20 @@ namespace m2ftg
         //          writes it into the game-assignments image: backup SRAM 0x1D03352 + working
         //          RAM 0x59C352 (both addresses user-verified against the live game)
         //   +0x06 is_acf_skip — gates the "rom/sound/stf.acf" load (FUN_180041570 et al.)
-        //   +0x07 is_vf20, +0x08 is_disable_pepsi — VF2-only, zero readers in the StF DLL
+        //   +0x07 is_vf20 — VF2 version 2.0 when set, 2.1 when clear. Zero readers in the StF
+        //          DLL; in the YLAD VF2 DLL its ONLY reader is the backup-RAM injector (HLE hook
+        //          8, check_sram_all+0x47C), which re-reads it at every board init and folds it
+        //          into the operator byte — so it can be changed without relaunching, as long as
+        //          the board is reset afterwards. Netplay publishes it as a room flag.
+        //   +0x08 WAS is_disable_pepsi, removed 2026-08-02 — it is a DEAD FIELD in every module
+        //          YAMP hosts. Zero readers in the StF DLL, and zero in the YLAD VF2 one: the
+        //          only reference in the whole VF2 module is the config default-init
+        //          (0x18000201B, `mov dword [config+0x08],0x100`), which never reads it back.
+        //          Contrast +0x0A and +0x0B, which do have real readers, so this is not an
+        //          artefact of how the config is accessed. VF2's arcade release carried Pepsi
+        //          stage advertising, so the switch presumably drove a build that still had the
+        //          artwork; this one does not, and the setting it fed did nothing at all.
+        //          The byte survives as `reserved_08` because the layout is the module's ABI.
         //   +0x09 is_freeplay
         //   +0x0A is_vs_mode — LJ's "2P quick match" switch (StF readers RE'd 2026-07-26):
         //          FUN_180052ec0 force-inserts 5 credits into BOTH coin counters (game RAM
@@ -49,7 +62,10 @@ namespace m2ftg
             uint8_t country = 0;
             uint8_t is_acf_skip = 0;
             uint8_t is_vf20 = 0;
-            uint8_t is_disable_pepsi = 0;
+            // WAS is_disable_pepsi. Kept as padding, NOT deleted: this struct is the module's
+            // own config ABI, so removing the byte would shift is_freeplay and everything below
+            // it by one. Left zero, which is what the module's own default-init writes.
+            uint8_t reserved_08 = 0;
             uint8_t is_freeplay = 1;
             uint8_t is_vs_mode = 0;
             uint8_t is_sram_restore = 0;

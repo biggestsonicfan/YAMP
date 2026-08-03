@@ -839,7 +839,6 @@ namespace m2ftg
 			// generation — the live capture decoded this DLL's copied config against it exactly —
 			// so the YLAD VF2 settings apply here unchanged.
 			params.config.is_vf20 = settings->m_vf2Version20 ? 1 : 0;
-			params.config.is_disable_pepsi = settings->m_vf2DisablePepsi ? 1 : 0;
 
 			ApplyAspectSetting(window, settings->m_m2Aspect);
 

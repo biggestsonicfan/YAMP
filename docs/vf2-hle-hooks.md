@@ -156,23 +156,159 @@ generic note — they are classified `Content` provisionally, not from reading e
 
 **Kind counts:** Core 14, Content 24 (provisional), Inert 18, Removed 9, Host 2.
 
-## What netplay would still need
+## Netplay status: WIRED, DISABLED, one open cause
 
-Unlike Fighting Vipers, VF2 is not a free ride. FV inherited netplay because it already shared
-the entire LJ hosting path — `LJHost.cpp`'s `GameLoop`, which is where the netplay session driver
-lives (round-prep state machine, barrier, pad injection, desync canary, ~250 lines). VF2 does not
-use that host at all: `source/m2ftg/YLAD/VF2.cpp` has its own 700-line `GameLoop` with no `net::`
-calls in it.
+VF2 drives the shared `m2ftg::NetSession` and every determinism helper works, but netplay is
+**off** (`DwGame::netplayReady = false`) because the two simulations run **one emulated frame
+apart**. StF and FV do not. Turn it on by flipping that flag once the cause below is closed.
 
-So the work splits in two, and only the first half is done:
+### What the divergence actually is
 
-1. **Data** — the addresses above. Adding a `GameHooks` row and a `DwGame` row is mechanical, but
-   both tables key off `m2ftg::CurrentGame()`, which is the **LJ** `GameDesc` table (StF/FV/MR
-   only). VF2 has no entry there, and `ModuleBase()` in both files resolves the DLL by that name.
-2. **Structure** — the netplay driver has to become callable from a second game loop. The clean
-   version is to lift it out of `LJHost.cpp::GameLoop` into something both loops drive (and the
-   K2 host after that); the quick version is to duplicate it into `VF2.cpp`, which would leave two
-   copies of the determinism sequencing to keep in step.
+Measured by dumping the full 1 MB of work RAM on both peers at the same netplay frame and diffing
+byte for byte. The differences are *small deltas on moving values* - floats a hair apart, counters
+off by one - not garbage and not unrelated values:
 
-Until (2) exists, the recon above is inert: every determinism helper would work, and nothing
-would call them.
+```
+0x500020   0E -> 0F    frame_counter, delta +1
+0x500024   F5 -> F4    countdown, delta -1
+0x503030   0B -> 0C    delta +1
+0x59C174+              the ranking display, scrolled by one entry
+```
+
+Everything else follows from that one-frame offset. It **oscillates** rather than drifts - the two
+peers trade the lead, each missing a VBLANK every ~20 frames at different frames - which is why
+gameplay looks identical (CPU behaviour and round timers matched across two full rounds) and why
+it still must not ship: inputs applied a frame apart can change an outcome.
+
+### The mechanism, as far as it is understood
+
+The emulated i960's timers are driven by **instruction count, not wall clock**:
+
+- `FUN_18004C170` handles writes to guest `0xF00000 + idx*4` and converts the period the ROM asks
+  for into instructions: `count = ticks * (576000 / 25000000)`, i.e. 0.02304 instructions per
+  25 MHz tick. Constants at `0x180166208` (576000, instructions/sec) and `0x18016620C` (25000000).
+  It stores the count at `ctx+0x194 + idx*8` and sets an enable byte at `ctx+0x190 + idx*8`.
+- `FUN_1800210C0` is the CPU loop. It executes instructions in batches of **12**, then decrements
+  all four timer channels by 12 and raises an interrupt (`FUN_180021370`) for any that expire and
+  whose mask bit is set in `ctx+0x18C`. It returns - ending the frame - the moment the ROM's
+  frame-yield flag `ctx+0x1B0` is set (by hook 2 `main_loop` and hook 4).
+
+A frame is roughly **9,600 instructions** and the timers are checked every **12**, so the frame
+timer expires within about one batch of the yield. **A small difference in instructions executed
+flips whether the interrupt lands before or after the yield** - which is exactly a one-frame
+counter difference.
+
+### The gap
+
+**What host-dependent input changes the instruction count has not been identified.** Everything
+inside `module_main` appears instruction-driven and therefore deterministic. The vsync wait spins
+(hook 7 returns `-8` to re-execute) so it is the obvious suspect, but its exit condition is a
+guest-RAM value, and nothing has been shown to write that value from outside the instruction
+stream. VF2 reads guest `0x500000`; StF reads guest `0x500018`. Neither is a YAMP-written global -
+an earlier guess that `gs::sm_context->frame_counter` drives them is **wrong**.
+
+### Ruled out - do not re-investigate
+
+| Hypothesis | How it was eliminated |
+|---|---|
+| RNG not seeded | All five streams now seeded (see below), before the reset AND at the barrier |
+| Cabinet settings differ | Verified identical on both machines; divergence persisted |
+| Board reset leaves stale RAM | `FUN_180047500` → `FUN_180047610` memsets the full 1 MB |
+| Texture budget not pinned | Verified patching 4 of 4 sites on the right handler |
+| Wrong desync canary | Work-RAM hash diverges too; it is a real difference, not a measurement artefact |
+| Anchor / barrier misalignment | Both peers anchor at `frame_counter=8` and hold; no leak during the hold |
+| Reset differs from StF/FV | Same routine compiled three times - same call sequence and constants |
+
+### Suggested next step: measure, do not theorise
+
+Log the four timer channels - enable byte `ctx+0x190 + idx*8` and count `ctx+0x194 + idx*8`, ctx
+pointer at `0x51F9B8` - at each `NetSession::EndFrame` on both peers, and diff. That is a direct
+readout of instructions-executed-per-frame: it names which channel diverges, by how much, and
+whether the delta is bounded. If it is bounded and small, deliberately burning or withholding
+emulated instructions to keep both boards on the same side of the boundary becomes viable.
+
+The tooling for this existed and was removed before commit: per-frame 1 MB work-RAM snapshots in a
+ring keyed by netplay frame, dumped to `yamp_ram_f<N>_p<player>.bin` on both peers when a
+divergence is reported. The ring is the part that matters - a divergence surfaces a few frames
+after the frame it names, so dumping at detection time captures two different instants and the
+diff is noise. Recover it from this commit's history if needed.
+
+### RNG: three real defects fixed along the way
+
+Not the cause of the remaining lag, but genuine and worth knowing about:
+
+1. **Only some streams were seeded.** Each module builds its generator holder the same way (VF2
+   `FUN_18005EF00`, StF `FUN_180064820`): allocate, write a count of **five**, vector-construct
+   five `0x18`-byte objects, seed them from the performance counter. State pointers sit at `+0x08`
+   within each object, so the slots are `0x08 + N*0x18` = `0x08, 0x20, 0x38, 0x50, 0x68`. YAMP
+   seeded one (StF) or two (FV, VF2) - the rest kept their **wall-clock** seed. Found by inspecting
+   only the HLE handlers, which reveals just the streams the ROM itself draws from.
+2. **Seeding happened after the reset.** The reset makes the ROM re-run its whole initialisation,
+   and that initialisation draws from the RNG - so those draws came from the wall-clock seed. Now
+   seeded before the reset, with a re-seed at the barrier so both peers enter frame 0 identically
+   regardless of how many draws each boot consumed.
+3. **`SeedHostRng` returned "any stream seeded" rather than "all".** A game whose second generator
+   failed its sanity check reported success and started a half-seeded round.
+
+StF hid all of this because its second ROM-facing stream is the VS stage picker (hook 22), gated on
+`is_vs_mode` - off by default, so the unseeded generator was never drawn from. **StF and FV have
+not been re-verified on two machines since these fixes; a VS-mode round is the case worth testing.**
+
+## Known issue: leaving the service menu corrupts the geometry
+
+**Leaving the board's service menu renders the 3D geometry wrong until YAMP is restarted** -
+models still draw, but distorted. StF and FV exit the same menu cleanly, so this is a gap in the
+VF2 host, not in the switch wiring or the emulated I/O board.
+
+Established by measurement: exiting soft-resets the emulated board. The ROM's `frame_counter` runs
+continuously to ~1215 and then restarts from 0 on the exit press. The i960 therefore re-runs its
+init and re-uploads its geometry believing it is on a fresh machine, while the host's boot-time
+state is never rebuilt - the two disagree about what is loaded, which is why the damage is
+geometry-shaped rather than a crash or a blank screen.
+
+Two leads are already eliminated, so nobody re-walks them:
+
+- The I/O hook resolves `0x180880020` - the same board pointer the port reader (`FUN_18004A4E0`)
+  and the DIP injector (hook 8) use - and only ever ANDs `io[9]`.
+- The upload-budget timebase is **not** a stale load-time stamp. It is `TaskM2E`'s own field,
+  re-stamped at the top of every frame step (`0x180051045: mov [rbx+0x60],rax`).
+
+Next measurement: whether the DLL's boot-state dword (`0x641890`) stays at 2 while the ROM's
+counter restarts. If it does, the DLL's board init never re-ran, and the fix is to notice the
+counter going backwards and rebuild whatever the host establishes at boot. Reproduces headlessly
+in about three minutes by scripting two short TEST presses (TEST is momentary, not held).
+
+## Netplay and the 2.0 / 2.1 version flag
+
+VF2 ships as two mechanically different games, and two peers on different versions diverge from
+identical inputs. The version is `m2ftg_config_t.is_vf20` (config `+0x07`, so `DLL+0x6263F7`), and
+the room now carries it: the host publishes its setting as `YAMPNET_ROOM_FLAG_VF2_VERSION20` and
+every peer adopts it, exactly as Sonic the Fighters does with DAMAGE.
+
+Two things made this cheap. Adding the bit needed **no plugin change and no ABI bump**, because
+yampnet carries `game_flags` verbatim between the room and its peers and never interprets it. And
+applying it needs no relaunch, despite `is_vf20` being a launch-time config field: the only reader
+is HLE hook 8 (`check_sram_all+0x47C`, handler `0x4ECA0`), the backup-RAM injector, which re-reads
+it every time the ROM initialises the board -
+
+```c
+bVar5 = bStack_37 | 0x10;
+if (DAT_1806263F7 == '\0') {      // is_vf20 clear = version 2.1
+    bVar5 = bStack_37 | 0x50;     // ...adds bit 0x40 to the operator byte
+}
+```
+
+so writing the config byte and letting the board init do the rest uses the game's own mechanism
+rather than poking SRAM directly. `NetSession` writes it immediately **before** the round-start
+`ResetBoard()`, which is the only window where it can reach the simulation.
+
+## Also still open
+
+- ~~GAME ASSIGNMENTS -> DAMAGE~~ **does not exist in VF2** - that was an assumption carried over
+  from Sonic the Fighters and it is wrong. VF2's desync-relevant cabinet setting is the **2.0 /
+  2.1 version flag**, which is handled: see below.
+- **VF2's game debug flag** (StF: emulated RAM `0x508000`, XOR `0x24`) is unverified, so
+  `UpdateGameDebugFlag()` and the `dw` DEBUG MENU panes stay StF-only. VF2 *has* the tree - root
+  window `0x186590`, 8 items at `0x185480`, its own 301-entry symbol table.
+- **Hook hit-counters read 0 for VF2**, because the instruction-fetch hook that feeds them
+  (`Patch.cpp`) is LJ-only. Absent rather than wrong, but it looks broken in the settings panel.

@@ -72,10 +72,11 @@ public:
 	// Defaults to the first two XInput slots, which is what the old integer setting meant.
 	std::string m_m2PadId[2] = { "xinput:0", "xinput:1" };
 
-	// Virtua Fighter 2 (YLAD m2ftg module) — the module's own VF2-only config switches
-	// (m2ftg_config_t is_vf20 / is_disable_pepsi), read once at module_start (restart to change).
+	// Virtua Fighter 2 (YLAD m2ftg module) — the module's own VF2-only config switch
+	// (m2ftg_config_t is_vf20). Read at module_start, but also re-read by the backup-RAM injector
+	// at every board init, which is how a netplay round adopts the room's version live.
+	// (A DisablePepsi switch used to live here; the module never read it — see m2ftg.h +0x08.)
 	bool m_vf2Version20 = false;
-	bool m_vf2DisablePepsi = false;
 
 	// Debug settings
 	bool m_dontApplyPatches = false;

@@ -102,7 +102,6 @@ private:
 
 	// Virtua Fighter 2 (see YAMPSettings for field semantics)
 	bool m_vf2Version20 = false;
-	bool m_vf2DisablePepsi = false;
 
 	// Netplay (see YAMPSettings for field semantics). Char buffers rather than std::string:
 	// this ImGui build ships no std::string InputText helper, and the sizes double as the limits

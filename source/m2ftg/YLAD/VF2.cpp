@@ -45,6 +45,8 @@
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/ScopedUnprotect.hpp"
 #include "../../DebugLog.h"
+#include "../NetSession.h" // the shared netplay session driver
+#include "../SystemSwitches.h" // cabinet TEST / SERVICE on the emulated I/O board
 
 namespace m2ftg
 {
@@ -101,6 +103,23 @@ namespace m2ftg
 				{ S::STF_FRAME_SUBMIT, get_module_pattern(dll, "48 83 EC 28 E8 ? ? ? ? 48 83 C4 28 E9 ? ? ? ?") }, // 180037e60
 				{ S::STF_RENDER_EXECINFO, immediate(get_module_pattern(dll, "48 81 F9 60 17 00 00 0F 85 ? ? ? ? 48 89 15 ? ? ? ?", 16)) }, // 180627400
 			};
+
+			// Frame step (0x180051030); the payload is the CALL to the per-frame I/O refresh
+			// (0x18004A060), which is what rebuilds the system-input port io[9] and is therefore
+			// the only place a host-held TEST/SERVICE line can be applied and survive.
+			//
+			// Nearly the LJ pattern, and deliberately kept as its own: VF2's build compiles the
+			// same source with a SHORT jump (74 ?) where StF and FV get a near one (0F 84 ? ? ? ?),
+			// so the call lands at +0x21 rather than +0x25. That four-byte difference is the whole
+			// reason the shared pattern missed here and the switches were assumed unavailable.
+			{
+				hook::pattern frameStep(dll,
+					"40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 3D ? ? ? ? 00 48 89 43 60 74 ? FF 05 ? ? ? ? E8");
+				if (frameStep.size() == 1)
+				{
+					symbols.Add(S::I960_IO_REFRESH_CALL, frameStep.get(0).get<void>(0x21));
+				}
+			}
 			return symbols;
 		}
 
@@ -298,6 +317,11 @@ namespace m2ftg
 			// inside it.
 			ModuleArgs::Install(dll);
 
+			// Cabinet Test / Service switches on the emulated I/O board's system port, which is
+			// what makes the board's own service menu reachable. Same I/O core as the LJ modules
+			// (guest 0x01C00002 -> io[9]); no-op if the frame-step pattern above did not match.
+			InstallSystemSwitches(dll, symbolMap);
+
 			auto Import = [&symbolMap](auto& var, auto symbol)
 				{
 					var = static_cast<std::decay_t<decltype(var)>>(symbolMap.GetSymbol(symbol));
@@ -363,6 +387,15 @@ namespace m2ftg
 			static bool s_startScreen = false;
 			static bool s_coinPending = false;
 			static bool s_startToggle = false;
+
+			// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
+			// routing and the coin protocol see one stable answer for the whole frame. The order
+			// of these four calls is part of the contract; see NetSession.h.
+			NetSession& net_ = NetplaySession();
+			const NetSession::Status netStatus = net_.GetStatus();
+			const bool netplayMatch = netStatus.inMatch;
+			const int32_t netplayLocalPad = netStatus.localPad;
+			const bool netplayLocked = netStatus.locked;
 			static int s_frame = 0;
 			static int s_lastLogged = -1;
 
@@ -416,9 +449,16 @@ namespace m2ftg
 			// path (status bit0 — same m2ftg protocol as StF/FV, see StF.cpp's RE notes).
 			static bool s_pauseMenuOpen = false;
 			{
+				// DISABLED DURING NETPLAY, exactly as in the LJ host: the module's pause path
+				// stops the emulated board, and stopping it on one machine only desyncs the pair.
+				// There is no per-player pause in an arcade match.
+				if (netplayLocked)
+				{
+					s_pauseMenuOpen = false;   // close it if a session started while it was open
+				}
 				static bool s_escWasDown = false;
 				const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-				if (escDown && !s_escWasDown)
+				if (escDown && !s_escWasDown && !netplayLocked)
 				{
 					s_pauseMenuOpen = !s_pauseMenuOpen;
 				}
@@ -432,8 +472,21 @@ namespace m2ftg
 			// Input: refresh the shared XInput snapshot, then evaluate each player's bindings
 			// via csl_pad (Input, set up on the YAMP Controls page — shared with StF/FV).
 			Input::PollPads();
-			s_pads[0].set_state(0);
-			s_pads[1].set_state(1);
+			if (netplayMatch && netplayLocalPad >= 0)
+			{
+				// ONLINE, YOU ALWAYS PLAY AS PLAYER 1 LOCALLY. The guest occupies pad slot 1 in
+				// the match, but they are the only person at that keyboard and have their own
+				// Player 1 bindings - making them remap to Player 2 just to play online would be
+				// absurd. The other slot is filled from P2 only to keep it well-formed: Step()
+				// overwrites BOTH pads from the transmitted inputs before module_main sees them.
+				s_pads[netplayLocalPad].set_state(0);
+				s_pads[1 - netplayLocalPad].set_state(1);
+			}
+			else
+			{
+				s_pads[0].set_state(0);
+				s_pads[1].set_state(1);
+			}
 			for (int i = 0; i < 2; i++)
 			{
 				memcpy(&execute_info.pad[i], &s_pads[i], 0xE0);
@@ -462,7 +515,10 @@ namespace m2ftg
 				for (int p = 0; p < 2; p++)
 				{
 					const bool down = Input::ActionDown(p, Input::Action_Coin);
-					if (down && !s_coinWasDown[p] && !g_isFreeplay && !s_pauseMenuOpen)
+					// Not transmitted, so it cannot be honoured during a session without
+					// desyncing - the coin bit would be raised on one machine only.
+					if (down && !s_coinWasDown[p] && !g_isFreeplay && !s_pauseMenuOpen
+						&& !netplayLocked)
 					{
 						execute_info.status |= 0x20;
 					}
@@ -470,11 +526,84 @@ namespace m2ftg
 				}
 			}
 
+			// Cabinet TEST / SERVICE. Suppressed while paused, and for the whole of a netplay
+			// session: neither is in the transmitted pad, so honouring them would drop one
+			// machine into the operator's menu (or feed it a service credit) while the other
+			// carried on playing.
+			//
+			// TODO(vf2): LEAVING the service menu corrupts the 3D geometry until a restart -
+			// models render, but distorted. StF and FV exit the same menu cleanly, so this is a
+			// gap in THIS host, not in the switch wiring or the emulated I/O board.
+			//
+			// What is established: exiting soft-resets the emulated board. The ROM's own
+			// frame_counter (emulated RAM 0x500020) runs continuously to ~1215 and then restarts
+			// from 0 on the exit press - measured, not inferred. So the i960 re-runs its init and
+			// re-uploads its geometry believing it is on a fresh machine, while this host's
+			// boot-time state is never rebuilt; the two then disagree about what is loaded, which
+			// is why the damage is geometry-shaped rather than a crash or a blank screen.
+			//
+			// Ruled out, so nobody re-walks them: the I/O hook resolves the right board pointer
+			// (0x180880020, the same global the port reader and DIP injector use) and only ever
+			// ANDs io[9]; and the upload-budget timebase is NOT a stale load-time stamp - it is
+			// TaskM2E's own field, re-stamped at the top of every frame step (0x180051045).
+			//
+			// Next measurement: whether the DLL's boot-state dword (0x641890) stays at 2 while
+			// the ROM's counter restarts. If it does, the DLL's board init never re-ran, and the
+			// fix is to notice the counter going backwards and rebuild whatever this host sets up
+			// at boot. Reproduces headlessly in ~3 minutes by scripting two short TEST presses.
+			{
+				bool test = false;
+				bool service = false;
+				if (!s_pauseMenuOpen && !netplayLocked)
+				{
+					for (int p = 0; p < 2; p++)
+					{
+						test = test || Input::ActionDown(p, Input::Action_Test);
+						service = service || Input::ActionDown(p, Input::Action_Service);
+					}
+				}
+				SetSystemSwitches(test, service);
+			}
+
 			// Arcade coin/start dance (see StF.cpp / YLAD method_pre_render for the reference
 			// logic). ONLY meaningful with the freeplay dip switch OFF — with is_freeplay=1 the
 			// module takes START directly and there is no coin to insert; the dance would just
 			// swallow the player's first press.
-			if (!g_isFreeplay && !s_pauseMenuOpen)
+			if (!g_isFreeplay && !s_pauseMenuOpen && !netplayMatch)
+			{
+				if (s_coinPending && s_startScreen)
+				{
+					if (!s_startToggle)
+					{
+						execute_info.pad[0].m_now |= 0x100;
+						execute_info.pad[0].m_push |= 0x100;
+					}
+					s_startToggle = !s_startToggle;
+				}
+				else
+				{
+					s_coinPending = false;
+					if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
+					{
+						execute_info.status |= 0x20;
+						execute_info.pad[0].m_now &= ~0x100u;
+						execute_info.pad[0].m_push &= ~0x100u;
+						s_coinPending = true;
+						s_startToggle = false;
+					}
+				}
+			}
+
+			// (2) Poll the plugin and run the round-start state machine, then (3) decide whether
+			// the emulator may advance. Step() also overwrites BOTH pads with the transmitted
+			// inputs, which is why it runs after the local pad fill above.
+			net_.Drive();
+			const bool advanceFrame = net_.Step(execute_info);
+
+			// Now that Step() has written both pads from the transmitted inputs, run the arcade
+			// coin/start protocol off that synchronised state - every input it consumes is
+			// identical on both machines now, so the coin bit it raises is identical too.
+			if (netplayMatch && !g_isFreeplay)
 			{
 				if (s_coinPending && s_startScreen)
 				{
@@ -509,7 +638,25 @@ namespace m2ftg
 				}
 			}
 
-			const int funcResult = module_main(sizeof(execute_info), &execute_info);
+			// (4) module_main only runs when the session says the frame may advance; a stalled
+			// lockstep frame skips it entirely, which IS the stall. output_texid is zeroed every
+			// frame and only module_main fills it in, so a stall would leave it 0 - and 0 is not
+			// a valid handle. Remember the last good id so a stall re-presents the previous frame.
+			static unsigned int s_lastOutputTexId = 0;
+			int funcResult = 0;
+			if (advanceFrame)
+			{
+				funcResult = module_main(sizeof(execute_info), &execute_info);
+				if (execute_info.output_texid != 0)
+				{
+					s_lastOutputTexId = execute_info.output_texid;
+				}
+				net_.EndFrame();
+			}
+			else
+			{
+				execute_info.output_texid = s_lastOutputTexId;
+			}
 
 			s_startScreen = (execute_info.status & 0x40) != 0;
 
@@ -641,7 +788,7 @@ namespace m2ftg
 			params.root_path = utf8Path.c_str();
 
 			// Dip switches from the YAMP settings, same policy as m2ftg::Run (module_start
-			// copies the config once, so changes need a restart). is_vf20/is_disable_pepsi are
+			// copies the config once, so changes need a restart). is_vf20 is
 			// the module's own VF2-only switches.
 			const auto* settings = gGeneral.GetSettings();
 			params.config.kind = 0;       // vf2 -> "%s/rom/vf2_rom.par"
@@ -650,7 +797,6 @@ namespace m2ftg
 			params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
 			params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
 			params.config.is_vf20 = settings->m_vf2Version20 ? 1 : 0;
-			params.config.is_disable_pepsi = settings->m_vf2DisablePepsi ? 1 : 0;
 			g_isFreeplay = params.config.is_freeplay != 0;
 
 			// VF2 is a native 4:3 Model 2 arcade game like StF/FV; apply the shared

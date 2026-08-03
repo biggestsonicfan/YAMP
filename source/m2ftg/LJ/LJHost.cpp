@@ -32,6 +32,7 @@ void AdvanceFrameStampNow();
 #include "../HleHooks.h"
 #include "../DebugWindows.h"
 #include "../NetSession.h"
+#include "../SystemSwitches.h"
 #include "../ELF/CharRamFix.h"
 #include "../ELF/ElfRom.h"
 #include "../../input/Input.h"
@@ -759,6 +760,7 @@ namespace m2ftg
                 // (4) The frame really ran, so submit the desync canary and advance the netplay
                 // frame index. Only reachable here - a stalled frame must not advance it.
                 net_.EndFrame();
+
             }
             else
             {

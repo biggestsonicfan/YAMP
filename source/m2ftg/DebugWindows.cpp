@@ -1,6 +1,7 @@
 #include "DebugWindows.h"
 
 #include "../YAMPGeneral.h"
+#include "../DebugLog.h"
 #include "ELF/ElfRom.h"
 #include "../net/NetPlugin.h"
 
@@ -13,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 
@@ -202,23 +204,66 @@ namespace
 		// rather than assumed. VF2 is the common ancestor and very likely matches, but it has
 		// not been measured, so it stays 0.
 		uint32_t romFrameCounter;
+		// See NetplaySupported(): measured-and-correct is not the same as ready to play.
+		bool netplayReady;
+		// Module-config bytes that change the SIMULATION and so must match between peers. The
+		// config block is the one module_start memcpy'd in, and the DLL re-reads it live - VF2's
+		// backup-RAM injector (hook 8) reads is_vf20 every time the ROM inits the board, which is
+		// what lets a round adopt the room's value without relaunching the game.
+		// 0 = this game has no such byte.
+		uintptr_t rvaConfigVf20;   // m2ftg_config_t.is_vf20, config+0x07
+		// ---- Desync canary -----------------------------------------------------------------
+		// What each peer submits per frame for the two to compare.
+		//
+		// StF and FV submit romFrameCounter, which in those games advances exactly once per
+		// module_main. VF2 CANNOT: measured 2026-08-02 across two full rounds whose CPU
+		// behaviour and round timers were identical on both machines, its counter still
+		// jittered - each peer missed exactly two VBLANKs over 40 frames, at DIFFERENT frames,
+		// and both ended on the same value. The ROM's game logic advances once per call, but the
+		// interrupt that bumps the counter can land either side of the call boundary depending
+		// on host timing. The counter is bookkeeping ABOUT the frame, not part of the
+		// simulation - which is why it produced false desyncs on a game that was in sync.
+		//
+		// So VF2 hashes a slice of work RAM instead: actual game state, immune to that jitter
+		// and a strictly stronger check than a single counter. Zero length keeps the counter,
+		// so StF and FV are untouched and their two-machine verification still stands.
+		uintptr_t rvaRamBasePtr;    // -> host base of emulated RAM; guest G sits at +G
+		uint32_t stateHashBase;     // guest address
+		uint32_t stateHashLen;      // 0 = submit romFrameCounter instead
 	};
 
-	constexpr uintptr_t STF_RNG_STREAMS[] = { 0x20 };
-	constexpr uintptr_t FV_RNG_STREAMS[] = { 0x20, 0x08 };
-	constexpr uintptr_t VF2_RNG_STREAMS[] = { 0x20, 0x08 };
+	// The host RNG streams, identical in all three games because it is one engine.
+	//
+	// Each module builds its generator holder the same way (StF FUN_180064820, VF2 FUN_18005EF00):
+	// allocate a block, write a count of FIVE, vector-construct five objects of 0x18 bytes, then
+	// seed them from three reads of the performance counter. The Mersenne Twister state pointer
+	// sits at +0x08 within each object, so the slots are 0x08 + N*0x18.
+	//
+	// All three lists were incomplete until 2026-08-02, because they were derived by inspecting
+	// the HLE handlers - which only reveals the streams the ROM itself draws from. Everything
+	// else kept its WALL-CLOCK seed and therefore differed between peers from the moment the
+	// module loaded: a per-machine input sitting inside the simulation's reach, which is exactly
+	// what this layer exists to eliminate.
+	//
+	// StF hid it because its second ROM-facing stream is the VS stage picker (hook 22), gated on
+	// is_vs_mode - off by default, so the unseeded generator was never drawn from. Latent, not
+	// absent. Seeding a stream nothing reads costs nothing; SeedHostRng requires all of them to
+	// succeed, so a wrong slot fails loudly rather than silently half-seeding a round.
+	constexpr uintptr_t RNG_STREAMS[] = { 0x08, 0x20, 0x38, 0x50, 0x68 };
 
 	constexpr DwGame DW_STF = {
 		L"stf-pxd-w64-d3d12_retail.dll",
 		0x6B9300, 0x58A960, 0x172660, 0x4C840,
-		0x68BB88, STF_RNG_STREAMS, std::size(STF_RNG_STREAMS),
-		0x52FD0, 0x1E8870, 76, 0x500020,
+		0x68BB88, RNG_STREAMS, std::size(RNG_STREAMS),
+		0x52FD0, 0x1E8870, 76, 0x500020, true, 0,
+		0x8F7CC8, 0, 0,   // canary: frame_counter (verified on two machines)
 	};
 	constexpr DwGame DW_FV = {
 		L"fv-pxd-w64-d3d12_retail.dll",
 		0x6BB900, 0x58CF60, 0x170750, 0x4B3E0,
-		0x68E188, FV_RNG_STREAMS, std::size(FV_RNG_STREAMS),
-		0x51C20, 0x1E5840, 95, 0x500020,
+		0x68E188, RNG_STREAMS, std::size(RNG_STREAMS),
+		0x51C20, 0x1E5840, 95, 0x500020, true, 0,
+		0x8FA2C8, 0, 0,   // canary: frame_counter (verified on two machines)
 	};
 	// Virtua Fighter 2 as shipped in Yakuza: Like a Dragon. Hosted by YLAD/VF2.cpp rather than
 	// the LJ host, which is why none of this may reach for an LJ GameDesc. See
@@ -226,8 +271,24 @@ namespace
 	constexpr DwGame DW_VF2 = {
 		L"vf2-pxd-w64-retail.dll",
 		0x641890, 0x51F9B8, 0x15C080, 0x490A0,
-		0x623788, VF2_RNG_STREAMS, std::size(VF2_RNG_STREAMS),
-		0x4F740, 0x185640, 67, 0,   // frame counter not measured yet - keeps VF2 out of netplay
+		0x623788, RNG_STREAMS, std::size(RNG_STREAMS),
+		0x4F740, 0x185640, 67,
+		// MEASURED 2026-08-02, same address as StF and FV: +1 per module_main call, sampled in
+		// two bursts 340 frames apart. Predicted by the lineage (VF2 is the common ancestor) but
+		// confirmed rather than assumed, because the rest of VF2's low-RAM layout is its own.
+		0x500020,
+		// Netplay OFF: the simulation still runs one emulated frame ahead/behind its peer. The
+		// mechanism is documented in docs/vf2-hle-hooks.md - the i960's timers are driven by
+		// INSTRUCTION COUNT and the frame timer expires within ~12 instructions of the ROM's
+		// frame yield, so a small difference flips which side it lands on. Flip this to true
+		// once that is closed.
+		false,
+		0x6263F7,   // config base 0x6263F0 + 0x07; read by hook 8 (check_sram_all+0x47C)
+		// Canary: hash work RAM, not the counter. The range deliberately SKIPS the first 0x100
+		// bytes, which is where the jittery interrupt bookkeeping lives (frame_counter 0x500020,
+		// CTRL_TIMER 0x500024). If this ever produces false positives, narrowing the range is
+		// the knob - the mechanism is right even when the bounds want tuning.
+		0x880030, 0x500100, 0x10000,
 	};
 
 	static const DwGame* CurrentDw()
@@ -945,7 +1006,6 @@ bool m2ftg::SetTextureBudgetDeterministic(bool enable)
 			++patched;
 		}
 	}
-	return patched != 0;
 }
 
 namespace
@@ -1029,17 +1089,29 @@ bool m2ftg::SeedHostRng(uint32_t seed)
 	// Deriving each stream's seed from the shared one keeps a single value on the wire while
 	// making sure two streams seeded from the same match do not run in lockstep with each
 	// other, which would be a needless correlation between unrelated draws.
-	bool anySeeded = false;
+	// EVERY stream must seed, not merely one of them.
+	//
+	// This returned "any succeeded" until 2026-08-02, which is a silent desync generator: a game
+	// whose second twister failed its sanity check still reported success, the round started, and
+	// the two peers then agreed on the fight and disagreed on the stage - the exact failure the
+	// per-stream list exists to prevent. A determinism precondition has to be all-or-nothing, and
+	// refusing the round is always better than playing a diverging one.
+	bool allSeeded = game->rngStreamCount != 0;
 	for (size_t i = 0; i < game->rngStreamCount; ++i)
 	{
 		// Weyl-style decorrelation; any fixed odd stride would do.
 		const uint32_t streamSeed = seed + static_cast<uint32_t>(i) * 0x9E3779B9u;
-		if (SeedOneTwister(holder, game->rngStreams[i], streamSeed))
+		const bool ok = SeedOneTwister(holder, game->rngStreams[i], streamSeed);
+		if (!ok)
 		{
-			anySeeded = true;
+			allSeeded = false;
 		}
+		// Logged per stream: "seeding failed" on its own does not say WHICH generator, and the
+		// second one is invisible in-game until a stage is picked.
+		DebugLogFile("[rng] stream %zu (holder+0x%02X) seed=0x%08X -> %s\n",
+			i, static_cast<unsigned>(game->rngStreams[i]), streamSeed, ok ? "ok" : "FAILED");
 	}
-	return anySeeded;
+	return allSeeded;
 }
 
 bool m2ftg::ReadEmulatedRam32(uint32_t address, uint32_t& out)
@@ -1230,6 +1302,78 @@ void m2ftg::UpdateGameDebugFlag()
 			applied = false;
 		}
 	}
+}
+
+bool m2ftg::SetVf2Version20(bool version20)
+{
+	const DwGame* game = CurrentDw();
+	uint8_t* base = ModuleBase();
+	if (game == nullptr || base == nullptr || game->rvaConfigVf20 == 0)
+	{
+		return false;
+	}
+	// The config block is plain .data the module memcpy'd in at module_start; no VirtualProtect.
+	*reinterpret_cast<volatile uint8_t*>(base + game->rvaConfigVf20) = version20 ? 1u : 0u;
+	return true;
+}
+
+uint32_t m2ftg::StateCheckValue()
+{
+	const DwGame* game = CurrentDw();
+	uint8_t* base = ModuleBase();
+	if (game == nullptr || base == nullptr)
+	{
+		return 0;
+	}
+
+	// No hash range configured: the ROM's own frame counter, as StF and FV have always used.
+	if (game->stateHashLen == 0)
+	{
+		uint32_t v = 0;
+		ReadEmulatedRam32(game->romFrameCounter, v);
+		return v;
+	}
+
+	// Hash the host buffer directly rather than through the memory-map dispatch, which costs a
+	// function pointer per dword - this runs once per emulated frame.
+	__try
+	{
+		const uint8_t* ram = *reinterpret_cast<uint8_t* const*>(base + game->rvaRamBasePtr);
+		if (ram == nullptr)
+		{
+			return 0;
+		}
+		const uint8_t* p = ram + game->stateHashBase;
+		// FNV-1a, stepped a DWORD at a time rather than a byte: it only has to be identical on
+		// both peers and sensitive to a changed byte, and the byte-wise form is a serial
+		// xor-multiply chain four times longer for no extra sensitivity. Both peers are x86-64,
+		// so the word load agrees on both without an endian conversion.
+		//
+		// Only the 32-bit RESULT goes on the wire (submit_state_check takes a uint32), so this
+		// costs no bandwidth over the single counter it replaces - it is purely local work, and
+		// it runs once per EMULATED frame, not once per host frame.
+		uint32_t h = 2166136261u;
+		const uint32_t words = game->stateHashLen / 4;
+		const auto* w = reinterpret_cast<const uint32_t*>(p);
+		for (uint32_t i = 0; i < words; ++i)
+		{
+			h = (h ^ w[i]) * 16777619u;
+		}
+		return h;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return 0;
+	}
+}
+
+
+
+
+bool m2ftg::NetplaySupported()
+{
+	const DwGame* game = CurrentDw();
+	return game != nullptr && game->romFrameCounter != 0 && game->netplayReady;
 }
 
 uint32_t m2ftg::RomFrameCounterAddress()

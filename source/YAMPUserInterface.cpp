@@ -61,11 +61,11 @@ static bool IsM2ftgGame()
 // sustain a session" - and a game that gets one starts offering the page automatically.
 static bool IsNetplayGame()
 {
-	return m2ftg::RomFrameCounterAddress() != 0;
+	return m2ftg::NetplaySupported();
 }
 
 // The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
-// test above because m2ftg_config_t's is_vf20 / is_disable_pepsi are VF2's own switches — they
+// test above because m2ftg_config_t's is_vf20 is VF2's own switch — it
 // mean nothing to Virtua On, StF, FV or MR.
 static bool IsVF2Module()
 {
@@ -316,7 +316,6 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	}
 
 	m_vf2Version20 = settings->m_vf2Version20;
-	m_vf2DisablePepsi = settings->m_vf2DisablePepsi;
 
 	// Netplay: settings hold std::strings, the page edits fixed buffers (no std::string InputText
 	// in this ImGui build), so the two are copied across at the page's edges.
@@ -775,7 +774,7 @@ void YAMPUserInterface::DrawGameStF()
 			gGeneral.GetParentGameName());
 	}
 
-	// The VF2 module's own extra config switches (m2ftg_config_t is_vf20 / is_disable_pepsi;
+	// The VF2 module's own extra config switch (m2ftg_config_t is_vf20;
 	// no readers in the StF/FV DLLs).
 	if (IsVF2Module())
 	{
@@ -789,14 +788,9 @@ void YAMPUserInterface::DrawGameStF()
 				"instead of the 2.1 revision.\nRequires a restart.");
 		}
 
-		if (ImGui::Checkbox("Disable Pepsi logos", &m_vf2DisablePepsi))
-		{
-			m_pageModified = true;
-		}
-		if (ImGui::IsItemHovered())
-		{
-			ImGui::SetTooltip("The module's own switch for removing the game's Pepsi product placement.\nRequires a restart.");
-		}
+		// A "Disable Pepsi logos" checkbox used to sit here, driving m2ftg_config_t's
+		// is_disable_pepsi. Removed 2026-08-02: the module never reads that byte, so the option
+		// did nothing at all. See m2ftg.h's config map at +0x08 for the evidence.
 	}
 }
 
@@ -1860,7 +1854,8 @@ void YAMPUserInterface::DrawNetplay()
 			// settings, not the Game page's edit buffer: an unapplied combo change would
 			// otherwise publish a value the local emulator is not running under.
 			const YAMPSettings* set = gGeneral.GetSettings();
-			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage);
+			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage,
+				set != nullptr && set->m_vf2Version20);
 		}
 		if (ImGui::IsItemHovered())
 		{
@@ -1896,7 +1891,10 @@ void YAMPUserInterface::DrawNetplay()
 		{
 			ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-			ImGui::TableSetupColumn("Damage", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+			// Column header follows the same per-game rule as the cell below it.
+			ImGui::TableSetupColumn(
+				gGeneral.GetGameId() == YAMPGeneral::GameId::VF2 ? "Version" : "Damage",
+				ImGuiTableColumnFlags_WidthFixed, 60.0f);
 			ImGui::TableSetupColumn("Locked", ImGuiTableColumnFlags_WidthFixed, 55.0f);
 			ImGui::TableSetupColumn("Room ID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
 			ImGui::TableHeadersRow();
@@ -1915,10 +1913,19 @@ void YAMPUserInterface::DrawNetplay()
 				ImGui::TableSetColumnIndex(1);
 				ImGui::Text("%u/%u", rooms[i].players, rooms[i].max_players);
 				ImGui::TableSetColumnIndex(2);
-				// The host's DAMAGE assignment, published with the room. Worth a column of its
-				// own because it is not a preference you keep on joining - it is how that match
-				// will play, and the two settings are very different games.
-				ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
+				// The host's cabinet setting, published with the room. Worth a column of its own
+				// because it is not a preference you keep on joining - it is how that match will
+				// play. Which setting that is depends on the game: Sonic the Fighters has
+				// DAMAGE, Virtua Fighter 2 has the 2.0/2.1 version flag, and those two versions
+				// are mechanically different games.
+				if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+				{
+					ImGui::TextUnformatted(rooms[i].vf2_version20 ? "2.0" : "2.1");
+				}
+				else
+				{
+					ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
+				}
 				ImGui::TableSetColumnIndex(3);
 				// A locked room cannot be entered without the password at all: the server only
 				// hands a password-less joiner a PUBLIC slot, and a locked room has none.
@@ -1974,8 +1981,16 @@ void YAMPUserInterface::DrawNetplay()
 		// What this match will actually be played under, stated for BOTH players: the host has to
 		// see what it published (the room is fixed now, so a later settings change is not it), and
 		// the guest has to see what it has just adopted.
-		ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal",
-			status.hosting ? "" : " (set by the host)");
+		if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+		{
+			ImGui::Text("Version: %s%s", status.vf2_version20 ? "2.0" : "2.1",
+				status.hosting ? "" : " (set by the host)");
+		}
+		else
+		{
+			ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal",
+				status.hosting ? "" : " (set by the host)");
+		}
 		ImGui::PushTextWrapPos();
 		if (status.hosting)
 		{
@@ -2287,7 +2302,6 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_m2VersusMode != m_m2VersusMode ||
 		settings->m_m2RealDamage != m_m2RealDamage ||
 		settings->m_vf2Version20 != m_vf2Version20 ||
-		settings->m_vf2DisablePepsi != m_vf2DisablePepsi ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
 		settings->m_useD3DDebugLayer != m_useD3DDebugLayer ||
 		settings->m_stfFixBackupTimeIndex != m_stfFixBackupTimeIndex ||
@@ -2321,9 +2335,8 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_m2PadId[player] = m_m2PadId[player];
 	}
 
-	// Consumed once by module_start (config.is_vf20 / is_disable_pepsi), hence the restart warning.
+	// Consumed by module_start (config.is_vf20), hence the restart warning.
 	settings->m_vf2Version20 = m_vf2Version20;
-	settings->m_vf2DisablePepsi = m_vf2DisablePepsi;
 
 	// Netplay: read when a session connects and when a round starts, so no restart is needed —
 	// which is why none of these appear in the needsRestart test above.

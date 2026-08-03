@@ -35,7 +35,27 @@ namespace net
 
             DebugLog("[net] %s", line);   // still goes to the debugger
 
-            if (FILE* f = nullptr; fopen_s(&f, "yampnet.log", "a") == 0 && f)
+            // NEXT TO YAMP.exe, not in the current directory.
+            //
+            // A relative path puts this wherever the running game happens to have set its CWD,
+            // and that differs per game: the VF2 host runs from the folder holding YAMP.exe, but
+            // the LJ games run from the directory holding their own module DLL - inside the
+            // parent game's install. So Sonic the Fighters' log was landing somewhere nobody
+            // would think to look, which matters because a failed session tells the player to
+            // "see yampnet.log".
+            static const std::string logPath = []
+            {
+                wchar_t exe[MAX_PATH] = {};
+                if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0)
+                {
+                    return std::string("yampnet.log");   // no worse than before
+                }
+                std::filesystem::path p(exe);
+                p.replace_filename(L"yampnet.log");
+                return p.string();
+            }();
+
+            if (FILE* f = nullptr; fopen_s(&f, logPath.c_str(), "a") == 0 && f)
             {
                 fprintf(f, "[%8lu] %s\n", GetTickCount(), line);
                 fclose(f);
@@ -463,6 +483,8 @@ namespace net
         st.error = s_api->get_error(s_session);
         st.real_damage =
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
+        st.vf2_version20 =
+            (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
         if (s_api->get_desync(s_session, &dFrame, &dLocal, &dRemote) != 0)
@@ -547,7 +569,7 @@ namespace net
         NetLog("ui: disconnected");
     }
 
-    bool HostRoom(const char* password, bool realDamage)
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20)
     {
         if (!UiMayAct())
             return false;
@@ -559,7 +581,8 @@ namespace net
         rcfg.forced_seed = 0;            // the plugin generates and distributes the match seed
         // Published once, at creation. The room - not either player's settings file - is what the
         // match is played under from here on.
-        rcfg.game_flags = realDamage ? YAMPNET_ROOM_FLAG_REAL_DAMAGE : 0u;
+        rcfg.game_flags = (realDamage ? YAMPNET_ROOM_FLAG_REAL_DAMAGE : 0u)
+                        | (vf2Version20 ? YAMPNET_ROOM_FLAG_VF2_VERSION20 : 0u);
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
         {
@@ -628,6 +651,8 @@ namespace net
             out[i].has_password = rooms[i].has_password != 0;
             out[i].real_damage =
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
+            out[i].vf2_version20 =
+                (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
         }
         return n;
     }
@@ -642,6 +667,15 @@ namespace net
         // become known when the join reply lands, and this is called from the emulator's frame
         // loop, which is running long before that.
         return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
+    }
+
+    bool EffectiveVf2Version20(bool localSetting)
+    {
+        if (!SessionInProgress())
+        {
+            return localSetting;
+        }
+        return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
     }
 
     void LeaveRoom()

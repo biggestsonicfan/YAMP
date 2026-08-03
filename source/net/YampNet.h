@@ -166,6 +166,9 @@ typedef struct yampnet_rpcn_config
 // clear of the SCE flags (all of which live in the top nibbles), so a stock RPCN server and a
 // stock RPCS3 client are unaffected.
 #define YAMPNET_ROOM_FLAG_REAL_DAMAGE 0x00000001u  // StF GAME ASSIGNMENTS -> DAMAGE = REAL
+#define YAMPNET_ROOM_FLAG_VF2_VERSION20 0x00000002u // VF2 running as version 2.0 (else 2.1)
+// Adding a bit here needs no ABI bump and no plugin rebuild: the plugin carries game_flags
+// verbatim between the room and its peers and never interprets it.
 
 typedef struct yampnet_room_config
 {
@@ -281,9 +284,13 @@ typedef struct yampnet_api
     // different things on the two screens" with no way to say WHEN they parted company.
     //
     // YAMP calls submit_state_check once per executed frame with a value that MUST match on both
-    // machines - the ROM's own frame_counter at emulated 0x500020, which advances exactly once
-    // per emulated frame and is therefore free of timing noise. The plugin carries the most
-    // recent one on every input packet and compares it against the peer's for the SAME frame.
+    // machines. WHAT that value is, is YAMP's business and varies per game: Sonic the Fighters
+    // and Fighting Vipers submit the ROM's frame_counter (emulated 0x500020), which advances
+    // exactly once per emulated frame in those titles; Virtua Fighter 2's does not - an
+    // interrupt bumps it and can land either side of a module_main boundary - so it submits a
+    // hash of work RAM instead. Either way it is one uint32, so the cost here is the same.
+    // The plugin carries the most recent one on every input packet and compares it against the
+    // peer's for the SAME frame.
     void (*submit_state_check)(yampnet_session* s, uint32_t frame, uint32_t value);
 
     // Non-zero once the peers have been seen to disagree, filling the frame and both values.

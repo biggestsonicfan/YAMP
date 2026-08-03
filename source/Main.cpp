@@ -167,8 +167,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         }
 
         m2ftg::VF2::PreInitialize();
+
+        // Optional netplay plugin, same as the LJ path: absent yampnet.dll = netplay simply does
+        // not exist. Without this the session driver VF2::GameLoop now calls is permanently
+        // inert, because net::IsAvailable() stays false.
+        net::ParseCommandLine();
+        net::Load();
+
         RenderWindow window(hInstance, dll, nShowCmd);
         m2ftg::VF2::Run(window);
+        net::Unload();
         ImGui::DestroyContext();
         return 0;
     }
