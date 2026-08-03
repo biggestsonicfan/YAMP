@@ -92,9 +92,10 @@ public:
 	bool m_stfGameDebugFlag = false;
 	// Corrects the module's injected backup-RAM TIME byte from a raw second count to the
 	// table index the ROM expects, without which the service menu's GAME ASSIGNMENTS page
-	// hangs the board (see m2ftg::FixBackupRamTimeIndex). Belongs with HLE hook 16, which is
-	// disabled by default for the same reason: this ON with that hook ON is the one
-	// combination that yields two-second rounds. Consumed once at module load.
+	// hangs the board (see m2ftg::FixBackupRamTimeIndex). Belongs with HLE hooks 16 and 17,
+	// which are disabled by default for the same reason: both read that byte as raw seconds,
+	// so this ON with either of them ON gives two-second matches (16) or a two-second attract
+	// demo (17). Consumed once at module load.
 	bool m_stfFixBackupTimeIndex = true;
 	// Which of the module's HLE ROM hooks to keep disabled (bit i = hook i, in the DLL's
 	// own table order - see m2ftg::HleHooks). A disabled hook has its original i960

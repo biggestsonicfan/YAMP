@@ -104,28 +104,47 @@ namespace m2ftg
 
 		// ---- Hooks YAMP disables by default ------------------------------------------------
 		//
-		// Hook 16 (GAME_INT+0x4) copies backup RAM +0x3351 into `time` (RAM 0x500090) on every
-		// game interrupt. Those two are not the same unit: `time` is the round length in
-		// SECONDS (the ROM's own writers put 30 there literally, and its debug setter clamps to
-		// 0..99), while +0x3351 is `time_var_array_num`, an INDEX 0..9 into time_vars[] at ROM
-		// 0x8F3C4 (10,20,30,...,99). The ROM converts - `time = time_vars[+0x3351]` in main -
-		// and the service menu edits and displays +0x3351 as an index throughout.
+		// TWO of Sonic the Fighters' hooks read backup RAM +0x3351 as RAW SECONDS, and both are
+		// wrong for the same reason. That byte is `time_var_array_num`, an INDEX 0..9 into
+		// time_vars[] at ROM 0x8F3C4 (10,20,30,...,99): the ROM's own init_game_assignments
+		// stores a literal 2 there (`mov 2, g14; stob` to backup 0x1D03351 AND work RAM
+		// 0x59C351 - read out of the ROM image, so this is the board's own convention, not an
+		// inference), the ROM converts with `time = time_vars[idx]`, and the service menu edits
+		// and displays it as an index throughout.
 		//
-		// The module gets away with the raw copy only because its own injector writes seconds
-		// into that byte too (see FixBackupRamTimeIndex in Patch.cpp, which corrects it to the
-		// index the ROM expects). With the byte fixed, this hook would force `time` to 2 - a
-		// two-second round. It has no other effect: its handler is the single store plus the
-		// module's "run the original instruction" tail, so disabling it costs nothing and hands
-		// the round length back to the ROM, where the operator's GAME ASSIGNMENTS setting
-		// actually reaches it.
+		// The module's injector wrote SECONDS (30) into it instead. That is the bug that hangs
+		// GAME ASSIGNMENTS - an index of 30 runs off the end of a 10-entry table - and
+		// FixBackupRamTimeIndex in Patch.cpp corrects the injector to write the ROM's own 2.
+		// Which leaves these two hooks reading an index as if it were seconds, so they go with
+		// it. Treat the three as a package: fix the byte, disable both hooks.
 		//
-		// Disabled by DEFAULT rather than forced, so it stays visible and re-enableable in the
-		// HLE ROM hooks list like every other hook.
+		// Hook 16 (GAME_INT+0x4) copies the byte into `time` (RAM 0x500090) every game
+		// interrupt. With the byte fixed it forces `time` to 2 - two-second MATCHES. Its handler
+		// is that single store plus the module's "run the original" tail, so disabling it costs
+		// nothing and hands the round length back to the ROM's own table conversion.
 		//
-		// Fighting Vipers has no counterpart: its GAME_INT+0x8 hook (19) is Inert, so FV's
-		// default mask is empty. DefaultDisableMask() returns the running game's, always two
-		// words, and never null - an unsupported game gets a zero mask.
+		// Hook 17 (ADV_REPLAY_WAIT1A+0x128) sets the ATTRACT DEMO's timer:
+		// game_timer = min(byte, 30) * 64 (RAM 0x500028, a 16-bit 1/64-second counter). With the
+		// byte fixed that is a two-second demo - both fighters still at full health and 01.73 on
+		// the clock, which is how it was spotted. It REPLACES the ROM instruction at 0x96AC,
+		// which is `shlo 7, 0xF, r15; stis r15, game_timer` - a hardcoded 1920 = 30 seconds. So
+		// the arcade board always runs a 30-second demo regardless of the operator's TIME
+		// setting, and this hook exists only to make the demo follow that setting instead.
+		// Disabling it restores the board's own constant, which is the authentic behaviour.
+		//
+		// Disabled by DEFAULT rather than forced, so both stay visible and re-enableable in the
+		// HLE ROM hooks list like every other hook. NOTE that a settings.ini written before this
+		// changed carries an explicit mask with only bit 16 set, and an explicit value always
+		// wins over the default - so an existing profile keeps the two-second demo until
+		// "Restore defaults" is pressed (or the DisabledHleHooks* lines are deleted).
+		//
+		// Fighting Vipers has no counterpart to hook 16: its GAME_INT+0x8 hook (19) is Inert, so
+		// FV's default mask is empty. Whether FV's attract path has an equivalent of hook 17 has
+		// NOT been checked - if FV's demo ever shows the same symptom, that is the first place to
+		// look. DefaultDisableMask() returns the running game's mask, always two words, and never
+		// null - an unsupported game gets a zero mask.
 		inline constexpr size_t HOOK_STF_GAME_INT_TIME = 16;
+		inline constexpr size_t HOOK_STF_ATTRACT_TIMER = 17;
 		const uint64_t* DefaultDisableMask();
 
 		// Restores or re-applies each hook to match the "Disable DLL HLE ROM hooks" setting.

@@ -82,7 +82,7 @@ namespace
 		{ 0x03F45C, 0x52BF0, "sound_queue_output+0x10",           Kind::Host,    true,  "Routes the sound queue to the host mixer instead of the i960 sound board." },
 		{ 0x03F268, 0x52C70, "sound_request_special",             Kind::Host,    true,  "Special (voice / announcer) sound request -> host mixer." },
 		{ 0x00B0F8, 0x52CA0, "GAME_INT+0x4",                      Kind::Host,    false, "DISABLED BY DEFAULT - re-enable it and matches last about two seconds. Copies backup RAM +0x3351 into `time` (RAM 0x500090) every game interrupt, then runs the original. The two are different units: `time` is the round length in SECONDS, while +0x3351 is time_var_array_num, an INDEX 0-9 into time_vars[] (ROM 0x8F3C4 = 10,20,30...99). The ROM converts between them (`time = time_vars[+0x3351]`), and the service menu edits that byte as an index. The module only gets away with the raw copy because its own injector wrote seconds into that byte as well - which is the bug that hung GAME ASSIGNMENTS, and which YAMP's \"Correct the module's backup-RAM TIME setting\" option fixes. With that option on (the default) this hook forces `time` to 2. Turn BOTH off together for the module's stock behaviour; leaving the fix on and this hook on is the one combination that gives two-second rounds. Disabling costs nothing else: the store is the handler's only side effect." },
-		{ 0x0096AC, 0x52CD0, "ADV_REPLAY_WAIT1A+0x128",           Kind::Host,    true,  "Supplies attract-mode replay data into emulated RAM 0x500028 from a host table." },
+		{ 0x0096AC, 0x52CD0, "ADV_REPLAY_WAIT1A+0x128",           Kind::Host,    true,  "DISABLED BY DEFAULT - re-enable it and the ATTRACT DEMO FIGHT lasts about two seconds. Sets the demo's round timer: game_timer = min(backup RAM +0x3351, 30) * 64 (RAM 0x500028, a 16-bit 1/64-second counter). It replaces the ROM's own instruction at 0x96AC, `shlo 7, 0xF, r15; stis r15, game_timer` - a HARDCODED 1920 = 30 seconds - so the arcade board always runs a 30-second demo and this hook exists only to make the demo follow the operator's TIME setting instead. It reads that byte as RAW SECONDS, exactly like hook 16, and is wrong for the same reason: with the backup-RAM TIME fix applied the byte is the ROM's own index (2), and 2*64 gives a two-second demo with both fighters at full health. Disabled, the ROM writes its own 1920 and the demo is 30 seconds." },
 		{ 0x0019BC, 0x52D70, "player_entry+0x14",                 Kind::Inert,   false, "Trap runs the original unchanged - a probe point whose body was compiled out of the retail build." },
 		{ 0x0083F4, 0x52D80, "ADV_DSP+0x108",                     Kind::Host,    false, "Clears the emulated input word during the host's attract context, then runs the original." },
 		{ 0x00A218, 0x52DA0, "SEL_INT",                           Kind::Host,    false, "Flushes queued host sound commands on entry to character select, then runs the original." },
@@ -399,7 +399,8 @@ namespace
 		L"stf-pxd-w64-d3d12_retail.dll",
 		STF_HOOKS, std::size(STF_HOOKS),
 		0x1E8870, 0x68E540, 0x9F7CD0, 0x6B9300,
-		{ 1ull << m2ftg::HleHooks::HOOK_STF_GAME_INT_TIME, 0 },
+		{ (1ull << m2ftg::HleHooks::HOOK_STF_GAME_INT_TIME)
+		| (1ull << m2ftg::HleHooks::HOOK_STF_ATTRACT_TIMER), 0 },
 		STF_CONVENTION, std::size(STF_CONVENTION),
 	};
 	constexpr GameHooks GAME_FV = {

@@ -1297,10 +1297,11 @@ void YAMPUserInterface::DrawDebug()
 				"YAMP outright - not just the game - and the process has to be killed. That is the module's stock\n"
 				"behaviour and the reason this option exists.\n"
 				"\n"
-				"IMPORTANT: leave HLE ROM hook 16 (GAME_INT+0x4) DISABLED while this is on. That hook copies the\n"
-				"same byte straight into the round timer without the table lookup, so this ON plus that hook ON\n"
-				"means every match lasts about two seconds. Both off = stock behaviour (working timer, but the\n"
-				"menu page freezes); both on is the only broken combination.");
+				"IMPORTANT: leave HLE ROM hooks 16 (GAME_INT+0x4) AND 17 (ADV_REPLAY_WAIT1A+0x128) DISABLED while\n"
+				"this is on. Both read that same byte as raw seconds instead of as a table index: hook 16 cuts\n"
+				"every MATCH to about two seconds, and hook 17 cuts the ATTRACT DEMO to two (it overrides the\n"
+				"ROM's own hardcoded 30-second demo). All three off = the module's stock behaviour (working\n"
+				"timers, but the menu page freezes).");
 		}
 	}
 
@@ -1350,10 +1351,11 @@ void YAMPUserInterface::DrawStfHleHooks()
 		m_pageModified = true;
 	};
 
-	// Deliberately "the defaults" rather than "none": hook 16 is disabled out of the box because
-	// re-enabling it alongside the backup-RAM TIME fix makes every match last about two seconds
-	// (see HleHooks.h). A button that silently re-armed that is the same trap the tooltips warn
-	// about. Re-enabling it is still one click away - its own checkbox in the list below.
+	// Deliberately "the defaults" rather than "none": hooks 16 and 17 are disabled out of the box
+	// because re-enabling either alongside the backup-RAM TIME fix cuts matches (16) or the
+	// attract demo (17) to about two seconds - see HleHooks.h. A button that silently re-armed
+	// those is the same trap the tooltips warn about. Re-enabling them is still one click away,
+	// via their own checkboxes in the list below.
 	if (ImGui::Button("Restore defaults"))
 	{
 		m_stfHleDisableMask[0] = Hle::DefaultDisableMask()[0];
@@ -1362,13 +1364,14 @@ void YAMPUserInterface::DrawStfHleHooks()
 	}
 	if (ImGui::IsItemHovered())
 	{
-		// StF ships one hook disabled; FV ships none, and saying "except the ones YAMP ships
+		// StF ships two hooks disabled; FV ships none, and saying "except the ones YAMP ships
 		// disabled" in front of an empty exception list reads as though something is hidden.
 		if (Hle::DefaultDisableMask()[0] != 0 || Hle::DefaultDisableMask()[1] != 0)
 		{
-			ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently just hook 16\n"
-				"(GAME_INT+0x4), which fights the backup-RAM TIME correction and would cut matches to\n"
-				"about two seconds. Untick it below if you want the module's stock behaviour.");
+			ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently hooks 16\n"
+				"(GAME_INT+0x4) and 17 (ADV_REPLAY_WAIT1A+0x128). Both fight the backup-RAM TIME\n"
+				"correction: 16 would cut matches to about two seconds, 17 the attract demo. Untick\n"
+				"them below if you want the module's stock behaviour.");
 		}
 		else
 		{

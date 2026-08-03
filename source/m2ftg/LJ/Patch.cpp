@@ -292,9 +292,10 @@ namespace m2ftg
 		// Fixed at the source, by correcting the constant in the module's injector rather than
 		// policing the backup RAM afterwards: the byte is the operator's setting, so the service
 		// menu must stay free to change it, and re-asserting it per frame would fight the menu.
-		// Paired with HLE hook 16 (GAME_INT+0x4), which YAMP disables by default: that hook copies
-		// the same byte into `time` raw, so with this fix applied and that hook restored the round
-		// timer becomes 2 seconds. See HleHooks.h for that half.
+		// Paired with HLE hooks 16 (GAME_INT+0x4) and 17 (ADV_REPLAY_WAIT1A+0x128), which YAMP
+		// disables by default: both read this same byte as RAW SECONDS rather than as the table
+		// index it is, so with this fix applied and either hook restored a timer collapses to 2
+		// seconds - hook 16 the match round timer, hook 17 the attract demo. See HleHooks.h.
 		void FixBackupRamTimeIndex(void* dll)
 		{
 			const YAMPSettings* settings = gGeneral.GetSettings();
