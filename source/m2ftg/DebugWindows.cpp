@@ -103,6 +103,26 @@ namespace
 	constexpr uintptr_t CTX_BANK_ROM0 = 0x10;         // void*: bank for guest 0x000000+
 	constexpr uintptr_t CTX_BANK_RAM = 0x18;          // void*: bank for guest 0x500000+
 	constexpr uintptr_t CTX_BANK_ROM2 = 0x20;         // void*: bank for guest 0x200000+
+	// The four interval timers, and the interrupt state they feed. Read out of the CPU loop's
+	// own decompilation (VF2 +0x1800210C0), which is four textually identical blocks over
+	// ctx+0x190/0x194, 0x198/0x19C, 0x1A0/0x1A4 and 0x1A8/0x1AC:
+	//
+	//     if (enable[n] && (count[n] -= 12) < 1) {
+	//         if (mask & bit) { pending |= bit; RaiseInterrupt(2); }
+	//         enable[n] = 0;
+	//     }
+	//
+	// run once per batch of TWELVE executed instructions. So `count` is an instruction budget,
+	// not a clock: the ROM asks for a period in 25 MHz ticks and the period write (VF2
+	// +0x18004C170, guest 0xF00000 + n*4) converts it with count = ticks * (576000/25000000)
+	// before storing it here. The frame-yield flag is checked INSIDE the batch and returns
+	// immediately, so the instructions of the final partial batch of a frame are never charged.
+	constexpr uintptr_t CTX_TIMER_BASE = 0x190;       // per channel: +0 enable byte, +4 int32 count
+	constexpr uintptr_t CTX_TIMER_STRIDE = 8;
+	constexpr size_t CTX_TIMER_COUNT = 4;
+	constexpr uintptr_t CTX_IRQ_PENDING = 0x188;      // uint32: raised interrupt bits
+	constexpr uintptr_t CTX_IRQ_MASK = 0x18C;         // uint32: which raised bits interrupt
+	constexpr uintptr_t CTX_FRAME_YIELD = 0x1B0;      // uint8: set by the ROM's frame yield
 	// Emulated memory map: 64 records x 0x70, each holding {read,write} pairs by access size.
 	// Slot +0x20 is the 32-bit read: void read(void* out, uint32_t addr); slot +0x28 is its
 	// paired 32-bit write: void write(uint32_t addr, const void* src). Unmapped regions
@@ -131,6 +151,10 @@ namespace
 	// bytes under it are TST_*/TIME/COUNTRY, none of which are ours to move. The dword's top byte
 	// is 0x59C353 because emulated RAM is a flat little-endian host buffer: the DLL's own 32-bit
 	// reader (0x18004F150) copies four bytes from ramBase+address in ascending order, no swap.
+	// Field offsets inside m2ftg_config_t (source/m2ftg/m2ftg.h). Only the two that a netplay
+	// round has to force are here; the block itself is 0x100C bytes.
+	constexpr uintptr_t CONFIG_IS_VF20 = 0x07;      // VF2 only: version 2.0 when set, else 2.1
+	constexpr uintptr_t CONFIG_IS_VS_MODE = 0x0A;   // all three games: credited 2P versus boot
 	constexpr uint32_t GAME_ASSIGN_FLAG_DWORD = 0x59C350;   // holds 0x59C350..0x59C353
 	constexpr uint32_t DAMAGE_REAL_BIT = 0x80u << 24;       // byte +0x33, bit 0x80
 	// ROM symbol table: 800 records of {uint64_t addr; const char* name}, sorted ascending by
@@ -211,22 +235,34 @@ namespace
 		// backup-RAM injector (hook 8) reads is_vf20 every time the ROM inits the board, which is
 		// what lets a round adopt the room's value without relaunching the game.
 		// 0 = this game has no such byte.
-		uintptr_t rvaConfigVf20;   // m2ftg_config_t.is_vf20, config+0x07
+		// Base of the module's copy of m2ftg_config_t - the 0x100C bytes module_start memcpy'd
+		// from params+0x38. Fields are written at fixed offsets from here: is_vf20 at +0x07,
+		// is_vs_mode at +0x0A. Storing the BASE rather than each field's own RVA is what makes
+		// the write checkable: +0x00 is `kind`, a small enum identifying the game, so a base that
+		// is wrong for this module is caught before anything is written rather than quietly
+		// corrupting whatever .data actually lives there. 0 = not measured, which makes every
+		// config setter a no-op.
+		uintptr_t rvaConfigBase;
+		// What +0x00 must read for rvaConfigBase to be believed: {0=vf2, 1=fv, 2=stf}.
+		uint32_t configKind;
 		// ---- Desync canary -----------------------------------------------------------------
 		// What each peer submits per frame for the two to compare.
 		//
 		// StF and FV submit romFrameCounter, which in those games advances exactly once per
-		// module_main. VF2 CANNOT: measured 2026-08-02 across two full rounds whose CPU
-		// behaviour and round timers were identical on both machines, its counter still
-		// jittered - each peer missed exactly two VBLANKs over 40 frames, at DIFFERENT frames,
-		// and both ended on the same value. The ROM's game logic advances once per call, but the
-		// interrupt that bumps the counter can land either side of the call boundary depending
-		// on host timing. The counter is bookkeeping ABOUT the frame, not part of the
-		// simulation - which is why it produced false desyncs on a game that was in sync.
+		// module_main. VF2's does not - and the reason recorded here was WRONG until later on
+		// 2026-08-02. It read the counter's behaviour ("each peer missed two VBLANKs over 40
+		// frames, at DIFFERENT frames") as the counter LYING about a simulation that was fine:
+		// "bookkeeping ABOUT the frame, not part of the simulation".
 		//
-		// So VF2 hashes a slice of work RAM instead: actual game state, immune to that jitter
-		// and a strictly stronger check than a single counter. Zero length keeps the counter,
-		// so StF and FV are untouched and their two-machine verification still stands.
+		// The opposite was true. The counter was accurate, and those calls really did advance the
+		// board by nothing - ~5% of VF2's module_main calls execute no instructions at all, which
+		// is what put the two peers a frame apart. Treating the honest signal as noise is what
+		// kept the real fault hidden; NetSession::EndFrame now acts on it directly.
+		//
+		// VF2 still hashes a slice of work RAM, because that is strictly the stronger canary -
+		// actual game state rather than one counter, and it is what caught the numbering fault
+		// within two frames. What changed is the justification, not the choice. Zero length keeps
+		// the counter, so StF and FV are untouched and their two-machine verification stands.
 		uintptr_t rvaRamBasePtr;    // -> host base of emulated RAM; guest G sits at +G
 		uint32_t stateHashBase;     // guest address
 		uint32_t stateHashLen;      // 0 = submit romFrameCounter instead
@@ -255,14 +291,16 @@ namespace
 		L"stf-pxd-w64-d3d12_retail.dll",
 		0x6B9300, 0x58A960, 0x172660, 0x4C840,
 		0x68BB88, RNG_STREAMS, std::size(RNG_STREAMS),
-		0x52FD0, 0x1E8870, 76, 0x500020, true, 0,
+		0x52FD0, 0x1E8870, 76, 0x500020, true,
+		0x1ED490, 2,   // config base (module_start's memcpy target); kind 2 = stf
 		0x8F7CC8, 0, 0,   // canary: frame_counter (verified on two machines)
 	};
 	constexpr DwGame DW_FV = {
 		L"fv-pxd-w64-d3d12_retail.dll",
 		0x6BB900, 0x58CF60, 0x170750, 0x4B3E0,
 		0x68E188, RNG_STREAMS, std::size(RNG_STREAMS),
-		0x51C20, 0x1E5840, 95, 0x500020, true, 0,
+		0x51C20, 0x1E5840, 95, 0x500020, true,
+		0x1EA590, 1,   // config base (hook 12 injects +4,+5,+9,+0xA from here); kind 1 = fv
 		0x8FA2C8, 0, 0,   // canary: frame_counter (verified on two machines)
 	};
 	// Virtua Fighter 2 as shipped in Yakuza: Like a Dragon. Hosted by YLAD/VF2.cpp rather than
@@ -277,13 +315,17 @@ namespace
 		// two bursts 340 frames apart. Predicted by the lineage (VF2 is the common ancestor) but
 		// confirmed rather than assumed, because the rest of VF2's low-RAM layout is its own.
 		0x500020,
-		// Netplay OFF: the simulation still runs one emulated frame ahead/behind its peer. The
-		// mechanism is documented in docs/vf2-hle-hooks.md - the i960's timers are driven by
-		// INSTRUCTION COUNT and the frame timer expires within ~12 instructions of the ROM's
-		// frame yield, so a small difference flips which side it lands on. Flip this to true
-		// once that is closed.
-		false,
-		0x6263F7,   // config base 0x6263F0 + 0x07; read by hook 8 (check_sram_all+0x47C)
+		// Netplay ON since 2026-08-02, verified on two machines with no reported desyncs.
+		//
+		// What had held it back was read as a one-emulated-frame divergence. It was not a
+		// divergence at all: the two simulations were bit-identical and only their frame
+		// NUMBERING disagreed, because ~5% of VF2's module_main calls advance the emulated board
+		// by nothing and netplay was counting every call as a frame. NetSession::EndFrame now
+		// declines to spend a netplay frame on a call that advanced nothing. StF and FV stall the
+		// same way but only during boot, before a round can start, which is why only VF2 showed
+		// it. Full write-up in docs/vf2-hle-hooks.md.
+		true,
+		0x6263F0, 0,   // config base; kind 0 = vf2. is_vf20 at +0x07, is_vs_mode at +0x0A
 		// Canary: hash work RAM, not the counter. The range deliberately SKIPS the first 0x100
 		// bytes, which is where the jittery interrupt bookkeeping lives (frame_counter 0x500020,
 		// CTRL_TIMER 0x500024). If this ever produces false positives, narrowing the range is
@@ -1304,17 +1346,52 @@ void m2ftg::UpdateGameDebugFlag()
 	}
 }
 
-bool m2ftg::SetVf2Version20(bool version20)
+// Writes one byte of the module's config block, but only after proving the block is where we
+// think it is.
+//
+// The config setters poke the module's own .data directly - there is no API for it - so a wrong
+// base does not fail, it corrupts. The block's first dword is `kind`, a small enum naming the
+// game ({0=vf2, 1=fv, 2=stf}), which makes the base cheap to verify at the moment of use: if it
+// does not read back as this game, nothing is written and the caller sees false. That turns a
+// mis-transcribed RVA into a setting that visibly does not apply instead of a random byte flipped
+// somewhere in the module.
+static bool WriteConfigByte(uintptr_t fieldOffset, uint8_t value) noexcept
 {
 	const DwGame* game = CurrentDw();
 	uint8_t* base = ModuleBase();
-	if (game == nullptr || base == nullptr || game->rvaConfigVf20 == 0)
+	if (game == nullptr || base == nullptr || game->rvaConfigBase == 0)
 	{
 		return false;
 	}
+	__try
+	{
+		uint8_t* config = base + game->rvaConfigBase;
+		if (*reinterpret_cast<const uint32_t*>(config) != game->configKind)
+		{
+			return false;
+		}
+		*reinterpret_cast<volatile uint8_t*>(config + fieldOffset) = value;
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return false;
+	}
+}
+
+bool m2ftg::SetVf2Version20(bool version20)
+{
 	// The config block is plain .data the module memcpy'd in at module_start; no VirtualProtect.
-	*reinterpret_cast<volatile uint8_t*>(base + game->rvaConfigVf20) = version20 ? 1u : 0u;
-	return true;
+	return WriteConfigByte(CONFIG_IS_VF20, version20 ? 1u : 0u);
+}
+
+bool m2ftg::SetVsMode(bool vsMode)
+{
+	// Same mechanism and the same window as SetVf2Version20: re-read by the backup-RAM injector
+	// every time the ROM initialises the board, so a write here takes effect at the NEXT board
+	// init. That is exactly what the round-start ResetBoard() is - so this must be called BEFORE
+	// that reset, never after.
+	return WriteConfigByte(CONFIG_IS_VS_MODE, vsMode ? 1u : 0u);
 }
 
 uint32_t m2ftg::StateCheckValue()
@@ -1370,10 +1447,62 @@ uint32_t m2ftg::StateCheckValue()
 
 
 
+bool m2ftg::ReadI960Timers(I960Timers& out)
+{
+	out = {};
+	const DwGame* game = CurrentDw();
+	uint8_t* base = ModuleBase();
+	if (!BoardBooted(game, base))
+	{
+		return false;
+	}
+
+	// The context pointer is written by the CPU init and survives a board reset, but this runs
+	// from the module thread while the emulator is between frames - keep the same structured
+	// net every other reader here uses rather than trusting the boot phase alone.
+	__try
+	{
+		const uint8_t* ctx = *reinterpret_cast<uint8_t* const*>(base + game->rvaCpuCtxPtr);
+		if (ctx == nullptr)
+		{
+			return false;
+		}
+		for (size_t i = 0; i < CTX_TIMER_COUNT; ++i)
+		{
+			const uint8_t* channel = ctx + CTX_TIMER_BASE + i * CTX_TIMER_STRIDE;
+			out.enabled[i] = *channel;
+			out.count[i] = *reinterpret_cast<const int32_t*>(channel + 4);
+		}
+		out.pending = *reinterpret_cast<const uint32_t*>(ctx + CTX_IRQ_PENDING);
+		out.mask = *reinterpret_cast<const uint32_t*>(ctx + CTX_IRQ_MASK);
+		out.ip = *reinterpret_cast<const uint32_t*>(ctx + CTX_IP);
+		out.yield = *(ctx + CTX_FRAME_YIELD);
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		out = {};
+		return false;
+	}
+}
+
 bool m2ftg::NetplaySupported()
 {
 	const DwGame* game = CurrentDw();
-	return game != nullptr && game->romFrameCounter != 0 && game->netplayReady;
+	if (game == nullptr || game->romFrameCounter == 0)
+	{
+		return false;
+	}
+	// The diagnostic override deliberately does NOT relax the frame-counter test above: without
+	// a measured counter there is no anchor and no canary, so a round could not be set up at
+	// all. What it relaxes is the per-game "this one is known to diverge" verdict, which is the
+	// only thing standing between VF2 and an observable round.
+	if (game->netplayReady)
+	{
+		return true;
+	}
+	const YAMPSettings* settings = gGeneral.GetSettings();
+	return settings != nullptr && settings->m_netForceUnsupported;
 }
 
 uint32_t m2ftg::RomFrameCounterAddress()

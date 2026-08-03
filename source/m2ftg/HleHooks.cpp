@@ -273,9 +273,17 @@ namespace
 		{ 0x009FB0, 0x4EA20, "main_loop", Kind::Core,     true,   "Per-frame yield, plus the master-state-dependent tile-buffer mode words at [DLL+0x880038]+0x98898." },
 		{ 0x000F7C, 0x4EAD0, "interrupt_wait", Kind::Core,     true,   "Interrupt handshake: raises the pending-interrupt bit (ctx+0x188) when ctx+0x18C bit 0 is armed." },
 		{ 0x000F84, 0x4EB30, "interrupt_wait+0x8", Kind::Core,     true,   "Second half of the interrupt handshake: host yield (FUN_18004C690) plus ctx+0x1B0, then skips the original." },
-		{ 0x010F90, 0x4EB60, "interrupt_wait_b+0x88", Kind::Core,     true,   "Vsync wait: supplies the host frame counter (DLL+0xA80050) in g0 and raises the pending-interrupt bit." },
-		{ 0x010F98, 0x4EBE0, "interrupt_wait_b+0x90", Kind::Core,     true,   "Vsync wait: supplies the host frame counter in r3." },
-		{ 0x010FA0, 0x4EC40, "interrupt_wait_b+0x98", Kind::Core,     true,   "Vsync wait loop: returns -8 to re-execute until the host frame counter advances." },
+		// The vsync wait. NOT a host clock, despite what these three said until 2026-08-02: the
+		// value all three read, DLL+0xA80050, is the host storage of GUEST 0x500000 (board init
+		// sets the guest-0x500000 bank pointer ctx+0x18 to it and the RAM base DLL+0x880030 to
+		// 0x580050, and 0x580050 + 0x500000 = 0xA80050). It is the ROM's own vblank byte, which
+		// the ROM's timer ISR increments at ROM 0xCE0-0xCEC. So the spin below exits on an
+		// emulated interrupt, entirely inside the instruction stream - which is why the
+		// divergence hunt has to be about how many INSTRUCTIONS a frame takes, not about a race
+		// with a host thread. See docs/vf2-hle-hooks.md.
+		{ 0x010F90, 0x4EB60, "interrupt_wait_b+0x88", Kind::Core,     true,   "Vsync wait: loads the ROM's vblank byte (guest 0x500000, host DLL+0xA80050) into g0 (ctx+0x98) and raises the pending-interrupt bit." },
+		{ 0x010F98, 0x4EBE0, "interrupt_wait_b+0x90", Kind::Core,     true,   "Vsync wait: re-loads the same vblank byte into r3 (ctx+0x64). This is the top of the spin." },
+		{ 0x010FA0, 0x4EC40, "interrupt_wait_b+0x98", Kind::Core,     true,   "Vsync wait loop: returns -8 to re-execute the load above until the vblank byte changes, i.e. until the ROM's timer interrupt bumps it." },
 		{ 0x06E1C8, 0x4ECA0, "check_sram_all+0x47C", Kind::Host,     true,   "Injects the backup-RAM / DIP block from the module config (gate DLL+0x6263FB) into board SRAM at [DLL+0x880020]+0x91. This is VF2's GAME ASSIGNMENTS source." },
 		{ 0x011378, 0x4EE20, "variable_diff_calc+0x80", Kind::Content,  true,   "Forces ctx+0x68 = 7 in the difficulty calculation, then runs the original." },
 		{ 0x011348, 0x03DF0, "variable_diff_calc+0x50", Kind::Removed,  true,   "Instruction deleted - the handler IS the bare skip tail (0x3DF0), so nothing runs in its place." },

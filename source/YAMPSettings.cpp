@@ -197,6 +197,11 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		{
 			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
 		}
+		// Divergence diagnostics. No UI: hand-edited for a measurement run, and both default off
+		// so a normal session is unaffected by their presence.
+		m_netTimerTrace = GetPrivateProfileIntW(L"Netplay", L"TimerTrace", 0, iniPath.c_str()) != 0;
+		m_netForceUnsupported =
+			GetPrivateProfileIntW(L"Netplay", L"ForceUnsupported", 0, iniPath.c_str()) != 0;
 		// Up to 96 bits, so it does not fit the profile API's integer reads - stored as hex
 		// text. The default is the game's own default mask, not 0: StF's hook 16 fights the
 		// backup-RAM TIME fix
@@ -344,6 +349,9 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileStdStringA("Netplay", "CertFingerprint", m_netCertFingerprint, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "CommunicationId", m_netComId, iniPath);
 		WritePrivateProfileIntW(L"Netplay", L"FrameDelay", m_netFrameDelay, iniPath.c_str());
+		// Written back so a Save from the UI cannot silently drop a hand-edited diagnostic.
+		WritePrivateProfileIntW(L"Netplay", L"TimerTrace", m_netTimerTrace, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"ForceUnsupported", m_netForceUnsupported, iniPath.c_str());
 		// Core hooks stay session-only, so a restart always gets back to a bootable state.
 		uint64_t persisted[2] = { m_stfHleDisableMask[0], m_stfHleDisableMask[1] };
 		m2ftg::HleHooks::MaskStripKinds(persisted, m2ftg::HleHooks::SESSION_ONLY_KINDS);

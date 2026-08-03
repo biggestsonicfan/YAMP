@@ -340,10 +340,15 @@ namespace net
                 rcfg.max_players = 2;
                 // The harness host publishes its own dip switches too, so a -net-host / -net-join
                 // pair is played under the same cabinet settings the lobby would have produced.
-                if (const YAMPSettings* set = gGeneral.GetSettings();
-                    set != nullptr && set->m_m2RealDamage)
+                // Every simulation-affecting switch, not just DAMAGE. The VF2 version bit was
+                // missing here while the lobby path published it, so a -net-host / -net-join pair
+                // could silently play under a different rule set than the same two machines
+                // playing through the UI.
+                if (const YAMPSettings* set = gGeneral.GetSettings(); set != nullptr)
                 {
-                    rcfg.game_flags |= YAMPNET_ROOM_FLAG_REAL_DAMAGE;
+                    if (set->m_m2RealDamage)  rcfg.game_flags |= YAMPNET_ROOM_FLAG_REAL_DAMAGE;
+                    if (set->m_vf2Version20)  rcfg.game_flags |= YAMPNET_ROOM_FLAG_VF2_VERSION20;
+                    if (set->m_m2VersusMode)  rcfg.game_flags |= YAMPNET_ROOM_FLAG_VS_MODE;
                 }
                 r = s_api->create_room(s_session, &rcfg);
             }
@@ -485,6 +490,8 @@ namespace net
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
         st.vf2_version20 =
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
+        st.vs_mode =
+            (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
         if (s_api->get_desync(s_session, &dFrame, &dLocal, &dRemote) != 0)
@@ -569,7 +576,7 @@ namespace net
         NetLog("ui: disconnected");
     }
 
-    bool HostRoom(const char* password, bool realDamage, bool vf2Version20)
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode)
     {
         if (!UiMayAct())
             return false;
@@ -582,7 +589,8 @@ namespace net
         // Published once, at creation. The room - not either player's settings file - is what the
         // match is played under from here on.
         rcfg.game_flags = (realDamage ? YAMPNET_ROOM_FLAG_REAL_DAMAGE : 0u)
-                        | (vf2Version20 ? YAMPNET_ROOM_FLAG_VF2_VERSION20 : 0u);
+                        | (vf2Version20 ? YAMPNET_ROOM_FLAG_VF2_VERSION20 : 0u)
+                        | (vsMode ? YAMPNET_ROOM_FLAG_VS_MODE : 0u);
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
         {
@@ -653,6 +661,8 @@ namespace net
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_REAL_DAMAGE) != 0;
             out[i].vf2_version20 =
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
+            out[i].vs_mode =
+                (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
         }
         return n;
     }
@@ -676,6 +686,15 @@ namespace net
             return localSetting;
         }
         return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
+    }
+
+    bool EffectiveVsMode(bool localSetting)
+    {
+        if (!SessionInProgress())
+        {
+            return localSetting;
+        }
+        return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
     }
 
     void LeaveRoom()

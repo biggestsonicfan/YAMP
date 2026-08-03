@@ -167,6 +167,13 @@ typedef struct yampnet_rpcn_config
 // stock RPCS3 client are unaffected.
 #define YAMPNET_ROOM_FLAG_REAL_DAMAGE 0x00000001u  // StF GAME ASSIGNMENTS -> DAMAGE = REAL
 #define YAMPNET_ROOM_FLAG_VF2_VERSION20 0x00000002u // VF2 running as version 2.0 (else 2.1)
+// m2ftg_config_t.is_vs_mode (config +0x0A). Applies to ALL THREE games and is the strongest case
+// of the three flags: it does not merely tune the simulation, it selects a different one. Set, the
+// module force-credits both coin counters, skips the attract boot, writes SRAM cabinet mode 3
+// instead of 2, and picks the stage from the SECOND host RNG stream (StF 0-8, FV %9, VF2 %11)
+// rather than the ROM's fixed sequence. Two peers disagreeing about it are not playing the same
+// game, and the one that has it on is drawing from a generator the other never touches.
+#define YAMPNET_ROOM_FLAG_VS_MODE 0x00000004u      // m2ftg_config_t.is_vs_mode, config +0x0A
 // Adding a bit here needs no ABI bump and no plugin rebuild: the plugin carries game_flags
 // verbatim between the room and its peers and never interprets it.
 

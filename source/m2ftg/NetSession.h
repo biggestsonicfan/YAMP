@@ -82,8 +82,16 @@ namespace m2ftg
 		// or the two machines simulate different inputs and desync.
 		bool Step(m2ftg_execute_info_t& info);
 
-		// Call only when module_main actually ran. Submits the desync canary and advances the
-		// netplay frame index.
+		// Call after every module_main call. Submits the desync canary and advances the netplay
+		// frame index - but ONLY if that call actually advanced the emulated frame.
+		//
+		// It often does not. `module_main` returning is not the same event as the emulated board
+		// completing a frame: measured 2026-08-02, ~5% of VF2's calls execute nothing at all (the
+		// ROM's frame counter, the work-RAM hash and every timer channel are all unmoved), and
+		// WHICH calls those are is host-timing-dependent, not simulation state. Counting one as a
+		// netplay frame is what put the two peers one emulated frame apart: their simulations were
+		// bit-identical, their frame NUMBERING was not. StF and FV only ever stall this way during
+		// boot, before a round can start, which is why they never showed it.
 		void EndFrame();
 
 	private:
@@ -100,6 +108,10 @@ namespace m2ftg
 		uint32_t m_roundNumber = 0;
 		bool m_roundRequested = false;
 		bool m_hold = false;
+		// Previous frame's canary value, for the "did the emulator actually advance?" test in
+		// EndFrame. Kept across the whole session (not just a round) so frame 0 has a baseline.
+		uint32_t m_lastCheck = 0;
+		bool m_haveLastCheck = false;
 	};
 
 	// The one instance. A session is a property of the process, not of a host loop, and the

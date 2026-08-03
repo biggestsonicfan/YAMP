@@ -134,6 +134,20 @@ public:
 	// stalls rather than desyncs if this is too low for the link.
 	int m_netFrameDelay = 3;
 
+	// ---- Divergence diagnostics -------------------------------------------------------------
+	// Both are INI-only on purpose: they exist to run a two-machine measurement, not to be
+	// discovered and flipped from the settings panel. See docs/vf2-hle-hooks.md.
+	//
+	// Writes one line per emulated netplay frame to yampnet.log carrying the emulated i960's
+	// four timer channels and the instructions charged to them since the previous frame. That
+	// count is the quantity VF2's one-frame divergence is a symptom of, so the two peers' logs
+	// diff directly. Off by default: it is a line per frame, forever, on both machines.
+	bool m_netTimerTrace = false;
+	// Lets a game whose netplay is marked NOT ready still open a round. The only such game is
+	// VF2, which is held back precisely because it diverges - so this exists to make that
+	// divergence observable, and a match run under it is expected to be wrong.
+	bool m_netForceUnsupported = false;
+
 	// Misc
 	uint32_t m_buildLastShowedDisclaimer = 0;
 };

@@ -106,6 +106,9 @@ namespace net
         // VF2 only: the room is played as version 2.0 when set, 2.1 when clear. The two
         // versions are different games mechanically, so a mismatch desyncs.
         bool vf2_version20 = false;
+        // All three games: the room plays in VS mode (m2ftg_config_t.is_vs_mode). Selects a
+        // different simulation, not a variant of one - see YAMPNET_ROOM_FLAG_VS_MODE.
+        bool vs_mode = false;
     };
     Status GetStatus();
 
@@ -116,7 +119,7 @@ namespace net
     void Disconnect();
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage.
-    bool HostRoom(const char* password, bool realDamage, bool vf2Version20);
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -132,6 +135,8 @@ namespace net
         bool real_damage = false;
         // The host's VF2 version, shown for the same reason: it is how that match plays.
         bool vf2_version20 = false;
+        // The host's VS-mode switch, shown for the same reason.
+        bool vs_mode = false;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();
@@ -163,6 +168,10 @@ namespace net
     // The same rule for VF2's version flag, and for the same reason: 2.0 and 2.1 are different
     // games mechanically, so two peers on different versions diverge from identical inputs.
     bool EffectiveVf2Version20(bool localSetting);
+    // The same rule for VS mode, which needs it more than either: it decides whether the module
+    // credits both players and draws the stage from the second RNG stream at all. A peer with it
+    // off never touches that generator, so a mismatch is not a difference of degree.
+    bool EffectiveVsMode(bool localSetting);
 
     // Called by the host loop when a round ends because the other player went away. Latches the
     // reason for the dialog; harmless to call repeatedly.

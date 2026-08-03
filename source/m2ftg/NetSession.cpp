@@ -11,6 +11,119 @@ namespace
 	// A few frames into the ROM's main loop: far enough past the post-reset boot to be steady
 	// state, small enough that starting a match stays snappy.
 	constexpr uint32_t NETPLAY_ANCHOR = 8;
+
+	// ---- Timer-channel trace (Netplay/TimerTrace) -----------------------------------------
+	//
+	// One line per emulated netplay frame, on both peers, so the two logs diff directly. What
+	// it is for: VF2's two simulations run one emulated frame apart, and the mechanism is that
+	// the i960's timers count INSTRUCTIONS (twelve per batch) rather than wall-clock, so the
+	// frame interrupt lands either side of the ROM's frame yield depending on how many
+	// instructions that frame happened to take. This makes that count observable.
+	//
+	// Held here rather than in NetSession so the class keeps its published state; it is
+	// single-threaded module-thread state, same as everything else EndFrame touches.
+	m2ftg::I960Timers g_prevTimers = {};
+	bool g_havePrevTimers = false;
+
+	// How the frame's timer movement is summarised. Measured on VF2, attract mode:
+	//
+	//   t0  expired early in the boot and is never re-armed  (enabled=0, count=-9 forever)
+	//   t1  re-armed to the same value every frame           (delta 0 or +-12)
+	//   t2  likewise
+	//   t3  the live one: counts down 11,000-14,600 per frame, and every second frame or so
+	//       expires and is re-armed by the ROM, which reads as a large NEGATIVE delta
+	//
+	// So a channel's delta only means "instructions executed" while it is counting DOWN. On a
+	// frame where the informative channel was re-armed, the largest decrease left is a floor,
+	// not the total - which is why the re-arm set is reported alongside it instead of being
+	// smoothed away. Two peers that re-arm different channels on the same netplay frame have
+	// already diverged, and that is visible here directly.
+	struct TimerDelta
+	{
+		int32_t  charged;   // largest decrease; -1 = no channel enabled at both samples
+		uint32_t rearmed;   // bit n set = channel n's count ROSE, i.e. the ROM re-armed it
+	};
+
+	TimerDelta MeasureTimers(const m2ftg::I960Timers& prev, const m2ftg::I960Timers& now)
+	{
+		TimerDelta out = { -1, 0 };
+		for (size_t i = 0; i < 4; ++i)
+		{
+			if (prev.enabled[i] == 0 || now.enabled[i] == 0)
+			{
+				continue;
+			}
+			const int32_t delta = prev.count[i] - now.count[i];
+			if (delta < 0)
+			{
+				out.rearmed |= 1u << i;
+				continue;   // a reload is not an instruction count; never let it win the max
+			}
+			if (delta > out.charged)
+			{
+				out.charged = delta;
+			}
+		}
+		return out;
+	}
+
+	// One trace line for the emulated frame that just finished. `netFrame` is the netplay frame
+	// index, or UINT32_MAX outside a round.
+	//
+	// Sampled AFTER module_main has returned, so `ins` covers exactly one emulated frame of CPU
+	// work and the counts are the state the next frame starts from. Both peers write the same
+	// fields in the same order at the same netplay frame number, so the two logs line up with a
+	// plain diff and no post-processing.
+	//
+	// Goes to yampnet.log rather than DebugLog: that sink is not compiled out of a Release
+	// build, and it opens and closes per line, so the trace survives killing the process and can
+	// be read live over a share from the other machine.
+	//
+	// Takes the sample rather than taking it itself: EndFrame needs the same numbers for its
+	// stall test, and reading the context twice would be both wasteful and a chance for the two
+	// readings to disagree.
+	void TraceTimers(uint32_t netFrame, const m2ftg::I960Timers& t, const TimerDelta& delta,
+	                 uint32_t check)
+	{
+		const YAMPSettings* settings = gGeneral.GetSettings();
+		if (settings == nullptr || !settings->m_netTimerTrace)
+		{
+			return;
+		}
+
+		uint32_t romFrame = 0;
+		m2ftg::ReadEmulatedRam32(m2ftg::RomFrameCounterAddress(), romFrame);
+
+		char frameLabel[16];
+		if (netFrame == UINT32_MAX)
+		{
+			frameLabel[0] = '-';
+			frameLabel[1] = '\0';
+		}
+		else
+		{
+			snprintf(frameLabel, sizeof(frameLabel), "%u", netFrame);
+		}
+
+		// Per-channel delta, positive = counted down. Only meaningful against a baseline, so it
+		// reads 0 on the first traced frame after a gap (where `ins` reads -1 to say so).
+		int32_t d[4] = {};
+		for (size_t i = 0; i < 4; ++i)
+		{
+			d[i] = g_havePrevTimers ? g_prevTimers.count[i] - t.count[i] : 0;
+		}
+
+		// Field order is the diff contract: two peers' logs are compared line for line at equal
+		// f=, so nothing here may be conditional on anything host-local.
+		net::Logf("timers f=%s rom=%u chk=0x%08X ins=%d rearm=%X ip=0x%06X yield=%u irq=%02X/%02X "
+		          "t0=%d,%u,%d t1=%d,%u,%d t2=%d,%u,%d t3=%d,%u,%d",
+		          frameLabel, romFrame, check, delta.charged, delta.rearmed,
+		          t.ip, static_cast<unsigned>(t.yield), t.pending, t.mask,
+		          t.count[0], static_cast<unsigned>(t.enabled[0]), d[0],
+		          t.count[1], static_cast<unsigned>(t.enabled[1]), d[1],
+		          t.count[2], static_cast<unsigned>(t.enabled[2]), d[2],
+		          t.count[3], static_cast<unsigned>(t.enabled[3]), d[3]);
+	}
 }
 
 m2ftg::NetSession& m2ftg::NetplaySession()
@@ -92,6 +205,13 @@ void m2ftg::NetSession::Drive()
 			// host's version instead of its own, which is the whole point.
 			const YAMPSettings* preset = gGeneral.GetSettings();
 			SetVf2Version20(net::EffectiveVf2Version20(preset != nullptr && preset->m_vf2Version20));
+			// VS mode, same window and for a stronger reason: it decides whether the module
+			// credits both players, which cabinet mode byte reaches SRAM, and whether the stage
+			// comes from the SECOND host RNG stream or the ROM's fixed sequence. A peer with it
+			// clear never draws from that generator at all, so a mismatch is not a shade of
+			// difference - the two machines are running different games.
+			const bool wantVs = net::EffectiveVsMode(preset != nullptr && preset->m_m2VersusMode);
+			const bool didVs = SetVsMode(wantVs);
 
 			// SEED THE RNG BEFORE THE RESET, NOT AFTER.
 			//
@@ -124,8 +244,14 @@ void m2ftg::NetSession::Drive()
 			if (didReset && didBudget && didSeed)
 			{
 				m_prep = Prep::Resetting;
-				net::Logf("RNG seeded 0x%08X, board reset; waiting for the ROM to restart",
-				          preSeed);
+				// vsMode is reported rather than required: SetVsMode returns false for a game
+				// whose config base is unmeasured or does not check out, and that must not stop a
+				// round - it means both peers keep their own launch-time switch, which is the
+				// behaviour that existed before the flag. It is logged because a peer silently
+				// ignoring the room's VS setting looks exactly like a desync later on.
+				net::Logf("RNG seeded 0x%08X, board reset, vsMode=%d(applied=%d); waiting for the "
+				          "ROM to restart", preSeed, static_cast<int>(wantVs),
+				          static_cast<int>(didVs));
 			}
 			else
 			{
@@ -278,20 +404,65 @@ bool m2ftg::NetSession::Step(m2ftg_execute_info_t& info)
 
 void m2ftg::NetSession::EndFrame()
 {
-	if (m_frame == UINT32_MAX)
+	// Sample the machine ONCE, and use that one sample for both the trace and the stall test.
+	m2ftg::I960Timers timers = {};
+	const bool haveTimers = ReadI960Timers(timers);
+	const TimerDelta delta = (haveTimers && g_havePrevTimers)
+		? MeasureTimers(g_prevTimers, timers)
+		: TimerDelta{ -1, 0 };
+
+	// Desync canary: at a given netplay frame this MUST read the same on both machines, and it
+	// stops matching the moment one side executes a different amount of game code. WHAT gets
+	// submitted is per-game - StF and FV send the ROM's frame_counter, VF2 a hash of work RAM.
+	// See StateCheckValue().
+	const uint32_t check = StateCheckValue();
+
+	// Trace unconditionally: it runs whether or not a round is in progress, so the
+	// instrumentation can be validated on one machine before two are booked to run it. Out of a
+	// round the frame label is "-", which is also how the log shows where the round began.
+	TraceTimers(m_frame, timers, delta, check);
+
+	g_prevTimers = timers;
+	g_havePrevTimers = haveTimers;
+
+	// DID THIS module_main CALL ACTUALLY ADVANCE THE EMULATED FRAME?
+	//
+	// Often it does not. `module_main` returning is a HOST event; the emulated board completing
+	// a frame is a guest one, and they are not the same. The CPU loop returns as soon as the
+	// ROM's yield flag is set, so a call can execute almost nothing - and measured 2026-08-02
+	// over ~12,000 frames on two machines, ~5% of VF2's calls execute NOTHING: the canary, every
+	// timer channel and the ROM's frame counter are all unmoved.
+	//
+	// Which calls those are depends on host timing, not on simulation state. Proven in the round
+	// that produced this fix: both peers were bit-identical through netplay frame 1 (same canary,
+	// same 2,988 instructions, same timer counts), then the guest's frame-2 call ran nothing
+	// while the host's ran a full frame. The guest then submitted its frame-1 value AS frame 2 -
+	// which is exactly the "one emulated frame apart" this game has always shown. The simulations
+	// never disagreed; the frame NUMBERING did.
+	//
+	// So a call that advanced nothing must not consume a netplay frame. Skipping it leaves
+	// m_frame where it was, and the next host frame re-runs the same netplay frame with the same
+	// inputs - the identical path an ordinary lockstep stall already takes.
+	//
+	// The test is deliberately conservative: it declares a stall only when the canary is
+	// unchanged AND no timer channel counted down AND none was re-armed (a re-arm is a guest
+	// store, so it proves the CPU ran). Against those 12,000 frames it caught 227 and 171 stalls
+	// with ZERO false positives; the ~14 per run it misses are counted as real frames, which is
+	// the safe direction to be wrong in. StF and FV are unaffected - they only stall during boot,
+	// long before a round can start.
+	const bool advanced = !m_haveLastCheck
+		|| check != m_lastCheck
+		|| delta.charged > 0
+		|| delta.rearmed != 0;
+
+	m_lastCheck = check;
+	m_haveLastCheck = true;
+
+	if (m_frame == UINT32_MAX || !advanced)
 	{
 		return;
 	}
 
-	// Desync canary: at a given netplay frame this MUST read the same on both machines, and it
-	// stops matching the moment one side executes a different amount of game code.
-	//
-	// WHAT gets submitted is per-game, because the obvious choice is not universally sound. StF
-	// and FV submit the ROM's frame_counter, which in those games advances exactly once per
-	// module_main. VF2's does not: its counter is bumped by an interrupt that can land either
-	// side of the module_main boundary depending on host timing, so it jitters by a frame while
-	// the simulations stay identical - which produced false desyncs on a game that was in sync.
-	// VF2 therefore submits a hash of actual game state instead. See StateCheckValue().
-	net::Api()->submit_state_check(net::Session(), m_frame, StateCheckValue());
+	net::Api()->submit_state_check(net::Session(), m_frame, check);
 	++m_frame;
 }

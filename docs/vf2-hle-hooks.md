@@ -38,7 +38,7 @@ three. See [`fv-hle-hooks.md`](fv-hle-hooks.md) for the FV/StF equivalents.
 | Work-RAM host base ptr | `0x880030` | `0x8FA2C8` | `0x8F7CC8` |
 | Opcode dispatch table | `0x152090` | `0x166720` | `0x168630` |
 | Composite-enable flag | `0x51F0CF` | `0x6BB772` | `0x6B9172` |
-| Host frame counter | `0xA80050` | `0xAFA2E0` | — |
+| Work-RAM bank (guest `0x500000`) | `0xA80050` | `0xAFA2E0` | — |
 | RNG holder | `0x623788` | `0x68E188` | `0x68BB88` |
 | Texture-budget handler | `0x4F740` (4 sites) | `0x51C20` (4) | `0x52FD0` (4) |
 | Exec-original tail | `0x3D60` | `0x39E0` | `0x39D0` |
@@ -72,7 +72,15 @@ bare-`ret` stub (`0x2550`), record 5 is work RAM, and 28 unmapped regions share 
 - **Backup-RAM / DIP injection — hook 8, handler `0x4ECA0`** (`check_sram_all+0x47C`): config gate
   `DLL+0x6263FB`, board SRAM at `[DLL+0x880020]+0x91`. VF2's GAME ASSIGNMENTS source.
 - **Self-test bypass — hooks 11 and 13, handler `0x4EE40`** (force `r3 = 1`).
-- **Frame yield / vsync — hooks 2 and 5-7**, host frame counter `DLL+0xA80050`.
+- **Frame yield / vsync — hooks 2 and 5-7.** `DLL+0xA80050` is **not** a host frame counter, as
+  this said until 2026-08-02. It is the host storage of **guest `0x500000`**, the ROM's own vblank
+  byte: board init (`FUN_180047610`) memsets 1 MB there, points the guest-`0x500000` bank pointer
+  `ctx+0x18` at it, and sets the RAM base `DLL+0x880030` to `0x580050` — and `0x580050 + 0x500000`
+  is exactly `0xA80050`. Hooks 5 and 6 are plain emulated `ldob byte_500000` into g0 (`ctx+0x98`)
+  and r3 (`ctx+0x64`); hook 7 returns `-8` to re-execute hook 6 until the two differ. The byte is
+  incremented by the ROM's **own timer ISR** (ROM `0xCE0`-`0xCEC`, `ldib`/`addi 1`/`stib`).
+  Nothing outside the instruction stream writes it. The mislabel is what sent the previous pass
+  looking for a host thread to race against; there is none.
 
 ## The table
 
@@ -156,13 +164,73 @@ generic note — they are classified `Content` provisionally, not from reading e
 
 **Kind counts:** Core 14, Content 24 (provisional), Inert 18, Removed 9, Host 2.
 
-## Netplay status: WIRED, DISABLED, one open cause
+## SOLVED 2026-08-02: it was never a divergence, it was frame NUMBERING
 
-VF2 drives the shared `m2ftg::NetSession` and every determinism helper works, but netplay is
-**off** (`DwGame::netplayReady = false`) because the two simulations run **one emulated frame
-apart**. StF and FV do not. Turn it on by flipping that flag once the cause below is closed.
+**The two simulations were always bit-identical. Only their frame indices disagreed.**
 
-### What the divergence actually is
+Caught by the timer trace below, on a live two-peer round. Host and guest at netplay frames 0 and
+1 are *identical in every field* - same ROM counter, same work-RAM hash, same 2,988 instructions
+executed, same timer counts. Then:
+
+```
+host   f=2 rom=11 chk=0x6A9A79A0 ins=2988 rearm=0 t3=6363,1,2988
+guest  f=2 rom=10 chk=0x4647F415 ins=0    rearm=0 t3=9351,1,0      <- executed NOTHING
+guest  f=1 rom=10 chk=0x4647F415                                    <- ...so it resent frame 1's value
+```
+
+The desync report confirms it exactly: `local 1788508576, peer 1179120661` is
+`0x6A9A79A0` vs `0x4647F415` - the guest submitted, as frame 2, the value the host computed at
+frame **1**. A 64 KB FNV hash matching bit for bit is not a coincidence.
+
+**`module_main` returning is a HOST event; the emulated board completing a frame is a GUEST one,
+and they are not the same.** The CPU loop returns the moment the ROM's yield flag is set, so a call
+can execute almost nothing. Measured over ~12,000 frames on two machines, **~5% of VF2's
+`module_main` calls execute nothing at all** - canary, all four timer channels and the ROM frame
+counter all unmoved - and *which* calls stall is host-timing-dependent. Netplay counted every call
+as a frame, so each peer's netplay-frame-to-emulated-frame mapping drifted independently. One frame
+apart, oscillating, both peers taking turns in the lead: exactly the reported symptom.
+
+**Why StF and FV never showed it:** they stall too, but *only during boot*. Measured on the same
+build - StF's 52 stalls all occur at ROM frame 0-1, then it advances exactly +1 per call for 1,428
+consecutive calls. A round cannot start until the board is booted and anchored at frame 8, so their
+stalls are always outside a round. VF2's are spread evenly across the whole run (16-17 per decile).
+
+**The fix** is in `NetSession::EndFrame`: a call that advanced nothing no longer consumes a netplay
+frame. The test is conservative - a stall requires the canary unchanged AND no timer counted down
+AND none was re-armed (a re-arm is a guest store, so it proves the CPU ran). On those 12,000 frames
+it caught 227 and 171 stalls with **zero false positives**; the ~14 per run it misses are treated as
+real frames, which is the safe direction. Skipping leaves `m_frame` put and the next host frame
+re-runs the same netplay frame with the same inputs - the identical path an ordinary lockstep stall
+already takes.
+
+**This also retires the reasoning behind VF2's work-RAM hash canary.** The doc used to argue VF2's
+ROM frame counter "jitters" and is "bookkeeping ABOUT the frame, not part of the simulation". The
+counter was telling the truth - those calls really did run no frame - and switching to a hash hid
+the signal rather than fixing it. The hash is still the stronger canary and should stay; the
+*justification* recorded for it was wrong.
+
+Still to confirm on two machines: that a round now survives past frame 2.
+
+## Netplay status: ON
+
+`DwGame::netplayReady = true` since 2026-08-02. VF2 drives the shared `m2ftg::NetSession`, every
+determinism helper works, and with the frame-accounting fix above a two-peer round runs with **no
+reported desyncs** - verified on two machines the same day, with each peer stalling where it should.
+
+`[Netplay] ForceUnsupported` is no longer needed for VF2 and goes back to being what it was meant to
+be: a diagnostic for the *next* game that is measured but not yet trusted. `TimerTrace` should be
+left off for ordinary play - it costs a file open/append/close per emulated frame.
+
+Still worth doing: **StF and FV have not been re-verified on two machines** since either the RNG
+seeding fixes or this frame-accounting change. Neither should be affected (their stalls are
+boot-only, before a round can start) but neither has been shown. A VS-mode round is the case to
+run, because that is what exercises StF's second RNG stream.
+
+### What the divergence looked like from outside
+
+The evidence below is what was collected before the cause was known. It is all consistent with the
+frame-numbering explanation above and is kept because the *shape* of it is what a numbering fault
+looks like from a RAM diff - worth recognising again.
 
 Measured by dumping the full 1 MB of work RAM on both peers at the same netplay frame and diffing
 byte for byte. The differences are *small deltas on moving values* - floats a hair apart, counters
@@ -193,19 +261,34 @@ The emulated i960's timers are driven by **instruction count, not wall clock**:
   whose mask bit is set in `ctx+0x18C`. It returns - ending the frame - the moment the ROM's
   frame-yield flag `ctx+0x1B0` is set (by hook 2 `main_loop` and hook 4).
 
-A frame is roughly **9,600 instructions** and the timers are checked every **12**, so the frame
-timer expires within about one batch of the yield. **A small difference in instructions executed
-flips whether the interrupt lands before or after the yield** - which is exactly a one-frame
-counter difference.
+Two details of that loop matter and were not obvious from the outside. The **yield check is inside
+the batch**, so a frame ends mid-batch and the instructions of that final partial batch are never
+charged to any timer. And the batch counter is a local reset on entry, so each frame starts a fresh
+batch. Both are deterministic given an identical instruction stream - they are quantisation, not
+noise - but they mean "instructions executed" and "instructions charged" differ by up to 11 per
+frame.
+
+**A small difference in instructions executed flips whether the timer interrupt lands before or
+after the yield** - which is exactly a one-frame counter difference.
 
 ### The gap
 
-**What host-dependent input changes the instruction count has not been identified.** Everything
-inside `module_main` appears instruction-driven and therefore deterministic. The vsync wait spins
-(hook 7 returns `-8` to re-execute) so it is the obvious suspect, but its exit condition is a
-guest-RAM value, and nothing has been shown to write that value from outside the instruction
-stream. VF2 reads guest `0x500000`; StF reads guest `0x500018`. Neither is a YAMP-written global -
-an earlier guess that `gs::sm_context->frame_counter` drives them is **wrong**.
+**What host-dependent input changes the instruction count is still not identified**, but the search
+space is now much smaller, because the obvious suspect is eliminated *by mechanism* rather than by
+not having been shown:
+
+The vsync wait spins (hook 7 returns `-8` to re-execute) on **guest `0x500000`**, and that byte is
+incremented by the **ROM's own timer ISR** at ROM `0xCE0`-`0xCEC`. The spin therefore exits on an
+emulated interrupt raised by the emulated instruction counter. There is no host thread in it. The
+earlier reading of hooks 5-7 as "supplies the host frame counter" was a mislabel of `DLL+0xA80050`
+(see the note under Netplay-critical hooks); so was the older `gs::sm_context->frame_counter`
+guess. Neither describes anything real.
+
+What is left that can still differ per host: the **texture-upload budget** (hooks 48-51), the only
+wall-clock reader in the module. Netplay pins it, and that pin has been verified applied to 4 of 4
+sites - but "applied" is not "effective", and it is now the only known candidate. Verifying it
+means checking that a pinned peer's per-frame instruction count is *insensitive* to how long an
+upload actually took, which the trace below measures directly.
 
 ### Ruled out - do not re-investigate
 
@@ -218,20 +301,72 @@ an earlier guess that `gs::sm_context->frame_counter` drives them is **wrong**.
 | Wrong desync canary | Work-RAM hash diverges too; it is a real difference, not a measurement artefact |
 | Anchor / barrier misalignment | Both peers anchor at `frame_counter=8` and hold; no leak during the hold |
 | Reset differs from StF/FV | Same routine compiled three times - same call sequence and constants |
+| The vsync spin races a host thread | Its exit condition is guest `0x500000`, incremented by the ROM's own timer ISR at ROM `0xCE0`-`0xCEC`. `DLL+0xA80050` is that byte's host storage, not a host counter - see above. No host thread is involved. |
+| Timer-channel layout was guessed | Read out of the CPU loop's own four decrement blocks, then confirmed live: counts step in multiples of 12, enables read 0/1, IP parks at `0x009FB4` (the `main_loop` yield site), mask reads `0x421`. |
 
-### Suggested next step: measure, do not theorise
+### The timer trace: BUILT, and validated on one machine
 
-Log the four timer channels - enable byte `ctx+0x190 + idx*8` and count `ctx+0x194 + idx*8`, ctx
-pointer at `0x51F9B8` - at each `NetSession::EndFrame` on both peers, and diff. That is a direct
-readout of instructions-executed-per-frame: it names which channel diverges, by how much, and
-whether the delta is bounded. If it is bounded and small, deliberately burning or withholding
-emulated instructions to keep both boards on the same side of the boundary becomes viable.
+The per-frame timer readout this section used to propose now exists.
 
-The tooling for this existed and was removed before commit: per-frame 1 MB work-RAM snapshots in a
-ring keyed by netplay frame, dumped to `yamp_ram_f<N>_p<player>.bin` on both peers when a
-divergence is reported. The ring is the part that matters - a divergence surfaces a few frames
-after the frame it names, so dumping at detection time captures two different instants and the
-diff is noise. Recover it from this commit's history if needed.
+- `m2ftg::ReadI960Timers` (`source/m2ftg/DebugWindows.cpp`) reads the live context: enable byte
+  `ctx+0x190 + n*8`, count `ctx+0x194 + n*8`, plus `ctx+0x188` pending, `ctx+0x18C` mask,
+  `ctx+0x08` IP and `ctx+0x1B0` yield. The layout is not pattern-matched - it is read straight out
+  of the CPU loop's four identical decrement blocks.
+- `NetSession::EndFrame` emits one line per emulated frame to **`yampnet.log`**, in and out of a
+  round. That sink survives a Release build and opens/closes per line, so the log is complete even
+  if the process is killed and can be read live over a share.
+- Two INI-only switches under `[Netplay]`, both default 0: **`TimerTrace=1`** turns the trace on,
+  and **`ForceUnsupported=1`** lets VF2 open a round despite `netplayReady = false` (it is held
+  back *because* it diverges, so observing that divergence needs the override). Neither has UI.
+
+Line format, fixed field order so two peers diff line-for-line:
+
+```
+timers f=<netplay frame, or - outside a round> rom=<ROM frame_counter> chk=<state hash>
+       ins=<largest decrease> rearm=<bitmask of channels that ROSE> ip=<IP> yield=<flag>
+       irq=<pending>/<mask> t0=<count>,<enabled>,<delta> t1=... t2=... t3=...
+```
+
+**Baseline measured 2026-08-02**, VF2 attract mode, ~5,200 frames, one machine:
+
+| Channel | Behaviour |
+|---|---|
+| `t0` | expires early in boot, never re-armed (`count=-9, enabled=0` forever) |
+| `t1`, `t2` | re-armed to a constant every frame; alternate between two values (`21987`/`22227` and `21759`/`21999`). Carry no per-frame instruction signal. |
+| `t3` | **the live frame timer.** Counts down 11,000-21,600 per frame; expires and is re-armed by the ROM roughly every second frame (`rearm=8`). |
+
+The headline number: **instructions per emulated frame are not constant even on one machine** -
+they ranged from ~11,000 to ~21,600 across the run. Against a `t3` reload period of ~24,000
+instructions, a frame-to-frame swing that large is far more than enough to move the expiry across
+the yield boundary. So the question the two-peer run has to answer is precisely: **is that
+variation a function of the simulation (fine - both peers reproduce it) or of the host (fatal)?**
+
+`rearm` is the field to diff first. Two peers that re-arm different channels on the same `f=` have
+already diverged, and it says so in one character.
+
+### Running it on two peers
+
+1. Both machines: build, then add `TimerTrace=1` and `ForceUnsupported=1` under `[Netplay]` in
+   `settings.ini` **next to YAMP.exe** (not the game's directory).
+2. Delete `yampnet.log` on both, start VF2 on both, run a round.
+3. `grep '^\[.*\] timers f=[0-9]' yampnet.log` on each - that drops the pre-round `f=-` lines - and
+   diff. The first differing `f=` is the frame to investigate, and `ins`/`rearm`/`t3` say by how
+   much and in which channel.
+
+Note the round is *expected* to be wrong under `ForceUnsupported`: that is the point.
+
+### Still missing: the work-RAM snapshot ring
+
+Separately from the trace, this doc used to say per-frame 1 MB work-RAM snapshots could be
+recovered from history. **They cannot** - checked 2026-08-02: `git log --all -S"yamp_ram"` matches
+only this file's own text, no source; `-S` over `Snapshot`/`WorkRam`/`DumpWorkRam` finds nothing in
+`source/`; the stash is empty, the reflog has no intermediate commit, and none of the 41 dangling
+blobs from `git fsck` contain any of those strings. The functions were deleted from the working
+tree before `bce4b1e` was made and never committed. Rewriting them, if needed, starts from
+`DW_VF2.rvaRamBasePtr = 0x880030` (host base of the 1 MB, `0x580050`, so guest G is at `0x580050+G`)
+and the same `EndFrame` hook point the trace uses. The ring is the part that matters: a divergence
+surfaces a few frames after the frame it names, so dumping at detection time captures two different
+instants and the diff is noise.
 
 ### RNG: three real defects fixed along the way
 

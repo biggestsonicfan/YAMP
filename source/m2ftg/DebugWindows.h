@@ -141,11 +141,13 @@ namespace m2ftg
 
 		// Whether this game can currently sustain a netplay session.
 		//
-		// Separate from RomFrameCounterAddress() on purpose: VF2's counter IS measured and
-		// correct, but VF2 still diverges by one emulated frame (see docs/vf2-hle-hooks.md), so
-		// it must not offer netplay while that is unresolved. Tying the two together would mean
-		// either shipping a known-diverging game or throwing away a measured fact to express
-		// "not yet".
+		// Separate from RomFrameCounterAddress() on purpose: a measured frame counter says a
+		// round can be ANCHORED, not that it will hold. VF2 spent a while as exactly that case -
+		// counter measured and correct, rounds still wrong - and the split is what let it be
+		// expressed without either shipping a known-broken game or discarding a measured fact.
+		// VF2 has been ready since 2026-08-02; the distinction stays for the next game in that
+		// position. The `[Netplay] ForceUnsupported` setting overrides this verdict (and only
+		// this one) so such a game can still be measured on two machines.
 		bool NetplaySupported();
 
 		// Sets the module's is_vf20 config byte, which selects Virtua Fighter 2 version 2.0 or
@@ -158,6 +160,47 @@ namespace m2ftg
 		//
 		// Returns false, having written nothing, for a game with no such byte.
 		bool SetVf2Version20(bool version20);
+
+		// Sets the module's is_vs_mode config byte (config +0x0A), which all three games read.
+		//
+		// This is not a difficulty tweak - it selects a different simulation. Set, the module
+		// force-credits both coin counters, skips the attract boot, writes SRAM cabinet mode 3
+		// instead of 2, and draws the stage from the SECOND host RNG stream (StF 0-8, FV %9,
+		// VF2 %11) rather than the ROM's fixed sequence. A peer with it clear never touches that
+		// generator at all, so two peers disagreeing diverge immediately and for good.
+		//
+		// Same timing contract as SetVf2Version20: nothing re-reads it per frame, so it takes
+		// effect at the next board init and must be written BEFORE the round-start reset.
+		//
+		// Returns false, having written nothing, for a game whose config base is not yet measured
+		// (currently StF - see DwGame::rvaConfigVsMode).
+		bool SetVsMode(bool vsMode);
+
+		// ---- The emulated i960's four interval timers ----------------------------------------
+		//
+		// These are what VF2's one-frame divergence is measured with. The CPU loop runs
+		// instructions in batches of TWELVE and then decrements every enabled channel by
+		// twelve, so a channel's count is an instruction budget, not a clock - and the drop in
+		// any enabled channel across one emulated frame is twelve times the number of complete
+		// batches that frame. That makes this a direct readout of instructions-executed-per-
+		// frame, which is the quantity two peers have to agree on and (in VF2) do not.
+		//
+		// See docs/vf2-hle-hooks.md. Layout read out of the CPU loop's own decompilation
+		// (VF2 FUN_1800210C0) rather than pattern-matched.
+		struct I960Timers
+		{
+			uint8_t  enabled[4];   // ctx+0x190 + n*8: nonzero while the channel is counting
+			int32_t  count[4];     // ctx+0x194 + n*8: instructions remaining, -12 per batch
+			uint32_t pending;      // ctx+0x188: raised interrupt bits
+			uint32_t mask;         // ctx+0x18C: which raised bits actually interrupt
+			uint32_t ip;           // ctx+0x08:  IP within the live code bank
+			uint8_t  yield;        // ctx+0x1B0: the ROM's frame-yield flag, cleared on return
+		};
+
+		// Fills `out` from the live i960 context. False (leaving `out` zeroed) if no game is
+		// running, the board has not booted, or the context pointer is not up yet - so a caller
+		// may call it every frame from boot without checking anything first.
+		bool ReadI960Timers(I960Timers& out);
 
 		// The value this peer submits to the desync canary for the current emulated frame.
 		//

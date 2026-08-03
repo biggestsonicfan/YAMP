@@ -762,15 +762,30 @@ void YAMPUserInterface::DrawGameStF()
 		}
 	}
 
-	if (ImGui::Checkbox("Versus Mode", &m_m2VersusMode))
+	// FROZEN once a room exists, exactly as Damage is and for the same reason: it is published
+	// when the room is CREATED, so from that moment it describes the match rather than this
+	// machine. Letting it move could only mean a value that is silently ignored or one peer
+	// switching to a different boot mid-match.
+	if (net::SessionInProgress())
+	{
+		const net::Status vsStatus = net::GetStatus();
+		ImGui::LabelText("Versus Mode", "%s", vsStatus.vs_mode ? "on" : "off");
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Set by the room's host and fixed for the match.\n"
+				"Leave the room to change your own setting.");
+		}
+	}
+	else if (ImGui::Checkbox("Versus Mode", &m_m2VersusMode))
 	{
 		m_pageModified = true;
 	}
-	if (ImGui::IsItemHovered())
+	if (!net::SessionInProgress() && ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("Boots straight into a credited 2-player versus match, the way\n"
 			"%s's minigame runs. Unchecked: authentic arcade boot\n"
-			"(attract mode, single-player ladder).\nRequires a restart.",
+			"(attract mode, single-player ladder).\n"
+			"Adopted from the room's host during netplay; otherwise needs a restart.",
 			gGeneral.GetParentGameName());
 	}
 
@@ -1855,7 +1870,8 @@ void YAMPUserInterface::DrawNetplay()
 			// otherwise publish a value the local emulator is not running under.
 			const YAMPSettings* set = gGeneral.GetSettings();
 			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage,
-				set != nullptr && set->m_vf2Version20);
+				set != nullptr && set->m_vf2Version20,
+				set != nullptr && set->m_m2VersusMode);
 		}
 		if (ImGui::IsItemHovered())
 		{
@@ -1885,7 +1901,7 @@ void YAMPUserInterface::DrawNetplay()
 		net::RoomRow rooms[16];
 		const unsigned int roomCount = net::GetRooms(rooms, static_cast<unsigned int>(std::size(rooms)));
 
-		if (ImGui::BeginTable("##rooms", 5,
+		if (ImGui::BeginTable("##rooms", 6,
 			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
 			{ 0.0f, 130.0f }))
 		{
@@ -1895,6 +1911,9 @@ void YAMPUserInterface::DrawNetplay()
 			ImGui::TableSetupColumn(
 				gGeneral.GetGameId() == YAMPGeneral::GameId::VF2 ? "Version" : "Damage",
 				ImGuiTableColumnFlags_WidthFixed, 60.0f);
+			// VS mode gets its own column rather than sharing the per-game one: it applies to all
+			// three games, and it is orthogonal to Damage/Version rather than an alternative to it.
+			ImGui::TableSetupColumn("VS", ImGuiTableColumnFlags_WidthFixed, 40.0f);
 			ImGui::TableSetupColumn("Locked", ImGuiTableColumnFlags_WidthFixed, 55.0f);
 			ImGui::TableSetupColumn("Room ID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
 			ImGui::TableHeadersRow();
@@ -1927,10 +1946,14 @@ void YAMPUserInterface::DrawNetplay()
 					ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
 				}
 				ImGui::TableSetColumnIndex(3);
+				// Blank rather than "no" when off, so a browser full of ordinary arcade rooms
+				// stays quiet and the VS ones stand out.
+				ImGui::TextUnformatted(rooms[i].vs_mode ? "yes" : "");
+				ImGui::TableSetColumnIndex(4);
 				// A locked room cannot be entered without the password at all: the server only
 				// hands a password-less joiner a PUBLIC slot, and a locked room has none.
 				ImGui::TextUnformatted(rooms[i].has_password ? "yes" : "");
-				ImGui::TableSetColumnIndex(4);
+				ImGui::TableSetColumnIndex(5);
 				ImGui::Text("%llu", rooms[i].room_id);
 				ImGui::PopID();
 			}
@@ -1991,6 +2014,9 @@ void YAMPUserInterface::DrawNetplay()
 			ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal",
 				status.hosting ? "" : " (set by the host)");
 		}
+		// Stated for every game, because every game reads it and it changes the boot itself.
+		ImGui::Text("Versus mode: %s%s", status.vs_mode ? "on" : "off",
+			status.hosting ? "" : " (set by the host)");
 		ImGui::PushTextWrapPos();
 		if (status.hosting)
 		{
