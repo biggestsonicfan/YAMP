@@ -234,6 +234,29 @@ void m2ftg::NetSession::Drive()
 			// discard them.
 			const uint32_t preSeed = net::IsAvailable()
 				? net::Api()->get_match_seed(net::Session()) : 0;
+
+			// *** KNOWN BUG, DO NOT "FIX" BY WAITING HERE ***
+			//
+			// On a GUEST this reads 0. Measured on two machines 2026-08-03: the guest logged
+			// `RNG seeded 0x00000000, board reset` and only afterwards `barrier released; round 1
+			// seed 0x813AC110`, while the host seeded with the real value - so the two peers reset
+			// their boards drawing from differently seeded generators, which is a divergence before
+			// frame 0 and precisely what this seeding exists to prevent.
+			//
+			// It is not an accident of timing. YampNet.h states the contract outright: the match
+			// seed is "valid once state is SYNCING or IN_MATCH". Prep runs at IN_ROOM, BEFORE the
+			// barrier, so reading it here is reading a value the ABI does not promise yet. It
+			// happens to be populated on the host because the host generated it.
+			//
+			// Blocking prep until the seed is non-zero DEADLOCKS: prep would wait for the seed, the
+			// seed arrives with the barrier, and the barrier only opens once both peers finish prep
+			// and call begin_round. Tried 2026-08-03; the guest's Start Match silently did nothing.
+			//
+			// The real fix has to reconcile two requirements that currently conflict - seed BEFORE
+			// the reset (the ROM's re-init draws from the generator), but the seed is not knowable
+			// until after the barrier. Options: have the plugin publish the seed with the room so a
+			// guest has it at IN_ROOM (best - it is the host's from room creation either way), or
+			// run a second seed+reset+re-anchor cycle once the barrier releases.
 			const bool didSeed = SeedHostRng(preSeed);
 
 			// Then reset, and let the ROM come back up on its own - now drawing from a generator

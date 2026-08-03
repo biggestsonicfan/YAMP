@@ -3,9 +3,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "ImportSymbols.h"
 
@@ -14,6 +16,8 @@
 #include "../../pxd/K2/sl.h"            // pxd::K2 — THIS generation's context layout (0xF3C0)
 #include "../../pxd/LJ/sl_internal.h"   // handle_internal_buffer_t (the 8-byte queue node)
 #include "../m2ftg.h"                 // m2ftg_config_t (0x100C) — unchanged in this generation
+#include "../NetSession.h"            // the shared netplay session driver
+#include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
 #include "../ModuleArgs.h"
 #include "../DisplayModes.h"
 #include "../../input/Input.h"
@@ -21,6 +25,7 @@
 #include "../../DebugLog.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
+#include "../../Utils/MemoryMgr.h"       // VP::Patch — protection-aware writes into module .text
 #include "../../Utils/ScopedUnprotect.hpp"
 #include "../../wil/resource.h"
 
@@ -105,6 +110,382 @@ namespace m2ftg
 		static uint8_t* g_gsContext = nullptr;
 		static void* g_slContext = nullptr;
 		static int s_zeroDword = 0;
+
+		// The module's two-board gate, or null in a module that has no second board - see the note
+		// on ImportSymbol::TWO_BOARD_GATE. Written once, after module_start.
+		static uint8_t* g_twoBoardGate = nullptr;
+
+		// "-von-2board" on YAMP's command line. EXPERIMENT, off by default: nothing about normal
+		// Virtual On play changes unless it is passed. Virtual On is a linked-cabinet game and the
+		// module carries the whole second-board implementation with the switch never thrown; this
+		// throws it, so the first question - does board 1 step at all? - can be answered by running
+		// it rather than by reading more disassembly, which on this DLL has a poor track record.
+		static bool WantTwoBoardMode()
+		{
+			static const bool wanted = wcsstr(GetCommandLineW(), L"-von-2board") != nullptr;
+			return wanted;
+		}
+
+		// "-von-2probe" logs the same state WITHOUT throwing the switch, so the two-board run has
+		// a control to be compared against. Measuring only the experimental arm is how you talk
+		// yourself into believing a number that was always going to be there.
+		static bool WantTwoBoardProbe()
+		{
+			static const bool wanted = WantTwoBoardMode()
+				|| wcsstr(GetCommandLineW(), L"-von-2probe") != nullptr;
+			return wanted;
+		}
+
+		// ---- two-board diagnostics -----------------------------------------------------------
+		//
+		// Only reachable behind -von-2board, and only meaningful for `omg`. These are RVAs into
+		// omg-pxd-w64-gog_retail.dll, taken from the reversing in docs/von-netplay-recon.md; they
+		// are safe to hardcode ONLY because GameVerify pins that module by SHA-256 before it is
+		// ever loaded, so a different build cannot reach this code. They exist to answer one
+		// question - does board 1's ROM actually run? - and should go away once it is answered.
+		//
+		// THE TEST: the frame step runs the link transfer BEFORE the two-board gate, so both
+		// boards' CommData fill in either way and prove nothing. CommSend is different: a board's
+		// SEND buffer is written by that board's own ROM. So a non-zero P2.CommSend is the one
+		// signal that means board 1 executed.
+		namespace OmgRva
+		{
+			constexpr size_t COMM_P1        = 0x7C2730;   // comm block 0 base
+			constexpr size_t COMM_P1_SEND   = 0x7C4730;   // P1 + 0x2000
+			constexpr size_t COMM_P1_FLAG   = 0x7CA731;   // P1 + 0x8001, bit0 = bank select
+			constexpr size_t COMM_P2_SEND   = 0x7CC738;   // P2 + 0x2000, P2 = P1 + 0x8008
+			constexpr size_t COMM_P2_FLAG   = 0x7D2739;
+			constexpr size_t BOARD_INDEX    = 0x6911B4;   // written by the bank switch
+			constexpr size_t COMM_PAYLOAD   = 0x700;      // bytes the link moves per board per frame
+
+			// Per-board work RAM. The bank switch at 0x180069D30 does NOT store region bases - it
+			// stores BIAS pointers, `region - i960_base`, so the emulator can index them with a
+			// raw i960 address. Its two arms give, for the i960 0x500000 window where all of
+			// Virtual On's game globals live (`LEA RAX,[...]` then `SUB RAX,0x500000`):
+			//     board 0:  0x181337020 - 0x500000   ->  i960 0x500000 sits at RVA 0x1337020
+			//     board 1:  0x180E37010 - 0x500000   ->  i960 0x500000 sits at RVA 0x0E37010
+			// (The other pair, 0x180C37010 / 0x180F37010 less 0x200000, is the 0x200000 window.)
+			// The module's own copy of m2ftg_config_t, the 0x100C bytes module_start memcpy'd from
+			// params+0x38 into &DAT_1807A7FB0. +0x00 is `kind`, which must read 3 for omg - that
+			// is the check that makes a wrong base fail loudly instead of corrupting .data.
+			constexpr size_t CONFIG_BASE    = 0x7A7FB0;
+
+			constexpr size_t BOARD0_R5      = 0x1337020;
+			constexpr size_t BOARD1_R5      = 0x0E37010;
+			constexpr uint32_t I960_R5_BASE = 0x500000;
+
+			// The per-board blocks the bank switch (0x180069D30) re-points, base + board*stride.
+			//
+			// BACKUP/IO is the one that answers input routing: `backup_write` writes through this,
+			// backup RAM starts at +0x91 (0x4000 bytes) and the I/O ports sit just past it - which
+			// is where `module_main` puts the coin byte, at +0x4098. If player N's pad reaches
+			// board N, the two boards' I/O bytes must differ when only pad[1] is held.
+			constexpr size_t BACKUP_IO_BASE = 0x180C2EEC0;
+			constexpr size_t BACKUP_IO_STEP = 0x409C;
+			constexpr size_t IO_PORTS       = 0x4091;   // just past the 0x4000 of backup RAM
+			constexpr size_t IO_PORTS_LEN   = 0xB;
+
+			// The ~2 MB per-board region - the presentation candidate (video/framebuffer sized).
+			constexpr size_t VIDEO_BASE     = 0x1807DADC0;
+			constexpr size_t VIDEO_STEP     = 0x20A080;
+			constexpr size_t VIDEO_SAMPLE   = 0x1000;
+
+			// Named ROM globals, straight out of the module's own symbol table (RVA 0x4507E0) and
+			// identical in the PS3 build. THIS is the real test, and unlike CommSend it needs no
+			// match to be running: if the gate makes the frame step call board 1's step functions,
+			// board 1 boots its own ROM from frame 0 and these fill in. All still zero after a
+			// thousand frames means board 1 never executed.
+			constexpr uint32_t SYM_BOARDTYPE = 0x5023E0;
+			constexpr uint32_t SYM_SYNCHFLAG = 0x5024E0;   // the ROM's link handshake (`synch`)
+			constexpr uint32_t SYM_SYNCHTIME = 0x5024E4;
+			constexpr uint32_t SYM_GLOBCNTR  = 0x5024E8;   // the ROM's own shared frame counter
+			constexpr uint32_t SYM_MAINMODE  = 0x5039F4;
+			constexpr uint32_t SYM_VERSUSMODE= 0x503A7C;
+			constexpr uint32_t SYM_NET_FLAG  = 0x5770B0;
+			constexpr uint32_t SYM_LINK_ID   = 0x5770B1;
+		}
+
+		// Native address of an i960 global in a given board's work RAM.
+		static uint8_t* I960At(uint8_t* base, int board, uint32_t i960Addr)
+		{
+			const size_t bias = (board != 0) ? OmgRva::BOARD1_R5 : OmgRva::BOARD0_R5;
+			return base + bias + (i960Addr - OmgRva::I960_R5_BASE);
+		}
+
+		// "-von-padtest": hold a distinctive button pattern on pad[1] ONLY, so the two boards can be
+		// told apart by their inputs. Without it both pads are idle under -frames and the boards are
+		// expected to look identical - which would prove nothing either way.
+		static bool WantPadTest()
+		{
+			static const bool wanted = wcsstr(GetCommandLineW(), L"-von-padtest") != nullptr;
+			return wanted;
+		}
+
+		// "-von-render1": force drawing board 1. OFFLINE DEBUG ONLY - online, which cabinet you see
+		// follows your netplay role, never a switch. See SetRenderBoard.
+		static bool WantRenderBoard1()
+		{
+			static const bool wanted = wcsstr(GetCommandLineW(), L"-von-render1") != nullptr;
+			return wanted;
+		}
+
+		static uint8_t* g_renderBoardSelect = nullptr;
+
+		// Choose which cabinet the render draws, by patching the two bytes that decide what the
+		// frame step leaves selected: `XOR ECX,ECX` (board 0) <-> `MOV CL,1` (board 1).
+		//
+		// Driven per frame from the netplay role rather than from a command line, because a
+		// launch-time choice is a footgun: both players could pick the same cabinet, or mismatch,
+		// and the symptom would be a desync that looks like a netcode bug. Host owns pad 0 and the
+		// MASTER board, guest owns pad 1 and the SLAVE - localPad already carries exactly that, so
+		// nothing needs asking at launch and the two peers cannot disagree.
+		// NOTE the VP::Patch. This writes into the module's .text, and the ScopedUnprotect that made
+		// .text writable lives in ResolveSymbolsAndPatch and is long out of scope by the time the
+		// game loop runs - so a bare store here faults. It faulted in the worst possible way, too:
+		// the guards below mean nothing is written while the bytes already read correctly, so the
+		// only frame that actually stored was the one where localPad first became 1 - i.e. YAMP
+		// died precisely on "Start Match", and only for the guest. VP::Patch wraps the write in
+		// VirtualProtect and restores the old protection.
+		static void SetRenderBoard(int board)
+		{
+			if (g_renderBoardSelect == nullptr) return;
+			const uint8_t* p = g_renderBoardSelect;
+			const bool wantOne = board != 0;
+			// Verify before writing - never patch blind, and never write if it already reads right.
+			if (wantOne && p[0] == 0x33 && p[1] == 0xC9)
+			{
+				Memory::VP::Patch(g_renderBoardSelect, { 0xB1, 0x01 });   // MOV CL,1  -> render board 1
+			}
+			else if (!wantOne && p[0] == 0xB1 && p[1] == 0x01)
+			{
+				Memory::VP::Patch(g_renderBoardSelect, { 0x33, 0xC9 });   // XOR ECX,ECX -> render board 0
+			}
+		}
+
+		// "-von-findctr": hunt for the ROM's per-frame counter.
+		//
+		// NetSession needs a value that advances exactly once per emulated frame: it is both the
+		// round-start anchor and the desync canary, and getting it wrong is precisely what put
+		// VF2's two peers one frame apart. Rather than guess from the symbol table (GlobCntr was
+		// the obvious candidate and measured only ~0.37 ticks per module_main, so it is not one),
+		// sweep the whole work-RAM window and let the data name it.
+		//
+		// For every dword in the i960 0x500000 window, classify each module_main call as
+		// delta == +1, delta == 0, or anything else. A true frame counter is "+1 or 0, never
+		// anything else": the zero frames are calls where the board genuinely did not advance,
+		// which VF2 proved really happen (~5% there) and which EndFrame already handles.
+		static bool WantFindCounter()
+		{
+			static const bool wanted = wcsstr(GetCommandLineW(), L"-von-findctr") != nullptr;
+			return wanted;
+		}
+
+		// The module's board-bank switch, or null in a module with only one board.
+		using board_select_t = void(*)(int);
+		static board_select_t g_boardSelect = nullptr;
+
+		// The module's per-board init — what boot calls for board 0 and board 1. RESET does not.
+		static board_select_t g_perBoardInit = nullptr;
+
+		static uint8_t* g_dllBase = nullptr;
+
+		// Non-zero byte count, so "did anything ever land here" is one number.
+		static uint32_t NonZeroCount(const uint8_t* p, size_t n)
+		{
+			uint32_t hits = 0;
+			for (size_t i = 0; i < n; ++i) hits += (p[i] != 0);
+			return hits;
+		}
+
+		// FNV-1a over a sample, so "are these two regions the same" is one comparison.
+		static uint32_t Hash32(const uint8_t* p, size_t n)
+		{
+			uint32_t h = 2166136261u;
+			for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
+			return h;
+		}
+
+		// The counter sweep. One pass per module_main call, over the i960 0x500000 window.
+		namespace FindCtr
+		{
+			// The named globals run to at least 0x577590 (`r_num`), so sweep the whole 512 KB
+			// rather than the first 32 KB - the first pass found nothing but flags.
+			constexpr uint32_t BASE  = 0x500000;
+			constexpr uint32_t WORDS = 0x80000 / 4;
+
+			struct Slot { uint32_t prev; uint32_t inc; uint32_t same; uint32_t other; };
+			static std::vector<Slot> s_slots;
+			static bool s_primed = false;
+
+			static void Sample(uint8_t* dllBase, int board)
+			{
+				const uint8_t* ram = I960At(dllBase, board, BASE);
+				if (s_slots.empty()) s_slots.resize(WORDS);
+				for (size_t i = 0; i < WORDS; ++i)
+				{
+					uint32_t v;
+					memcpy(&v, ram + i * 4, sizeof(v));
+					if (s_primed)
+					{
+						const uint32_t d = v - s_slots[i].prev;
+						if (d == 1)      ++s_slots[i].inc;
+						else if (d == 0) ++s_slots[i].same;
+						else             ++s_slots[i].other;
+					}
+					s_slots[i].prev = v;
+				}
+				s_primed = true;
+			}
+
+			// ---- boot-state hunt ---------------------------------------------------------
+			//
+			// `DwGame.rvaBootState` is a MODULE global (not emulated RAM) that reads 2 once the
+			// board is up; BoardBooted() gates every debug-menu action and ResetBoard on it.
+			// Rather than guess, snapshot the region where the module's other known globals live
+			// - the gate 0x6910DE, board index 0x6911B4, RNG holder 0x690810 and run-state
+			// 0x7D2B10 are all in here - and report what climbed to exactly 2 and stayed.
+			constexpr size_t GLOB_LO = 0x680000;
+			constexpr size_t GLOB_HI = 0x7E0000;
+			static std::vector<uint32_t> s_globFirst;
+
+			static void SnapGlobals(uint8_t* dllBase)
+			{
+				const size_t n = (GLOB_HI - GLOB_LO) / 4;
+				s_globFirst.resize(n);
+				memcpy(s_globFirst.data(), dllBase + GLOB_LO, n * 4);
+			}
+
+			static void ReportGlobals(uint8_t* dllBase)
+			{
+				size_t shown = 0;
+				DebugLogFile("[findboot] dwords in %06zX..%06zX that are 2 now and were <2 at frame 1\n",
+					GLOB_LO, GLOB_HI);
+				for (size_t i = 0; i < s_globFirst.size(); ++i)
+				{
+					uint32_t now;
+					memcpy(&now, dllBase + GLOB_LO + i * 4, sizeof(now));
+					if (now != 2 || s_globFirst[i] >= 2) continue;
+					DebugLogFile("[findboot]   RVA %06zX  %u -> 2\n",
+						GLOB_LO + i * 4, s_globFirst[i]);
+					if (++shown >= 40) { DebugLogFile("[findboot]   ...truncated\n"); break; }
+				}
+				DebugLogFile("[findboot] %zu candidate(s)\n", shown);
+			}
+
+			// Report the dwords that only ever held still or stepped by one, best first.
+			static void Report(int board)
+			{
+				std::vector<size_t> hits;
+				for (size_t i = 0; i < s_slots.size(); ++i)
+				{
+					if (s_slots[i].other == 0 && s_slots[i].inc > 0) hits.push_back(i);
+				}
+				std::sort(hits.begin(), hits.end(),
+					[](size_t a, size_t b) { return s_slots[a].inc > s_slots[b].inc; });
+				DebugLogFile("[findctr] board %d: %zu monotone dwords (+1 or 0, never else)\n",
+					board, hits.size());
+				for (size_t n = 0; n < hits.size() && n < 16; ++n)
+				{
+					const size_t i = hits[n];
+					DebugLogFile("[findctr]   i960 0x%06X  +1 x%u  hold x%u  (now %u)\n",
+						BASE + static_cast<uint32_t>(i * 4),
+						s_slots[i].inc, s_slots[i].same, s_slots[i].prev);
+				}
+
+				// Near-misses matter as much as clean hits: a counter that mostly steps by one but
+				// occasionally jumps is still the ROM's frame counter, it just is not safe as the
+				// anchor. Listing them is what tells the two cases apart instead of reporting
+				// "nothing found" and leaving it ambiguous.
+				std::vector<size_t> nearMiss;
+				for (size_t i = 0; i < s_slots.size(); ++i)
+				{
+					if (s_slots[i].other > 0 && s_slots[i].inc > 0) nearMiss.push_back(i);
+				}
+				std::sort(nearMiss.begin(), nearMiss.end(),
+					[](size_t a, size_t b) { return s_slots[a].inc > s_slots[b].inc; });
+				DebugLogFile("[findctr] board %d: top near-misses (step by one, but not always)\n", board);
+				for (size_t n = 0; n < nearMiss.size() && n < 16; ++n)
+				{
+					const size_t i = nearMiss[n];
+					DebugLogFile("[findctr]   i960 0x%06X  +1 x%u  hold x%u  other x%u  (now %u)\n",
+						BASE + static_cast<uint32_t>(i * 4),
+						s_slots[i].inc, s_slots[i].same, s_slots[i].other, s_slots[i].prev);
+				}
+			}
+		}
+
+		static void LogTwoBoardState(int frame, uint32_t texid)
+		{
+			if (g_dllBase == nullptr) return;
+			const auto at = [](size_t rva) { return g_dllBase + rva; };
+			// These two are absolute VAs in the static image, so rebase them like everything else.
+			const auto io = [&](int b) {
+				return g_dllBase + (OmgRva::BACKUP_IO_BASE - 0x180000000)
+					+ b * OmgRva::BACKUP_IO_STEP + OmgRva::IO_PORTS;
+			};
+			const auto video = [&](int b) {
+				return g_dllBase + (OmgRva::VIDEO_BASE - 0x180000000) + b * OmgRva::VIDEO_STEP;
+			};
+
+			char io0[32], io1[32];
+			for (size_t i = 0; i < OmgRva::IO_PORTS_LEN; ++i)
+			{
+				snprintf(io0 + i * 2, 3, "%02X", io(0)[i]);
+				snprintf(io1 + i * 2, 3, "%02X", io(1)[i]);
+			}
+			DebugLogFile("[2board] texid=%u io0=%s io1=%s vid0=%08X vid1=%08X\n",
+				texid, io0, io1,
+				Hash32(video(0), OmgRva::VIDEO_SAMPLE), Hash32(video(1), OmgRva::VIDEO_SAMPLE));
+			const auto sym = [](int board, uint32_t a) { return I960At(g_dllBase, board, a); };
+			const auto u32 = [&](int b, uint32_t a) { return *reinterpret_cast<uint32_t*>(sym(b, a)); };
+
+			// Read the gate BACK every sample. The module's own mode machine has a state (0x10)
+			// that zeroes it along with the board index, so a write made once after module_start
+			// is not necessarily still there - and "we set it" is not the same claim as "it is
+			// set".
+			{
+				const uint8_t* c = at(OmgRva::CONFIG_BASE);
+				DebugLogFile("[cfg] kind=%u diff=%u country=%u acf=%u vf20=%u free=%u vs=%u sram=%u\n",
+					*reinterpret_cast<const uint32_t*>(c), c[4], c[5], c[6], c[7], c[9], c[10], c[11]);
+			}
+			// WHICH BOARD IS THE CANARY ACTUALLY HASHING?
+			//
+			// DwGame.rvaRamBasePtr is 0xC37000, which the bank switch RE-POINTS per board, so it
+			// names whichever board is selected at the moment StateCheckValue runs - not board 0 by
+			// construction. If that selection differs between the two peers, the desync check
+			// compares one machine's MASTER against the other's SLAVE and reports a divergence that
+			// is not one.
+			//
+			// So log the live board index next to per-board hashes of the three chunks that
+			// actually diverged (0x510000 / 0x520000 / 0x590000). Read across the two peers' logs:
+			//   * peer A h0 == peer B h0  -> the boards agree; the canary is sampling the wrong one
+			//   * h0 differs across peers -> a real divergence, and the board index is a red herring
+			{
+				const auto chunk = [&](int b, uint32_t a) {
+					return Hash32(I960At(g_dllBase, b, a), 0x10000);
+				};
+				DebugLogFile("[board] idx=%d  B0 %08X/%08X/%08X  B1 %08X/%08X/%08X\n",
+					*reinterpret_cast<int32_t*>(at(OmgRva::BOARD_INDEX)),
+					chunk(0, 0x510000), chunk(0, 0x520000), chunk(0, 0x590000),
+					chunk(1, 0x510000), chunk(1, 0x520000), chunk(1, 0x590000));
+			}
+			DebugLogFile("[2board] gate=%d ", g_twoBoardGate != nullptr ? *g_twoBoardGate : -1);
+			DebugLogFile("[2board] frame=%d flags=%02X/%02X send=%u/%u | "
+				"B0 type=%u glob=%u main=%u vs=%u synch=%u/%u net=%u id=%u | "
+				"B1 type=%u glob=%u main=%u vs=%u synch=%u/%u net=%u id=%u\n",
+				frame,
+				*at(OmgRva::COMM_P1_FLAG), *at(OmgRva::COMM_P2_FLAG),
+				NonZeroCount(at(OmgRva::COMM_P1_SEND), OmgRva::COMM_PAYLOAD),
+				NonZeroCount(at(OmgRva::COMM_P2_SEND), OmgRva::COMM_PAYLOAD),
+				u32(0, OmgRva::SYM_BOARDTYPE), u32(0, OmgRva::SYM_GLOBCNTR),
+				u32(0, OmgRva::SYM_MAINMODE), u32(0, OmgRva::SYM_VERSUSMODE),
+				u32(0, OmgRva::SYM_SYNCHFLAG), u32(0, OmgRva::SYM_SYNCHTIME),
+				*sym(0, OmgRva::SYM_NET_FLAG), *sym(0, OmgRva::SYM_LINK_ID),
+				u32(1, OmgRva::SYM_BOARDTYPE), u32(1, OmgRva::SYM_GLOBCNTR),
+				u32(1, OmgRva::SYM_MAINMODE), u32(1, OmgRva::SYM_VERSUSMODE),
+				u32(1, OmgRva::SYM_SYNCHFLAG), u32(1, OmgRva::SYM_SYNCHTIME),
+				*sym(1, OmgRva::SYM_NET_FLAG), *sym(1, OmgRva::SYM_LINK_ID));
+		}
 
 		// The gs-context allocator, at **gs+0xA0** in this generation (YLAD puts its equivalent at
 		// gs+0xB0 — here 0xB0 is the cgs_device_context instead, so do NOT carry that over).
@@ -469,6 +850,19 @@ namespace m2ftg
 			sl::archive_lock_wunlock = reinterpret_cast<decltype(sl::archive_lock_wunlock)>(
 				symbolMap.GetSymbol(ImportSymbol::ARCHIVE_LOCK_RUNLOCK));
 
+			// Optional: only the linked-cabinet modules (omg, mr) have a second board at all.
+			g_twoBoardGate = static_cast<uint8_t*>(symbolMap.TryGetSymbol(ImportSymbol::TWO_BOARD_GATE));
+			g_boardSelect = reinterpret_cast<board_select_t>(
+				symbolMap.TryGetSymbol(ImportSymbol::BOARD_SELECT));
+			g_perBoardInit = reinterpret_cast<board_select_t>(
+				symbolMap.TryGetSymbol(ImportSymbol::PER_BOARD_INIT));
+			g_dllBase = static_cast<uint8_t*>(dll);
+
+			// Which board the render draws. Applied per frame from the netplay role rather than
+			// once at load from a command line - see SetRenderBoard.
+			g_renderBoardSelect =
+				static_cast<uint8_t*>(symbolMap.TryGetSymbol(ImportSymbol::RENDER_BOARD_SELECT));
+
 			// The gs context pointer global self-initialises lazily; point it up front.
 			auto** ppGsCtx = static_cast<uint8_t**>(symbolMap.GetSymbol(ImportSymbol::GS_CONTEXT_PTR));
 			*ppGsCtx = g_gsContext;
@@ -560,11 +954,23 @@ namespace m2ftg
 			execute_info.sound_volume =
 				static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
 
+			// (1) Read the session state ONCE at the top, before Drive() can advance it, so pad
+			// routing and the coin protocol see one stable answer for the whole frame. The order
+			// of the four calls is part of the contract - see NetSession.h.
+			NetSession& net_ = NetplaySession();
+			const NetSession::Status netStatus = net_.GetStatus();
+			const bool netplayMatch = netStatus.inMatch;
+			const int32_t netplayLocalPad = netStatus.localPad;
+			const bool netplayLocked = netStatus.locked;
+
 			static bool s_pauseMenuOpen = false;
 			{
+				// Disabled during netplay, as in every other host: the module's pause path stops
+				// the emulated board, and stopping it on one machine only desyncs the pair.
+				if (netplayLocked) s_pauseMenuOpen = false;
 				static bool s_escWasDown = false;
 				const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-				if (escDown && !s_escWasDown) s_pauseMenuOpen = !s_pauseMenuOpen;
+				if (escDown && !s_escWasDown && !netplayLocked) s_pauseMenuOpen = !s_pauseMenuOpen;
 				s_escWasDown = escDown;
 			}
 			if (s_pauseMenuOpen) execute_info.status |= 1;
@@ -575,8 +981,23 @@ namespace m2ftg
 			// 0xE0 prefix.
 			Input::PollPads();
 			static pxd::csl_pad s_pads[2];
-			s_pads[0].set_state(0);
-			s_pads[1].set_state(1);
+			if (netplayMatch && netplayLocalPad >= 0)
+			{
+				// ONLINE YOU ALWAYS PLAY AS PLAYER 1 LOCALLY. The guest occupies pad slot 1 in the
+				// match, but they are the only person at that keyboard and have their own Player 1
+				// bindings. The other slot is filled from P2 only to stay well-formed: Step()
+				// overwrites BOTH pads from the transmitted inputs before module_main sees them.
+				//
+				// For Virtual On this ALSO decides which cabinet you drive: pad[N] reaches board N
+				// (measured - see docs/von-netplay-recon.md), so localPad is the cabinet.
+				s_pads[netplayLocalPad].set_state(0);
+				s_pads[1 - netplayLocalPad].set_state(1);
+			}
+			else
+			{
+				s_pads[0].set_state(0);
+				s_pads[1].set_state(1);
+			}
 			for (int p = 0; p < 2; p++)
 			{
 				execute_info.pad[p] = s_pads[p];
@@ -595,14 +1016,44 @@ namespace m2ftg
 				for (int i = 0; i < 8; i++) execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
 			}
 
+			// (2) Poll the plugin and run the round-start state machine, then (3) decide whether the
+			// emulator may advance. Step() also overwrites BOTH pads with the transmitted inputs,
+			// which is why it runs after the local pad fill above.
+			//
+			// MARSHALLED, because this generation's execute_info is NOT the one the netplay plugin
+			// knows. The plugin writes pads at Lost Judgment's offsets - 0x1760 struct, 0x190 pad
+			// stride, pad[1] at 0x1B0 - and validates them through yampnet_layout at load. Kiwami 2
+			// uses the plain engine pad instead: 0x16E0 struct, 0x170 stride, pad[1] at 0x190.
+			//
+			// So hand the plugin a shadow struct in ITS layout and copy the pads across. Loosening
+			// the handshake instead would trade a load-time failure for a silent write at the wrong
+			// offset, which is exactly what that handshake exists to prevent. The copy is safe
+			// because lj_pad_t is csl_pad with a tail added - the first 0x170 bytes, which is
+			// everything the plugin reads or writes (m_buttons +0xA0, m_port +0xE0), are identical.
+			net_.Drive();
+			static m2ftg_execute_info_t s_netShadow {};
+			static_assert(sizeof(s_netShadow.pad[0]) >= sizeof(execute_info.pad[0]),
+				"the LJ pad must be able to hold this generation's pad");
+			for (int p = 0; p < 2; p++)
+			{
+				memcpy(&s_netShadow.pad[p], &execute_info.pad[p], sizeof(execute_info.pad[p]));
+			}
+			const bool advanceFrame = net_.Step(s_netShadow);
+			for (int p = 0; p < 2; p++)
+			{
+				memcpy(&execute_info.pad[p], &s_netShadow.pad[p], sizeof(execute_info.pad[p]));
+			}
+
 			// Dedicated coin binding -> the coin status bit (host->module bit5). Meaningless in
-			// freeplay, and swallowed while the pause menu is open.
+			// freeplay, swallowed while the pause menu is open, and dead for the whole session
+			// during netplay - it is a host->module input outside the transmitted pad, so one
+			// machine raising it desyncs the pair.
 			{
 				static bool s_coinWasDown[2] = {};
 				for (int p = 0; p < 2; p++)
 				{
 					const bool down = Input::ActionDown(p, Input::Action_Coin);
-					if (down && !s_coinWasDown[p] && !s_isFreeplay && !s_pauseMenuOpen)
+					if (down && !s_coinWasDown[p] && !s_isFreeplay && !s_pauseMenuOpen && !netplayLocked)
 					{
 						execute_info.status |= 0x20;
 					}
@@ -648,7 +1099,149 @@ namespace m2ftg
 				return false;   // Quit picked
 			}
 
-			const int funcResult = g_moduleMain(sizeof(execute_info), &execute_info);
+			// Reassert the two-board gate every frame. Measured: a single write after module_start
+			// is gone by frame 200 - the module's own mode machine passes through the state that
+			// zeroes it (along with the board index and the link-enabled gate) during bring-up.
+			// Holding it set is the crude version; once board 1 is proven to run, this should
+			// become a write at the right point in that state machine rather than a per-frame
+			// stomp.
+			// ALWAYS two-board on a module that has a second board, from boot, whether or not a
+			// session is up. Deliberately not conditional on netplay:
+			//
+			//   * Turning it on AT session start is itself a desync risk - board 1 would begin
+			//     booting at a host-timing-dependent moment, differently on each peer. Always-on
+			//     removes the transition rather than trying to synchronise it.
+			//   * The launcher passes only the game's bootArg, so a flag could never reach a
+			//     launcher-started match. Both peers would silently run single-board, which is
+			//     what happened during the first two-machine tests.
+			//   * MEASURED equivalent: over 2500 frames the two modes reach the same status
+			//     progression (0x0 -> 0x40) and the same MainMode, with GlobCntr differing only by
+			//     the link check's extra boot work. Virtual On does not stall waiting for the
+			//     second cabinet.
+			//
+			// Still UNVERIFIED for actual gameplay - the ROM has WaitAnother/WaitChallenger, and
+			// only boot and attract have been compared. `-von-1board` forces the old behaviour so
+			// the two can still be A/B'd if a match misbehaves.
+			const bool wantTwoBoard = wcsstr(GetCommandLineW(), L"-von-1board") == nullptr;
+
+			// HOLD OFF WHILE THE BOARD IS BEING RESET. NetSession resets the board at round start,
+			// and RESET (0x6BA90) clears this gate AND re-inits board 0 only - board 1's window
+			// biases are left stale. Slamming the gate straight back on makes the frame step
+			// immediately step board 1 through a dead memory map, which faulted at omg+0x44103
+			// reading an unmapped host address for i960 0x500440.
+			//
+			// `locked && !inMatch` is exactly the prep window (reset -> settle -> anchor), so this
+			// waits for the round to go live before re-enabling the second cabinet.
+			//
+			// THIS IS A GUARD, NOT THE FIX. The real answer is to re-init board 1 after a reset -
+			// boot does it explicitly via the per-board init 0x18006BAF0(0)/(1), which RESET does
+			// not call. Until that is wired up, board 1 simply stays out of the round.
+			const bool boardResetting = netplayLocked && !netplayMatch;
+			const bool gateOn = wantTwoBoard && !boardResetting;
+
+			// RE-INIT BOARD 1 BEFORE LETTING IT RUN AGAIN. RESET only re-inits board 0, so board 1
+			// keeps a stale i960 context across a round-start reset - its IP was measured pointing
+			// at 0x500440, inside work RAM, and the fetch faulted the moment the gate came back on.
+			// Boot itself calls this same routine for both boards, so this is the module's own
+			// mechanism rather than anything invented here.
+			//
+			// Only on the OFF->ON edge, and only board 1: board 0 is mid-round by then and must not
+			// be disturbed.
+			{
+				static bool s_gateWasOn = false;
+				if (gateOn && !s_gateWasOn && g_perBoardInit != nullptr)
+				{
+					g_perBoardInit(1);
+					DebugLogFile("[m2ftg::K2] board 1 re-initialised after reset\n");
+				}
+				s_gateWasOn = gateOn;
+			}
+			if (g_twoBoardGate != nullptr && gateOn) *g_twoBoardGate = 1;
+
+			// And which cabinet you SEE follows your role: host drives the master, guest the slave.
+			SetRenderBoard((netplayMatch && netplayLocalPad == 1) || (!netplayLocked && WantRenderBoard1())
+				? 1 : 0);
+
+			// Input-routing probe: hold a pattern on pad[1] and nothing on pad[0]. If player N's
+			// input reaches board N, the two boards' I/O bytes have to diverge; if both boards read
+			// pad[0], they stay identical no matter what pad[1] does.
+			if (WantPadTest())
+			{
+				execute_info.pad[1].m_now = 0x000F;   // all four directions, unmistakable
+				execute_info.pad[1].m_push = 0x000F;
+				execute_info.pad[0].m_now = 0;
+				execute_info.pad[0].m_push = 0;
+			}
+
+			// (4) module_main only runs when the session says the frame may advance; a stalled
+			// lockstep frame skips it entirely, and that skip IS the stall. output_texid is zeroed
+			// every frame and only module_main fills it in, so a stall would leave 0 - which is not
+			// a valid handle. Remember the last good id so a stall re-presents the previous frame.
+			static unsigned int s_lastOutputTexId = 0;
+			int funcResult = 0;
+			if (advanceFrame)
+			{
+				funcResult = g_moduleMain(sizeof(execute_info), &execute_info);
+				if (execute_info.output_texid != 0) s_lastOutputTexId = execute_info.output_texid;
+
+				// PIN BOARD 0 FOR THE CANARY. EndFrame reads emulated RAM through the per-board
+				// bias, so without this it hashes whichever board the frame step happened to leave
+				// selected - and the two boards genuinely differ in the chunk the canary covers
+				// (link_ID alone is 1 on the master, 2 on the slave). Two peers selecting
+				// differently then compare master against slave and desync on frame 1 with no real
+				// divergence. -von-render1 guarantees exactly that, since it leaves board 1 up.
+				//
+				// Restoring afterwards is deliberate: the render already ran inside module_main, so
+				// nothing this frame still depends on the selection, but leaving it as we found it
+				// keeps this purely a measurement.
+				// Only pin while a round is actually LIVE. During round PREP the board is being
+				// reset and EndFrame submits nothing anyway (m_frame is UINT32_MAX and it returns
+				// early), so pinning there buys nothing and costs a lot: the bank switch re-points
+				// a dozen globals, and calling it while the module is mid-reset helped produce a
+				// second-chance AV at omg+0x44103 reading an unmapped host address for i960
+				// 0x500440 - i.e. a stale window bias - right after "board reset".
+				//
+				// The index is also clamped. The switch computes its bases with unchecked IMULs
+				// off the board number, so a garbage value silently points every window somewhere
+				// unmapped rather than failing.
+				const int rawBoard = (g_dllBase != nullptr)
+					? *reinterpret_cast<int32_t*>(g_dllBase + OmgRva::BOARD_INDEX) : 0;
+				const bool pin = netplayMatch && g_boardSelect != nullptr && rawBoard == 1;
+				if (pin) g_boardSelect(0);
+				net_.EndFrame();
+				if (pin) g_boardSelect(1);
+
+				// Per-chunk work-RAM map, into yampnet.log so it lands beside the desync report on
+				// BOTH machines and can be diffed over the share. This replaces the plugin's own
+				// [rammap], which only appears in one of its desync modes and is not reachable from
+				// YAMP's options.
+				//
+				// Logged straight after EndFrame, so each line follows that frame's `timers f=N`
+				// trace and the netplay frame number is unambiguous. Sixteen 0x10000 chunks across
+				// the i960 0x500000 window, PER BOARD - the previous map only showed board 0, and
+				// with two cabinets a divergence can start on either.
+				// Logged whenever a round is LIVE, not only behind a debug flag - the launcher
+				// passes no flags, so a flag-gated diagnostic produces nothing on exactly the runs
+				// that matter. That is why the guest's log had no [vonmap] lines at all.
+				if (g_dllBase != nullptr && (netplayMatch || WantTwoBoardProbe()))
+				{
+					char line[16 * 9 + 1];
+					for (int b = 0; b < 2; ++b)
+					{
+						int n = 0;
+						for (int c = 0; c < 16; ++c)
+						{
+							n += snprintf(line + n, sizeof(line) - n, "%08X ",
+								Hash32(I960At(g_dllBase, b, 0x500000 + c * 0x10000), 0x10000));
+						}
+						net::Logf("[vonmap] b%d %s", b, line);
+					}
+				}
+			}
+			else
+			{
+				execute_info.output_texid = s_lastOutputTexId;
+			}
 
 			const int interesting = execute_info.status | (funcResult << 16);
 			if (interesting != s_lastLogged && s_frame < 5000)
@@ -657,6 +1250,17 @@ namespace m2ftg
 					s_frame, execute_info.status, execute_info.result,
 					execute_info.output_texid, funcResult);
 				s_lastLogged = interesting;
+			}
+			// Sample AFTER module_main, so each delta covers exactly one call.
+			if (WantFindCounter() && g_dllBase != nullptr)
+			{
+				FindCtr::Sample(g_dllBase, 0);
+				if (s_frame == 1)   FindCtr::SnapGlobals(g_dllBase);
+				if (s_frame == 900) { FindCtr::Report(0); FindCtr::ReportGlobals(g_dllBase); }
+			}
+			if (WantTwoBoardProbe() && (s_frame % 200) == 0)
+			{
+				LogTwoBoardState(s_frame, execute_info.output_texid);
 			}
 			s_frame++;
 			// status bit6 = the attract/insert-coin screen, the state the coin dance needs.
@@ -866,6 +1470,23 @@ namespace m2ftg
 					reinterpret_cast<void*>(g_moduleMain),
 					reinterpret_cast<void*>(g_moduleMainFromParams));
 				g_moduleMain = g_moduleMainFromParams;
+			}
+
+			// Throw the second-board switch, AFTER module_start: state 0x10 of the module's own
+			// mode machine zeroes this byte (along with the board index and the link-enabled
+			// gate), so setting it earlier would simply be undone during bring-up.
+			//
+			// The gate lives in .data, which is already writable - no ScopedUnprotect needed, and
+			// the ones taken during symbol resolution are long out of scope by here.
+			if (g_twoBoardGate != nullptr && WantTwoBoardMode())
+			{
+				*g_twoBoardGate = 1;
+				DebugLogFile("[m2ftg::K2] two-board mode ENABLED (gate %p = 1)\n",
+					static_cast<void*>(g_twoBoardGate));
+			}
+			else if (WantTwoBoardMode())
+			{
+				DebugLogFile("[m2ftg::K2] -von-2board asked for, but this module has no two-board gate\n");
 			}
 
 			if (startResult == 0 && g_moduleMain != nullptr)

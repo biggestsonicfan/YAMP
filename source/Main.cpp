@@ -134,8 +134,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         }
 
         m2ftg::K2::PreInitialize();
+
+        // Optional netplay plugin, same as the LJ and YLAD paths: absent yampnet.dll = netplay
+        // simply does not exist. Without this the session driver K2::GameLoop now calls is
+        // permanently inert, because net::IsAvailable() stays false - which is exactly how
+        // Virtual On presented as "the plugin will not load" while Sonic the Fighters loaded it
+        // fine. Nothing was wrong with the plugin; this branch just never asked for it.
+        net::ParseCommandLine();
+        net::Load();
+
         RenderWindow window(hInstance, dll, nShowCmd);
         m2ftg::K2::Run(window);
+        net::Unload();
         ImGui::DestroyContext();
         return 0;
     }

@@ -333,6 +333,110 @@ namespace
 		0x880030, 0x500100, 0x10000,
 	};
 
+	// Virtual On (Cyber Troopers: Operation Moon Gate), hosted on Yakuza Kiwami 2.
+	//
+	// Every value here was MEASURED against omg-pxd-w64-gog_retail.dll rather than carried over
+	// from another game; the full derivation is in docs/von-netplay-recon.md. Two of them differ
+	// in kind from the other three titles, because Virtual On is a LINKED-CABINET game and the
+	// module emulates BOTH Model 2 boards:
+	//
+	//   * The bank switch (RVA 0x69D30) re-points work RAM, the comm block, backup/IO and the
+	//     video region per board. rvaRamBasePtr below is the i960 0x500000 bias it writes, so it
+	//     always names whichever board is currently selected - board 0 after the frame step.
+	//   * The RNG holder is NOT re-pointed, so both boards draw from one set of five generators
+	//     and a single seeding covers the pair.
+	constexpr DwGame DW_OMG = {
+		L"omg-pxd-w64-gog_retail.dll",
+		// bootState: the phase machine at 0x18006A100 walks 0/1/2 and reaches 2 once the ROM is
+		// loaded and both boards are initialised. Identified, not guessed - its phase-2 arm
+		// installs the debug-menu root header 0x476248, the same one the RESET item hangs off.
+		0x7ADCA8,
+		// cpuCtxPtr: the per-board i960 context. The bank switch writes this global as
+		// 0x7C21D0 + board*0x1B0, and 0x1B0 is exactly CTX_FRAME_YIELD - i.e. the stride IS the
+		// context size, so the array and the struct agree.
+		//
+		// NOT optional, despite an earlier note here saying it only drove the StF debug panes.
+		// NetSession's stall test has three signals - canary moved, a timer channel counted down,
+		// a channel was re-armed - and the last two come from ReadI960Timers, which fails flat
+		// when this is 0. Virtual On holds on ~65% of module_main calls (VF2: 5%), so it leans on
+		// that test far harder than any other game, and running it on the canary alone is what a
+		// slower peer would expose as "one emulated frame behind".
+		//
+		// VERIFIED LIVE: three channels enabled and counting down by exactly 6120 instructions on
+		// a frame that advances, and by 0 on a hold - so delta.charged is now a clean discriminator
+		// and EndFrame no longer spends a netplay frame on a call that ran nothing.
+		//
+		// CAVEAT: only the TIMER and IRQ offsets are right for this generation. The trace's `ip=`
+		// (CTX_IP, +0x08) reads 0x346E7010, not a ROM address, and `yield=` (CTX_FRAME_YIELD,
+		// +0x1B0) reads 204 because 0x1B0 is the array STRIDE here, so it lands on the next
+		// board's first byte. Both are trace-only - nothing in the stall test or the canary reads
+		// them - but do not trust those two columns when diffing two peers' logs.
+		0x691148,
+		// memmapTbl: REQUIRED, despite an earlier note in this file's history claiming otherwise.
+		// ReadEmulated32 dispatches through it, and NetSession reads the ROM frame counter that way
+		// to detect the reset and reach the round anchor - so a zero here silently gives romFrame=0
+		// forever and no round can ever start. (The desync canary still worked, because
+		// StateCheckValue hashes the host buffer directly and bypasses this dispatch, which is what
+		// made the gap look harmless at first.)
+		//
+		// Derived, then cross-checked twice: the comm-board device's record sits at 0x44EFE0 and
+		// i960 0x01A10000 >> 20 = 0x1A, giving 0x44EFE0 - 0x1A*0x70 = 0x44E480. The other device
+		// record found independently at 0x44E800 lands on exactly (0x44E800-0x44E480)/0x70 = index
+		// 8, i.e. i960 0x800000-0x8FFFFF, which is where CoproDataPort (0x884000) lives.
+		0x44E480,
+		0x6BA90,   // RESET: the one real debug-menu action; STEP/GO are the usual stubs
+		0x690810, RNG_STREAMS, std::size(RNG_STREAMS),
+		// texBudgetHandler: ABSENT. The wall-clock wrapper 0x1800856B0 has 49 call sites and not
+		// one of them is an HLE handler, so there is no per-machine timing input inside the
+		// simulation to repoint. See the caveat in the doc: that rules out a DIRECT call only.
+		0,
+		0x476510, 121,   // the largest HLE table of the four (StF 76, FV 95, VF2 67)
+		// romFrameCounter: `GlobCntr`, measured by sweeping every dword in the work-RAM window and
+		// classifying each module_main call. It steps by one or holds, and holds are the NORM here
+		// (311 advances in 900 calls - an uncapped host loop against a ~59 Hz board), which is
+		// exactly what EndFrame already handles. Reads identically on BOTH boards.
+		0x5024E8,
+		// PROVISIONAL. Every field above is measured and verified live - the anchor read tracks
+		// GlobCntr exactly and the canary produces a changing work-RAM hash - but NO VON ROUND HAS
+		// BEEN PLAYED YET. Enabled so it can be tested; expect to turn it back off if the first
+		// loopback round misbehaves. Two known risks, both written down rather than discovered
+		// later:
+		//   * GlobCntr makes four non-unit jumps over 900 calls (~+11 total), almost certainly at
+		//     boot/state transitions. The anchor's whole job is to be reached at the SAME value on
+		//     both peers, so a jump straddling the anchor would start the round misaligned.
+		//   * ResetBoard clears the two-board gate, so round start drops to one cabinet unless the
+		//     host holds it - K2Host reasserts it every frame, which is why that is required.
+		// Also unverified: whether RESET re-inits BOTH boards or only the selected one.
+		true,
+		0x7A7FB0, 3,   // config base (module_start's memcpy target, verified live reading kind=3)
+		// Canary: hash work RAM rather than the counter, for VF2's reason plus one of VON's own -
+		// a hash covers game state, and the counter has those four jumps. Same skip of the first
+		// 0x100 bytes.
+		//
+		// RANGE NARROWED TO CHUNK 0 (0x500100..0x510000) after the first loopback smoke test,
+		// which desynced at frame 1. The plugin's work-RAM map localised it precisely: of the
+		// sixteen 0x10000 chunks, only 0x510000, 0x520000 and 0x590000 differed between the
+		// peers - chunk 0, which holds GlobCntr, MainMode, cRecn/cSend and the whole low-globals
+		// block the ROM initialises, matched BIT FOR BIT. VF2's 0x10000 length spills 0x100 bytes
+		// past chunk 0, and that overhang is the only reason the canary tripped.
+		//
+		// Those three chunks are stale rather than divergent: they are empty in a fresh run and
+		// only accumulate content as attract/demo plays, so two machines that idled for different
+		// lengths before the round start carry different leftovers. ResetBoard restarts the ROM
+		// (GlobCntr restarts) without zeroing them. Narrowing is the knob VF2's own comment names
+		// for this case.
+		//
+		// HONEST STATUS: this assumes the ROM never READS those bytes before writing them. If a
+		// round now runs but the two screens drift apart, that assumption is wrong and the fix is
+		// a deeper reset, not a narrower canary.
+		//
+		// Checked and NOT the cause (measured, single instance): the board index is 0 at every
+		// sample, so the canary always reads board 0 - it is not comparing one peer's master
+		// against the other's slave. Both boards' chunk hashes are identical within a machine
+		// anyway, since they boot the same ROM deterministically.
+		0xC37000, 0x500100, 0xFF00,
+	};
+
 	static const DwGame* CurrentDw()
 	{
 		switch (gGeneral.GetGameId())
@@ -340,6 +444,7 @@ namespace
 		case YAMPGeneral::GameId::StF: return &DW_STF;
 		case YAMPGeneral::GameId::FV:  return &DW_FV;
 		case YAMPGeneral::GameId::VF2: return &DW_VF2;
+		case YAMPGeneral::GameId::VON_K2: return &DW_OMG;
 		default:                       return nullptr;
 		}
 	}

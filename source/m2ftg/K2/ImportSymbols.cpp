@@ -24,6 +24,18 @@ namespace m2ftg
 			return val;
 		}
 
+		// Same, for a RIP-relative operand whose instruction carries ONE trailing immediate byte
+		// after the disp32 - `CMP byte ptr [rip+disp32], imm8`. RIP is relative to the END of the
+		// instruction, so the imm8 counts. Using the plain immediate() here resolves one byte
+		// SHORT, which would not crash: it would quietly write to the neighbouring byte and leave
+		// the real gate clear, i.e. it would look exactly like "the change did nothing".
+		static void* immediateImm8(void* addr)
+		{
+			void* val;
+			Memory::ReadOffsetValue<1>(addr, val);
+			return val;
+		}
+
 		// Addresses in the comments are for the non-ASLR'd 0x180000000 image of
 		// vf2-pxd-w64-gog_retail.dll, for cross-referencing in Ghidra. BOTH the module DLL and
 		// YakuzaKiwami2.exe are built DYNAMIC_BASE — verified live, the exe did NOT load at its
@@ -86,6 +98,49 @@ namespace m2ftg
 				{ S::GS_CONTEXT_PTR, immediate(get_module_pattern(dll,
 					"48 85 C9 75 16 48 8D 05 ? ? ? ? 48 89 05 ? ? ? ?", 15)) },
 			};
+
+			// The two-board gate - see the long note in ImportSymbols.h. Anchored on the frame
+			// step's BOARD-1 TAIL, which is what makes this unambiguous: the `CMP byte [gate],0`
+			// is followed by the short JZ, `MOV ECX,1` (board index 1) and the CALL to the bank
+			// switch, then the two per-board step calls and the `XOR ECX,ECX` + CALL that selects
+			// board 0 again. Nothing else in the image looks like that.
+			//
+			// Deliberately anchored on the TAIL rather than on the frame step's prologue: the
+			// prologue is shared by every m2ftg module (YAMP already matches it as
+			// I960_IO_REFRESH_CALL), and the two jz encodings - `0F 84` in StF/FV, `74` here -
+			// move every later offset. The tail only exists where the second board does.
+			//
+			// OPTIONAL: one hit in omg (gate 0x1806910DE) and one in mr; zero in StF/FV/VF2.
+			{
+				hook::pattern boardTail(dll,
+					"80 3D ? ? ? ? 00 74 ? B9 01 00 00 00 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 33 C9 E8");
+				if (boardTail.size() == 1)
+				{
+					symbols.Add(S::TWO_BOARD_GATE, immediateImm8(boardTail.get(0).get<void>(2)));
+					// Same anchor, offset 29: the `XOR ECX,ECX` feeding the step's final
+					// bank-switch call. 7 (cmp) + 2 (jz) + 5 (mov ecx,1) + 3*5 (calls) = 29.
+					symbols.Add(S::RENDER_BOARD_SELECT, boardTail.get(0).get<void>(29));
+					// The bank switch itself, resolved from the CALL the tail makes right after
+					// `MOV ECX,1` (offset 14 in the pattern) rather than by matching its own
+					// prologue - the call site is already uniquely anchored, so this cannot land
+					// on a lookalike.
+					symbols.Add(S::BOARD_SELECT,
+						Memory::ReadCallFrom(boardTail.get(0).get<void>(14)));
+				}
+			}
+
+			// The per-board init, from boot phase 2's `XOR ECX,ECX / CALL init / MOV ECX,1 / CALL
+			// init` pair - the only place in the image that initialises both boards back to back,
+			// and unique. Taking it from the call site rather than its own prologue means it cannot
+			// resolve to a lookalike.
+			{
+				hook::pattern bothBoards(dll, "33 C9 E8 ? ? ? ? B9 01 00 00 00 E8 ? ? ? ?");
+				if (bothBoards.size() == 1)
+				{
+					symbols.Add(S::PER_BOARD_INIT,
+						Memory::ReadCallFrom(bothBoards.get(0).get<void>(2)));
+				}
+			}
 
 			return symbols;
 		}
