@@ -26,12 +26,15 @@
 
 namespace pxd
 {
-		static void InitTexIdTables(gs::context_t* context)
+		template <size_t Gap18>
+		static void InitTexIdTables(gs::context_tmpl<Gap18>* context)
 		{
 			if (!context) return;
 			constexpr size_t kEntries = 0x10000;          // max id space
 			constexpr size_t kTableBytes = kEntries * 8;  // 8B/entry: covers uint32 and ptr uses
-			static const size_t kOffsets[4] = { 0x79F8, 0x7A00, 0x7A08, 0x7A10 };
+			static const size_t kOffsets[4] = {
+				gs::raw_off<Gap18>(0x79F8), gs::raw_off<Gap18>(0x7A00),
+				gs::raw_off<Gap18>(0x7A08), gs::raw_off<Gap18>(0x7A10) };
 			for (size_t off : kOffsets)
 			{
 				uint8_t* buf = static_cast<uint8_t*>(::operator new(kTableBytes));
@@ -47,7 +50,8 @@ namespace pxd
 		// +0x34 bitmap-word-count, +0x38 bitmap ptr (1=free). The blocks live in an array (order
 		// confirmed against a live LJ gs context): +0x7870 = SAMPLER, +0x78B0 = RTV, +0x78F0 = DSV,
 		// +0x7930 = CBV/SRV/UAV. All four are NON-shader-visible CPU-staging heaps (see below).
-		static bool SetupDescriptorBlock(gs::context_t* context, size_t blockOffset,
+		template <size_t Gap18>
+		static bool SetupDescriptorBlock(gs::context_tmpl<Gap18>* context, size_t blockOffset,
 			D3D12_DESCRIPTOR_HEAP_TYPE type, bool shaderVisible, UINT capacity,
 			ID3D12Device* device, wil::com_ptr<ID3D12DescriptorHeap>& heapOut,
 			std::vector<uint64_t>& bitmapOut, const char* label)
@@ -87,7 +91,8 @@ namespace pxd
 			return true;
 		}
 
-		static void InitSrvUavDescriptorHeap(gs::context_t* context, const RenderWindow& window)
+		template <size_t Gap18>
+		static void InitSrvUavDescriptorHeap(gs::context_tmpl<Gap18>* context, const RenderWindow& window)
 		{
 			ID3D12Device* device = window.GetD3D12Device();
 			if (!device || !context) return;
@@ -108,20 +113,20 @@ namespace pxd
 			// CBV/SRV/UAV staging @ +0x7930 (FUN_1800a20c0 -> CreateShaderResourceView at CPU handle).
 			static wil::com_ptr<ID3D12DescriptorHeap> s_srvHeap;
 			static std::vector<uint64_t> s_srvBitmap;
-			SetupDescriptorBlock(context, 0x7930, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, false,
+			SetupDescriptorBlock(context, gs::raw_off<Gap18>(0x7930), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, false,
 				262144, device, s_srvHeap, s_srvBitmap, "CBV/SRV/UAV");
 
 			// RTV staging @ +0x78B0 (FUN_180094700 -> CreateRenderTargetView).
 			static wil::com_ptr<ID3D12DescriptorHeap> s_rtvHeap;
 			static std::vector<uint64_t> s_rtvBitmap;
-			SetupDescriptorBlock(context, 0x78B0, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, false,
+			SetupDescriptorBlock(context, gs::raw_off<Gap18>(0x78B0), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, false,
 				1024, device, s_rtvHeap, s_rtvBitmap, "RTV");
 
 			// DSV staging @ +0x78F0 — LJ wires this block (incr 0x08, cap 1024); YAMP never had it.
 			// The array order is SAMPLER(+0x7870), RTV(+0x78B0), DSV(+0x78F0), CBV/SRV/UAV(+0x7930).
 			static wil::com_ptr<ID3D12DescriptorHeap> s_dsvHeap;
 			static std::vector<uint64_t> s_dsvBitmap;
-			SetupDescriptorBlock(context, 0x78F0, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, false,
+			SetupDescriptorBlock(context, gs::raw_off<Gap18>(0x78F0), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, false,
 				1024, device, s_dsvHeap, s_dsvBitmap, "DSV");
 
 			// SAMPLER staging @ +0x7870 — block[0] of the array. FUN_18009e620 bitmap-allocates a slot
@@ -129,7 +134,7 @@ namespace pxd
 			// CPU handle only. Non-shader-visible staging matches LJ (cap 256).
 			static wil::com_ptr<ID3D12DescriptorHeap> s_samplerHeap;
 			static std::vector<uint64_t> s_samplerBitmap;
-			SetupDescriptorBlock(context, 0x7870, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, false,
+			SetupDescriptorBlock(context, gs::raw_off<Gap18>(0x7870), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, false,
 				256, device, s_samplerHeap, s_samplerBitmap, "SAMPLER");
 
 			// gs+0x7550..0x75E8: the SHADER-VISIBLE descriptor-copy rings (the CopyDescriptors dest the
@@ -148,7 +153,10 @@ namespace pxd
 			{
 				constexpr UINT   kCopyRingCap   = 999936; // match LJ exactly (descriptor indices reach ~297k)
 				constexpr UINT   kCopyRingCount = 3;       // LJ: rings @ gs+0x7558/0x7588/0x75B8
-				constexpr size_t kRingBase      = 0x7558;  // first inline ring
+				const size_t     kRingBase      = gs::raw_off<Gap18>(0x7558);  // first inline ring
+				// NB the ring base and the gs+0x7550 pointer to it sit either side of one of the
+				// Gaiden insertions, so they shift by DIFFERENT amounts (0x28 and 0x20). Both go
+				// through raw_off rather than one being derived from the other.
 				constexpr size_t kRingStride    = 0x30;
 				constexpr size_t kCurrentRing   = 1;       // gs+0x7550 points at ring[1] (gs+0x7588)
 
@@ -198,7 +206,21 @@ namespace pxd
 				}
 				(void)kCopyRingCap;
 				// gs+0x7550 = pointer to the "current" inline ring (LJ points at ring[1] @ gs+0x7588).
-				*reinterpret_cast<void**>(gc + 0x7550) = gc + kRingBase + kCurrentRing * kRingStride;
+				void* const currentRing = gc + kRingBase + kCurrentRing * kRingStride;
+				*reinterpret_cast<void**>(gc + gs::raw_off<Gap18>(0x7550)) = currentRing;
+
+				// Builds that cache the current ring in the device context need it seeded with the
+				// same pointer: the read is unconditional, ahead of the branch that would refresh
+				// it, so leaving it null faults in the ring allocator on the first descriptor copy.
+				// The ring-count word beside the pointer is deliberately left 0 (<= 1), which is
+				// what keeps this build on Lost Judgment's behaviour of one fixed current ring
+				// rather than rotating through rings the host has not prepared.
+				if (gs::sm_dc.current_copy_ring != 0 && context->p_device_context != nullptr)
+				{
+					*reinterpret_cast<void**>(
+						reinterpret_cast<uint8_t*>(context->p_device_context)
+						+ gs::sm_dc.current_copy_ring) = currentRing;
+				}
 			}
 		}
 
@@ -207,12 +229,14 @@ namespace pxd
 		// past the heap). YAMP seeds it once, so without a per-frame reset the cursor climbs
 		// monotonically until CopyDescriptorsSimple writes one past the heap end (id=646 dest = heap
 		// end + 0x20 -> nvwgf2umx driver AV). Reset all 3 rings to the seed at the start of each frame.
-		void ResetCbvSrvRingCursors(gs::context_t* context)
+		template <size_t Gap18>
+		void ResetCbvSrvRingCursors(gs::context_tmpl<Gap18>* context)
 		{
 			if (context == nullptr) return;
 			uint8_t* gc = reinterpret_cast<uint8_t*>(context);
+			const size_t ringBase = gs::raw_off<Gap18>(0x7558);
 			for (int i = 0; i < 3; ++i)
-				*reinterpret_cast<uint32_t*>(gc + 0x7558 + i * 0x30 + 0x2C) = 0x400;
+				*reinterpret_cast<uint32_t*>(gc + ringBase + i * 0x30 + 0x2C) = 0x400;
 		}
 
 
@@ -260,7 +284,8 @@ namespace pxd
 		// from the RenderWindow below, and the two metadata words follow automatically. A stale
 		// hardcoded size would put the module's 2D flush on a target that does not match the
 		// swap chain at any resolution other than the one that happened to be captured.
-		static void InitPerFrameDisplayDescriptors(gs::context_t* context, const RenderWindow& window)
+		template <size_t Gap18>
+		static void InitPerFrameDisplayDescriptors(gs::context_tmpl<Gap18>* context, const RenderWindow& window)
 		{
 			ID3D12Device* device = window.GetD3D12Device();
 			if (device == nullptr)
@@ -356,15 +381,17 @@ namespace pxd
 				gGeneral.GetGameTag(), kFrames, kDescBase, kArrayBase);
 		}
 
-		void PatchGs(gs::context_t* context, const RenderWindow& window)
+		template <size_t Gap18>
+		void PatchGs(gs::context_tmpl<Gap18>* context, const RenderWindow& window)
 		{
 			// gs::initialize_module (0x180092fe0) validates the context header:
 			// size_of_struct (+8) must equal the DLL's real value, then it imports the
 			// sbgl shared symbols from context+0x20 (export_context.sbgl_context).
-			// YAMP loads the 0x388A00-size DLL variant (verified: the constant 00 8A 38 00
-			// appears in the DLL; 0x3889C0 does not). The embedded template already carries
-			// this value; we set it defensively to match the DLL, NOT the older 0x3889C0 build.
-			context->size_of_struct = 0x388A00;
+			// The value is per module build - 0x388A00 for the Lost Judgment / Y:LAD DLLs,
+			// 0x3898C0 for the Like a Dragon Gaiden one - and lives in gs::context_traits so
+			// the two numbers sit next to the layouts they belong to. The embedded template
+			// already carries the right value; we set it defensively to match the DLL.
+			context->size_of_struct = gs::context_traits<Gap18>::size_of_struct;
 
 			// Initialize cgs_device_context
 			cgs_device_context* device_context = new cgs_device_context{};
@@ -380,17 +407,17 @@ namespace pxd
 				// defaults into it (max touched ~+0x373c; the optional callback at block+0x318 stays
 				// null in a zeroed block -> skipped). 0x5000 gives headroom over the 0x4340 boundary.
 				static uint8_t s_renderStateBlock[0x5000] = {};
-				*reinterpret_cast<void**>(dc + 0x12c98) = s_renderStateBlock;
+				*reinterpret_cast<void**>(dc + gs::sm_dc.render_state_block) = s_renderStateBlock;
 
 				// +0xC8 : the "command recording" context. FUN_180097520 records draws into its +0x10
 				// ID3D12GraphicsCommandList; same 0x280 layout as the cdevice+0x28 pool contexts.
-				*reinterpret_cast<void**>(dc + 0xC8) = BuildRenderCommandContext();
+				*reinterpret_cast<void**>(dc + gs::sm_dc.render_command_ctx) = BuildRenderCommandContext();
 
 				// +0x12c88 : the per-device-context cache table for the transient vertex-upload ring
 				// (FUN_18009f560: table+0x08 count, table+0x10 + idx*8 entries; idx is small). Host
 				// never writes it (DLL only reads); a zeroed table is filled lazily by the engine.
 				static uint8_t s_upCacheTable[0x810] = {}; // 256 entries + header
-				*reinterpret_cast<void**>(dc + 0x12c88) = s_upCacheTable;
+				*reinterpret_cast<void**>(dc + gs::sm_dc.up_cache_table) = s_upCacheTable;
 
 				// +0x11878 : host-provided CBV_SRV_UAV descriptor-heap wrapper. FUN_18005eb00 (m2ftg +
 				// reset_state_all) CreateConstantBufferView's into its CPU handle (w+0x04 incr, w+0x18 CPU
@@ -410,7 +437,7 @@ namespace pxd
 					}
 					if (s_cbvHeap != nullptr)
 					{
-						uint8_t* w = dc + 0x11878;
+						uint8_t* w = dc + gs::sm_dc.cbv_srv_ring;
 						const UINT incr = window.GetD3D12Device()->GetDescriptorHandleIncrementSize(
 							D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 						*reinterpret_cast<void**>(w + 0x00)     = s_cbvHeap; // keep the heap object referenced
@@ -452,12 +479,13 @@ namespace pxd
 					*reinterpret_cast<void**>(rr + 0x30)    = s_samplerSortTable; // ring's sorted table
 					*reinterpret_cast<uint32_t*>(rr + 0x38) = 0x200;             // table capacity
 
-					uint8_t* sc = dc + 0x11ba0;
+					uint8_t* sc = dc + gs::sm_dc.sampler_ring;
 					*reinterpret_cast<void**>(sc + 0x00)    = rr;                 // current-ring ptr
 					*reinterpret_cast<void**>(sc + 0xD0)    = s_samplerSortTable; // struct's sorted table
 					*reinterpret_cast<uint32_t*>(sc + 0xD8) = 0x200;            // table capacity
 					*reinterpret_cast<uint32_t*>(sc + 0xDC) = 0;                 // entry count (skip search)
-					DebugLog("[%s gs] sampler ring @ device_context+0x11ba0 wired\n", gGeneral.GetGameTag());
+					DebugLog("[%s gs] sampler ring @ device_context+0x%zX wired\n",
+						gGeneral.GetGameTag(), gs::sm_dc.sampler_ring);
 				}
 			}
 
@@ -470,7 +498,8 @@ namespace pxd
 			{
 				uint8_t* gc = reinterpret_cast<uint8_t*>(context);
 
-				// 32MB persistently-mapped upload buffer so the CPU-written vertices are GPU-readable.
+				// Persistently-mapped upload buffer so the CPU-written vertices are GPU-readable.
+				// Its SIZE is dictated by the module, not chosen here - see context_traits.
 				static ID3D12Resource* s_upRing = nullptr;
 				static void* s_upRingCpu = nullptr;
 				if (s_upRing == nullptr)
@@ -478,7 +507,8 @@ namespace pxd
 					D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
 					D3D12_RESOURCE_DESC rd{};
 					rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-					rd.Width = 0x2000000; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+					rd.Width = gs::context_traits<Gap18>::up_ring_bytes;
+					rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
 					rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc.Count = 1;
 					rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 					if (SUCCEEDED(window.GetD3D12Device()->CreateCommittedResource(
@@ -501,9 +531,12 @@ namespace pxd
 				s_ringRes[1] = (s_upRing != nullptr) ? s_upRing->GetGPUVirtualAddress() : 0;
 				s_upDesc[3] = reinterpret_cast<uint64_t>(s_ringRes); // +0x18 = &wrapper
 
-				*reinterpret_cast<void**>(gc + 0x188200)     = s_upDesc;
-				*reinterpret_cast<void**>(gc + 0x188208)     = s_upRingCpu;
-				*reinterpret_cast<uint32_t*>(gc + 0x188210)  = 0;
+				// Fourth band: these sit past handle_fx, so they move by 0xBC0 in the Gaiden
+				// layout rather than the 0xBA8 every named member moves by. Left unmapped, the
+				// module read a garbage descriptor pointer and faulted copying it.
+				*reinterpret_cast<void**>(gc + gs::raw_off<Gap18>(0x188200))     = s_upDesc;
+				*reinterpret_cast<void**>(gc + gs::raw_off<Gap18>(0x188208))     = s_upRingCpu;
+				*reinterpret_cast<uint32_t*>(gc + gs::raw_off<Gap18>(0x188210))  = 0;
 			}
 
 			context->sbgl_device.initialize(window);
@@ -545,7 +578,7 @@ namespace pxd
 				constexpr unsigned int PUSH_VB_SIZE = 1 << 20; // ~8k quads/frame before a discard
 				cgs_up_pool* pushPool = new cgs_up_pool;
 				pushPool->initialize(PUSH_VB_SIZE, 0, true);
-				*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(device_context) + 0x12c90) = pushPool;
+				*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(device_context) + gs::sm_dc.push_up_pool) = pushPool;
 			}
 
 			device_context->initialize(reinterpret_cast<sbgl::ccontext*>(context->sbgl_device.m_pD3DDeviceContext));
@@ -608,4 +641,12 @@ namespace pxd
 				InitPerFrameDisplayDescriptors(context, window);
 			}
 		}
+
+		// The two shipped context layouts (see gs.h). Instantiated here rather than in the header
+		// so this file's static helpers and its D3D12 includes stay out of everything that only
+		// needs the declarations.
+		template void PatchGs<gs::GAP18_LJ>(gs::context_t*, const RenderWindow&);
+		template void PatchGs<gs::GAP18_GAIDEN>(gs::context_gaiden_t*, const RenderWindow&);
+		template void ResetCbvSrvRingCursors<gs::GAP18_LJ>(gs::context_t*);
+		template void ResetCbvSrvRingCursors<gs::GAP18_GAIDEN>(gs::context_gaiden_t*);
 	}

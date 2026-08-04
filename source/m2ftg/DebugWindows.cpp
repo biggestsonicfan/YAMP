@@ -1,5 +1,6 @@
 #include "DebugWindows.h"
 
+#include "ModuleBuild.h"
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 #include "ELF/ElfRom.h"
@@ -65,8 +66,22 @@ namespace
 	// boot state, CPU context, memory map, RESET, the RNG holder and the texture-budget
 	// handler - are per-game and live in the DwGame table further down, because Fighting
 	// Vipers needs every one of them and has different values for all of them.
-	constexpr uintptr_t RVA_ROOT_WINDOW = 0x1E8850;   // "DEBUG MENU" window header
-	constexpr uintptr_t RVA_RUN_STATE = 0x6C19E0;     // written by STEP/GO/RESET handlers
+	// Per module build, like everything else here. The Gaiden root window sits 0x20 ahead of that
+	// build's HLE table exactly as Lost Judgment's does — the module's own installer names it
+	// (PTR_s_DEBUG_MENU_1801f31a0), which is as direct a confirmation as this gets. The run-state
+	// word is display-only ("no reader in retail DLL").
+	constexpr uintptr_t RVA_ROOT_WINDOW_LJ = 0x1E8850;   // "DEBUG MENU" window header
+	constexpr uintptr_t RVA_ROOT_WINDOW_GAIDEN = 0x1F31A0;
+	constexpr uintptr_t RVA_RUN_STATE_LJ = 0x6C19E0;     // written by STEP/GO/RESET handlers
+	constexpr uintptr_t RVA_RUN_STATE_GAIDEN = 0x6CD3A0;
+	inline uintptr_t RootWindowRva()
+	{
+		return m2ftg::IsGaidenBuild() ? RVA_ROOT_WINDOW_GAIDEN : RVA_ROOT_WINDOW_LJ;
+	}
+	inline uintptr_t RunStateRva()
+	{
+		return m2ftg::IsGaidenBuild() ? RVA_RUN_STATE_GAIDEN : RVA_RUN_STATE_LJ;
+	}
 	constexpr uintptr_t RVA_STUB_RET0 = 0x4C780;      // `xor eax,eax; ret` — stripped handlers
 
 	// i960 machine state, used by the 960STAT call-stack and DISASM panes. All of this is the
@@ -164,7 +179,15 @@ namespace
 	// {0xB0, "start_ip"}, and 0xB0 is exactly the start IP stored in the ROM's i960 initial
 	// memory image (boot word 3 of rom_code1.bin), while the misread pairing gives start_ip
 	// 0x5A8, which matches nothing.
-	constexpr uintptr_t RVA_SYMBOL_TBL = 0x1742D0;
+	// Per module BUILD, like every other RVA here: Like a Dragon Gaiden's Sonic the Fighters DLL
+	// puts the same table at 0x17C230. Both were located by their content (first record
+	// {0xB0, "start_ip"}, second 0x5A8), not by assuming a uniform section shift.
+	constexpr uintptr_t RVA_SYMBOL_TBL_LJ = 0x1742D0;
+	constexpr uintptr_t RVA_SYMBOL_TBL_GAIDEN = 0x17C230;
+	inline uintptr_t SymbolTableRva()
+	{
+		return m2ftg::IsGaidenBuild() ? RVA_SYMBOL_TBL_GAIDEN : RVA_SYMBOL_TBL_LJ;
+	}
 	constexpr size_t SYMBOL_COUNT = 800;
 	// The DLL's own walk masks the frame pointer to the i960's 64-byte frame alignment.
 	constexpr uint32_t I960_FRAME_ALIGN_MASK = 0xFFFFFFC0;
@@ -294,6 +317,35 @@ namespace
 		0x52FD0, 0x1E8870, 76, 0x500020, true,
 		0x1ED490, 2,   // config base (module_start's memcpy target); kind 2 = stf
 		0x8F7CC8, 0, 0,   // canary: frame_counter (verified on two machines)
+	};
+
+	// The same game out of Like a Dragon Gaiden (module 2023-11-27). Every RVA here moved, and
+	// NETPLAY IS WHY THIS ROW EXISTS: ResetBoard() gates on rvaBootState and then calls
+	// rvaResetHandler, so with Lost Judgment's addresses the Gaiden build read a boot state that
+	// was never 2, the reset silently did nothing, and "Start match" appeared to do nothing at all
+	// — the exact failure the note in NetSession::Step warns about.
+	//
+	// Each value was derived from the module itself and then checked, not shifted by an assumed
+	// delta (the sections do not move uniformly: .data +0xB9C0 high up but +0xA950 around the HLE
+	// table, .text varies, .rdata +0x7EC0 here):
+	//   rvaResetHandler   item 4 of the DEBUG MENU tree, whose root is 0x20 ahead of the HLE
+	//                     table in both builds; the LJ item at that index holds 0x4C840.
+	//   rvaMemmapTbl      `lea r14,[tbl]` in the memory dispatch, byte-identical code in both;
+	//                     22 rip-relative references in each build.
+	//   rvaRngHolder      9 references in each build.
+	//   rvaTexBudgetHandler / rvaHleTable   read straight out of the HLE installer table.
+	//   rvaConfigBase     the destination of module_start's 0x100C config memcpy.
+	//   rvaBootState / rvaCpuCtxPtr / rvaRamBasePtr   cross-checked against the HLE installer and
+	//                     the i960 fetch dispatcher (see m2ftg/ModuleBuild.h).
+	// romFrameCounter is an EMULATED-RAM address, so it is the same in both — which is the whole
+	// reason cross-build netplay can work at all.
+	constexpr DwGame DW_STF_GAIDEN = {
+		L"stf-pxd-w64-d3d12_retail.dll",
+		0x6C4CC0, 0x596320, 0x17A520, 0x4C7F0,
+		0x697548, RNG_STREAMS, std::size(RNG_STREAMS),
+		0x52F90, 0x1F31C0, 76, 0x500020, true,
+		0x1F7DE0, 2,
+		0x903688, 0, 0,
 	};
 	constexpr DwGame DW_FV = {
 		L"fv-pxd-w64-d3d12_retail.dll",
@@ -441,7 +493,9 @@ namespace
 	{
 		switch (gGeneral.GetGameId())
 		{
-		case YAMPGeneral::GameId::StF: return &DW_STF;
+		// Sonic the Fighters ships in two titles and every RVA in the descriptor differs between
+		// the two module builds, so this picks by BUILD as well as by game.
+		case YAMPGeneral::GameId::StF: return m2ftg::IsGaidenBuild() ? &DW_STF_GAIDEN : &DW_STF;
 		case YAMPGeneral::GameId::FV:  return &DW_FV;
 		case YAMPGeneral::GameId::VF2: return &DW_VF2;
 		case YAMPGeneral::GameId::VON_K2: return &DW_OMG;
@@ -573,7 +627,7 @@ namespace
 			return;
 		}
 
-		const auto* symbols = reinterpret_cast<const I960Symbol*>(base + RVA_SYMBOL_TBL);
+		const auto* symbols = reinterpret_cast<const I960Symbol*>(base + SymbolTableRva());
 		size_t low = 0, high = SYMBOL_COUNT;
 		while (low < high)
 		{
@@ -1310,7 +1364,7 @@ void m2ftg::DrawDebugWindows()
 		return;
 	}
 
-	const auto* root = reinterpret_cast<const DwMenuWindow*>(base + RVA_ROOT_WINDOW);
+	const auto* root = reinterpret_cast<const DwMenuWindow*>(base + RootWindowRva());
 	const uint32_t bootState = *reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState);
 	const bool booted = bootState == 2;
 
@@ -1325,7 +1379,7 @@ void m2ftg::DrawDebugWindows()
 
 		ImGui::Separator();
 		ImGui::TextDisabled("run-state: %u (no reader in retail DLL)",
-			*reinterpret_cast<const uint32_t*>(base + RVA_RUN_STATE));
+			*reinterpret_cast<const uint32_t*>(base + RunStateRva()));
 	}
 	ImGui::End();
 

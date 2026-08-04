@@ -132,6 +132,19 @@ namespace m2ftg
             // The FV DLL is ASLR'd (DYNAMIC_BASE) so it does NOT sit at 0x180000000 like StF.
             SetGameDllRange(dll);
 
+            // Which BUILD of the module this is, before anything reads a per-build RVA or a pxd
+            // context field. Sonic the Fighters ships in Lost Judgment and in Like a Dragon
+            // Gaiden; the ROM and every asset are byte-identical, but the DLL is a 2023 rebuild
+            // whose globals moved and whose pxd gs context is 0x3898C0 rather than 0x388A00
+            // (see ../ModuleBuild.h and ../../pxd/LJ/gs.h).
+            SetCurrentModuleBuild(ModuleTimestamp(dll));
+            gs::sm_is_gaiden_layout = IsGaidenBuild();
+            // The host-provided cgs_device_context slots moved too, and NOT by a single uniform
+            // shift the way the gs context did (+0x18/+0x20/+0x28 in three different regions).
+            gs::sm_dc = IsGaidenBuild() ? gs::DC_OFFSETS_GAIDEN : gs::DC_OFFSETS_LJ;
+            DebugLogFile("[%s] module build 0x%08X%s\n", gGeneral.GetGameTag(),
+                CurrentModuleBuild(), IsGaidenBuild() ? " (Like a Dragon Gaiden)" : "");
+
             const Imports symbolMap = BuildSymbolMap(dll);
 
             const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
@@ -152,7 +165,11 @@ namespace m2ftg
                 // Pick a capacity that�s plenty for StF (tweak if you learn the real number)
                 constexpr uint32_t kHandleCapacity = 0x100000;
 
-                const int ic = sl::initialize();
+                // The sl context is 0xF000 in the Lost Judgment / Y:LAD modules and 0xF140 in the
+                // Gaiden one - the SAME layout grown at the tail (allocated_heap is still at
+                // 0xEFD0 in both, and the archive lock word is still reached as sl_ctx+0x1D00),
+                // so only the size the module's own initialize_module checks at +8 differs.
+                const int ic = sl::initialize(IsGaidenBuild() ? 0xF140 : 0xF000);
 
                 if (ic != 0) {
                     // Mirror E_FAIL path used in your implementation; abort init on failure.
@@ -184,7 +201,9 @@ namespace m2ftg
             }
 
             PatchSl(sl::sm_context);
-            PatchGs(gs::sm_context, window);
+            // Most of what PatchGs writes lives below the build-variant gap, so it runs against
+            // the layout the loaded module actually uses (LJ/Y:LAD or Gaiden) - see pxd/LJ/gs.h.
+            gs::with_tail([&window](auto* ctx) { PatchGs(ctx, window); });
 
             return true;
         }
@@ -282,6 +301,13 @@ namespace m2ftg
 
             // Initialize Criware stub and module stubs
             Cri criware;
+            // Gaiden's module was built against a newer CRIWARE whose icri has one more virtual,
+            // so every slot from 9 up is shifted; without this the module's alloc() call lands on
+            // free(). See Cri.h.
+            if (IsGaidenBuild())
+            {
+                criware.UseGaidenVtable();
+            }
 
             struct sl_module_t
             {
@@ -504,7 +530,7 @@ namespace m2ftg
             // module-visible state (game kind + assigns + event payloads) that must NOT be wiped).
             static m2ftg_execute_info_t execute_info{};
             execute_info.size_of_struct = sizeof(execute_info);
-            execute_info.p_device_context = gs::sm_context->p_device_context;
+            execute_info.p_device_context = gs::device_context();
             execute_info.status = 0;          // host zeroes each frame, then ORs pause/coin bits
             execute_info.output_texid = 0;
             execute_info.result = 0x80004005; // LJ presets E_FAIL; module_main overwrites
@@ -679,7 +705,7 @@ namespace m2ftg
 
             // The CBV/SRV descriptor-copy rings are per-frame transient; reset their cursors before the
             // DLL's render (func) records this frame, or they grow past the heap -> CopyDescriptors AV.
-            ResetCbvSrvRingCursors(gs::sm_context);
+            gs::with_tail([](auto* ctx) { ResetCbvSrvRingCursors(ctx); });
 
             // ---- NETPLAY SESSION DRIVER ----------------------------------------------------
             // (2) Poll the plugin and run the round-start state machine, and (3) decide whether
@@ -826,7 +852,7 @@ namespace m2ftg
             // very first frame. It is NOT a lookup failure, so it must not go through handle_tex
             // (1-based, asserts on 0) and must not quit the loop the way a genuine failure does.
             cgs_tex* display_tex = (execute_info.output_texid != 0)
-                ? gs::sm_context->handle_tex.get(execute_info.output_texid)
+                ? gs::handle_tex().get(execute_info.output_texid)
                 : nullptr;
             if (execute_info.output_texid != 0)
             {
@@ -856,7 +882,7 @@ namespace m2ftg
 
             // Present using the swapchain the game already created (the same object the 11on12
             // backbuffers were wrapped from — gs::sm_context's sbgl_device holds YAMP's swapchain).
-            auto& swapChain = gs::sm_context->sbgl_device.m_swap_chain;
+            auto& swapChain = gs::sbgl_device().m_swap_chain;
             HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
             if (FAILED(hr)) return false;
 

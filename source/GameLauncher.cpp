@@ -103,7 +103,10 @@ namespace Launcher
 		};
 
 		constexpr GameInfo GAMES[] = {
-			{ YAMPGeneral::GameId::StF, "Sonic the Fighters", "Lost Judgment", L"-stf",
+			// Like a Dragon Gaiden ships its m2ftg modules at the same runtime/media/m2ftg path
+			// Lost Judgment does, so the candidate list already finds it — the two titles differ
+			// only in which BUILD of the DLL is there, which the host resolves at load.
+			{ YAMPGeneral::GameId::StF, "Sonic the Fighters", "Lost Judgment or Like a Dragon Gaiden", L"-stf",
 				STF_CANDIDATES, std::size(STF_CANDIDATES) },
 			{ YAMPGeneral::GameId::FV, "Fighting Vipers", "Lost Judgment", L"-fv",
 				FV_CANDIDATES, std::size(FV_CANDIDATES) },

@@ -161,19 +161,21 @@ namespace m2ftg
 
 		void InstallRamExecFetch(void* dll, const Imports& symbols)
 		{
-			const GameDesc& game = CurrentGame();
+			// Per module BUILD, not per game: Sonic the Fighters ships in both Lost Judgment and
+			// Like a Dragon Gaiden and the two DLLs put these globals 0xB9C0 apart.
+			const I960Build& i960 = CurrentI960();
 			// Motor Raid inlines fetch+decode into its execution loop, so it has neither the
 			// single-step dispatcher to hook nor the i960 RVAs this reimplementation needs.
 			// It also has no ROM debug menu to reach, so simply leave its CPU core alone.
 			void* const fetchExec = symbols.TryGetSymbol(ImportSymbol::I960_FETCH_EXEC);
-			if (fetchExec == nullptr || game.rva_cpu_ctx_ptr == 0)
+			if (fetchExec == nullptr || i960.rva_cpu_ctx_ptr == 0)
 			{
 				return;
 			}
 
-			RamExecFetch::RVA_CPU_CTX_PTR = game.rva_cpu_ctx_ptr;
-			RamExecFetch::RVA_OPCODE_TABLE = game.rva_opcode_table;
-			RamExecFetch::RVA_RAM_BASE_PTR = game.rva_ram_base_ptr;
+			RamExecFetch::RVA_CPU_CTX_PTR = i960.rva_cpu_ctx_ptr;
+			RamExecFetch::RVA_OPCODE_TABLE = i960.rva_opcode_table;
+			RamExecFetch::RVA_RAM_BASE_PTR = i960.rva_ram_base_ptr;
 			RamExecFetch::dllBase = static_cast<uint8_t*>(dll);
 			Trampoline* t = Trampoline::MakeTrampoline(dll);
 			Memory::InjectHook(fetchExec, t->Jump(&RamExecFetch::FetchExec), Memory::HookType::Jump);

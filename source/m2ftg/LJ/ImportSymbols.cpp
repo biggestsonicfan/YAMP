@@ -55,8 +55,8 @@ namespace m2ftg
 				{ S::SL_HANDLE_CREATE, immediate(get_module_pattern(dll, "E8 ? ? ? ? 41 B8 05 00 00 00 48 8D 4C 24 38 48 8B D7 E8 ? ? ? ? 8B 44 24 38 48 8D 4F 44 48 2B F1 89 47 40", 20)) },
 				{ S::SL_FILE_HANDLE_DESTROY, get_module_pattern(dll, "48 85 C9 0F 84 ? ? ? ? 57 ") }, //18006BBF0
 				{ S::PRJ_TRAP, immediate(get_module_pattern(dll, "48 8D 4C 24 ? E8 ? ? ? ? 90 48 89 3D ? ? ? ? ", 6)) }, //180039BE5
-				{ S::ARCHIVE_LOCK_WLOCK, immediate(get_module_pattern(dll, "E8 ? ? ? ? 8B 43 10 83 E8 01", 1)) }, //18006D798
-				{ S::ARCHIVE_LOCK_WUNLOCK, immediate(get_module_pattern(dll, "48 81 C1 ? ? ? ? E8 ? ? ? ? 48 8B C7", 8)) }, //1802175F0 -  recursive_rwspinlock_wunlock
+				// (archive spinlock pair — resolved below, it is the one place the two module
+				// builds needed different patterns)
 				{ S::DEVICE_CONTEXT_RESET_STATE_ALL, get_module_pattern(dll, "48 8B C4 53 41 54") }, //18008A7A0 - pxd::cgs_device_context::reset_state_all
 				{ S::VB_CREATE, immediate(get_module_pattern(dll, "E8 ? ? ? ? 4C 8B B4 24 ? ? ? ? 8D 7E 20 ", 1)) }, //18005D7FC
 				{ S::IB_CREATE,immediate(get_module_pattern(dll, "E8 ? ? ? ? 49 89 87 ? ? ? ?", 1)) }, //18005D586
@@ -69,6 +69,49 @@ namespace m2ftg
 				// DAT_1801ee4a0 (live execute_info): module_main's `CMP RCX,0x1760 / JNZ / MOV [rip],RDX`.
 				{ S::STF_RENDER_EXECINFO, immediate(get_module_pattern(dll, "48 81 F9 60 17 00 00 0F 85 ? ? ? ? 48 89 15 ? ? ? ?", 16)) }, //1801EE4A0
 			};
+
+			// ---- archive spinlock (recursive_rwspinlock wlock/wunlock) ------------------------
+			//
+			// The ONLY two symbols in this table that the Like a Dragon Gaiden rebuild moved out
+			// from under their patterns. Everything else here still matches both builds byte for
+			// byte; these two functions were genuinely recompiled:
+			//
+			//   wunlock   LJ 0x18006EA00 decrements through a stack temp; Gaiden 0x18006ECC0 does
+			//             it branchlessly (`lea eax,[rdx-1]; xor eax,edx; movzx eax,ax; xor edx,eax`).
+			//   wlock     same TLS-owner algorithm in both (owner thread id in the high 16 bits,
+			//             recursion count in the low 16), but LJ 0x18006EE20 keeps the lock word in
+			//             RDI/ESI where Gaiden 0x18006F160 uses RDI/EBX and saves RBP too.
+			//
+			// Both are matched on the FUNCTION BODY rather than on a call site. The old wlock
+			// pattern anchored on `E8 ? ? ? ? 8B 43 10 83 E8 01`, a caller that no longer exists in
+			// the Gaiden build at all, and the old wunlock pattern ended in `48 8B C7` — a register
+			// choice, which is exactly the kind of thing a recompile changes. Bodies are stabler.
+			//
+			// Semantics are identical in both, so they go into the same two slots and nothing
+			// downstream cares which build supplied them.
+			{
+				struct LockPattern { const char* wlock; const char* wunlock; };
+				static constexpr LockPattern LOCK_PATTERNS[] = {
+					// Lost Judgment / Yakuza: Like a Dragon (2021-2022 builds).
+					{ "48 89 5C 24 18 55 56 57 48 83 EC 20 65 48 8B 04 25 58 00 00 00 48 8B F9 8B 15 ? ? ? ? 48 8B 1C D0 B8 14 00 00 00 80 3C 18 00 75 05 E8 ? ? ? ? B8 04 00 00 00 8B 34 18 85 F6 75 07 E8 ? ? ? ? 8B F0 8B EE C1 E5 10 66 0F 1F 44 00 00 8B 0F 33 DB 89 4C 24 40 8B 44 24 40 85 C0",
+					  "8B 01 89 44 24 08 8B 44 24 08 FF C8 0F B7 D0 8B 44 24 08 25 00 00 FF FF 0B C2 89 44 24 08" },
+					// Like a Dragon Gaiden (2023-11-27).
+					{ "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 65 48 8B 04 25 58 00 00 00 48 8B F9 8B 15 ? ? ? ? 48 8B 1C D0 B8 14 00 00 00 80 3C 18 00 75 05 E8 ? ? ? ? B8 04 00 00 00 8B 34 18 85 F6 75 07 E8 ? ? ? ? 8B F0 8B EE C1 E5 10 8B 07 33 DB 85 C0",
+					  "8B 11 8D 42 FF 33 C2 0F B7 C0 33 D0 66 85 D2 75 0A 0F AE F0 C7 01 00 00 00 00 C3 89 11 C3" },
+				};
+
+				for (const LockPattern& candidate : LOCK_PATTERNS)
+				{
+					hook::pattern wlock(dll, candidate.wlock);
+					hook::pattern wunlock(dll, candidate.wunlock);
+					if (wlock.size() == 1 && wunlock.size() == 1)
+					{
+						symbols.Add(S::ARCHIVE_LOCK_WLOCK, wlock.get(0).get<void>());
+						symbols.Add(S::ARCHIVE_LOCK_WUNLOCK, wunlock.get(0).get<void>());
+						break;
+					}
+				}
+			}
 
 			// i960 fetch/decode dispatcher: `mov rax,[ctx]; lea r10,[base]; mov r9d,[rax+8]; add r9,[rax]; movzx eax,[r9+3]`.
 			// OPTIONAL — StF (0x1800255F0) and FV ship this as a standalone single-instruction step, but

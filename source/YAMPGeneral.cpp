@@ -64,7 +64,10 @@ const char* YAMPGeneral::GetParentGameName() const
 {
 	switch (m_gameId)
 	{
-	case GameId::StF:
+	// Sonic the Fighters is the one arcade game that ships in more than one title, and owning
+	// either is enough — so it must not tell a Like a Dragon Gaiden owner that they need Lost
+	// Judgment. Which build is actually loaded is reported separately, by the module verdict.
+	case GameId::StF: return "Lost Judgment or Like a Dragon Gaiden";
 	case GameId::FV:
 	case GameId::MR:
 	case GameId::VF5FS_LJ: return "Lost Judgment";

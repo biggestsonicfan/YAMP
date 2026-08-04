@@ -2,6 +2,9 @@
 #include "../DebugLog.h"
 #include "AtomEngine.h"
 
+#include <cstring>
+#include <iterator>
+
 
 // icri implementation. The CriAtomEx cue-playback surface (players, ACBs, ExecuteMain,
 // alloc) is backed by the clean-room AtomEngine (ACB/@UTF + AFS2 + validated HCA decoder +
@@ -275,6 +278,38 @@ void* Cri::alloc(size_t size, size_t align)
 void Cri::free(void* p)
 {
 	cri::atom::Free(p);
+}
+
+namespace
+{
+	// The slot Gaiden's CRIWARE inserted. Never reached from the StF module (see Cri.h), so it
+	// only has to exist and return harmlessly if some other module in that generation does call
+	// it. Deliberately takes only `this`: with nothing known about its real signature, a callee
+	// that touches no argument is the safe shape under the Microsoft x64 convention, where the
+	// CALLER cleans up the stack.
+	void __fastcall CriGaidenInsertedSlot(void*) {}
+
+	// Storage for the patched vtable. Static rather than heap so its lifetime outlives the
+	// stack-allocated Cri the hosts hand to module_start.
+	void* g_criGaidenVtable[96];
+}
+
+void Cri::UseGaidenVtable()
+{
+	// icri declares 78 methods plus a virtual destructor = 79 slots; +1 for the inserted one.
+	// The highest slot the Gaiden module actually calls is 76, comfortably inside this.
+	constexpr size_t kInsertAt = 9;   // between criAtomExPlayer_SetCueName and _SetVolume
+	constexpr size_t kSlots = 79;
+	static_assert(kSlots + 1 <= std::size(g_criGaidenVtable), "grow g_criGaidenVtable");
+
+	void** const vt = *reinterpret_cast<void***>(this);
+	std::memcpy(g_criGaidenVtable, vt, kInsertAt * sizeof(void*));
+	g_criGaidenVtable[kInsertAt] = reinterpret_cast<void*>(&CriGaidenInsertedSlot);
+	std::memcpy(g_criGaidenVtable + kInsertAt + 1, vt + kInsertAt,
+		(kSlots - kInsertAt) * sizeof(void*));
+
+	*reinterpret_cast<void***>(this) = g_criGaidenVtable;
+	DebugLog("[cri] using the Like a Dragon Gaiden icri layout (stub slot at %zu)\n", kInsertAt);
 }
 
 int Cri::criAtomEx_CalculateWorkSizeForRegisterAcfData(void*, int)

@@ -5,14 +5,10 @@
 
 // Lock the handle-table offsets to the DLL's true layout. Verified against a live
 // Lost Judgment gs context dump (LostJudgment.exe+0x3B722C0) and the DLL constructor
-// (pxd::gs::context_t::context_t). YAMP loads the 0x388A00-size DLL variant, so these
-// are the authoritative offsets. See scratchpad/live-gscontext-spec.md.
+// (pxd::gs::context_t::context_t). See scratchpad/live-gscontext-spec.md.
 static_assert(offsetof(pxd::gs::context_t, handle_mesh) == 0x107A98, "handle_mesh offset drift");
 static_assert(offsetof(pxd::gs::context_t, handle_tex)  == 0x107AB8, "handle_tex offset drift");
 static_assert(offsetof(pxd::gs::context_t, handle_fx)   == 0x107BB8, "handle_fx offset drift");
-// The shared immediate-mode index buffers. Motor Raid's 2D quad pusher reads p_ib_quad
-// straight off the context (FUN_18009C829: `mov rcx,[gs+0x7670]`), so a layout drift here
-// is a null-deref inside the DLL rather than a YAMP-side error.
 // The shared immediate-mode primitive buffers. Motor Raid's 2D quad pusher reads p_ib_quad
 // straight off the context (FUN_18009C829: `mov rcx,[gs_context+0x7670]`), so a layout drift
 // here is a null-deref inside the DLL rather than a YAMP-side error.
@@ -22,6 +18,26 @@ static_assert(offsetof(pxd::gs::context_t, p_ib_fan)  == 0x7678, "p_ib_fan offse
 static_assert(offsetof(pxd::gs::context_t, p_ib_rect) == 0x7680, "p_ib_rect offset drift");
 static_assert(offsetof(pxd::gs::context_t, p_device_context) == 0x7738, "p_device_context offset drift");
 
+// The same fields in the Like a Dragon Gaiden build (module 2023-11-27, context 0x3898C0).
+// Every one of them is exactly +0xBA8 from its LJ position - that uniform shift IS the layout
+// difference, and it is the reason this is one templated struct rather than two. Derived by
+// aligning the two module constructors instruction-by-instruction; see gs.h.
+static_assert(offsetof(pxd::gs::context_gaiden_t, handle_mesh) == 0x108640, "gaiden handle_mesh drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, handle_tex)  == 0x108660, "gaiden handle_tex drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, handle_fx)   == 0x108760, "gaiden handle_fx drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, p_vb_sphere) == 0x81E8, "gaiden p_vb_sphere drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, p_ib_quad) == 0x8218, "gaiden p_ib_quad drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, p_ib_fan)  == 0x8220, "gaiden p_ib_fan drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, p_ib_rect) == 0x8228, "gaiden p_ib_rect drift");
+static_assert(offsetof(pxd::gs::context_gaiden_t, p_device_context) == 0x82E0, "gaiden p_device_context drift");
+
+// Everything ABOVE gap18 must agree in both builds - that is what lets the host read the header
+// fields (and frame_counter) straight off `sm_context` without knowing which build is loaded.
+static_assert(offsetof(pxd::gs::context_t, frame_counter)
+	== offsetof(pxd::gs::context_gaiden_t, frame_counter), "header must be build-independent");
+static_assert(offsetof(pxd::gs::context_t, unknown_table_ptr3)
+	== offsetof(pxd::gs::context_gaiden_t, unknown_table_ptr3), "header must be build-independent");
+
 namespace pxd
 {
 		namespace gs {
@@ -29,16 +45,39 @@ namespace pxd
 			cgs_vb* (*vb_create)(uint64_t fvf, unsigned int vertices, vb_usage_t usage, unsigned int flags, const void* p_initial_data, const char* sz_name);
 			cgs_ib* (*ib_create)(unsigned int indices, ib_usage_t usage, unsigned int flags, const void* p_initial_data, const char* sz_name);
 			context_t* sm_context;
+			// False = the LJ / Y:LAD layout (context 0x388A00), which is every host but Gaiden.
+			bool sm_is_gaiden_layout = false;
+			// Defaults to the LJ layout so any host that never sets it behaves exactly as before.
+			DeviceContextOffsets sm_dc = DC_OFFSETS_LJ;
+
+			// The three below-gap18 fields the host itself reads. Everything else that has to know
+			// the layout lives in PatchGs, which is templated over the context type.
+			cgs_device_context* device_context()
+			{
+				return with_tail([](auto* ctx) { return ctx->p_device_context; });
+			}
+
+			t_instance_tbl<cgs_tex>& handle_tex()
+			{
+				return with_tail([](auto* ctx) -> t_instance_tbl<cgs_tex>& { return ctx->handle_tex; });
+			}
+
+			sbgl::cdevice& sbgl_device()
+			{
+				return with_tail([](auto* ctx) -> sbgl::cdevice& { return ctx->sbgl_device; });
+			}
 
 			void inject_pointer(context_t* sm_context) {
 				uintptr_t value = (uintptr_t)sm_context + 0x78;
 				memcpy((uint8_t*)sm_context + 0xb0, &value, sizeof(void*));
 			}
 
+			// The primitive buffers all live BELOW gap18, so the body runs against whichever
+			// layout is loaded - hence the generic lambda rather than a plain `context_t*`.
 			void primitive_initialize()
 			{
-				context_t* context = sm_context;
-
+				with_tail([](auto* context)
+				{
 				for (size_t i = 0; i < 3; i++)
 				{
 					context->p_vb_sphere[i] = nullptr;
@@ -105,6 +144,7 @@ namespace pxd
 				DebugLogFile("[primitives] p_ib_quad=%p p_ib_fan=%p p_ib_rect=%p\n",
 					static_cast<void*>(context->p_ib_quad), static_cast<void*>(context->p_ib_fan),
 					static_cast<void*>(context->p_ib_rect));
+				});
 			}
 
 		}
@@ -119,9 +159,13 @@ namespace pxd
 			// gated on gs_context+0x7690, which YAMP leaves 0.
 			mp_sbgl_context = p_context;
 
-			mp_cb_pool = gs::sm_context->stack_cb_pool.pop();
-			mp_up_pool = gs::sm_context->stack_up_pool.pop();
-			mp_shader_uniform = gs::sm_context->stack_shader_uniform.pop();
+			// The three pools sit below gap18, so they move with the build's layout.
+			gs::with_tail([this](auto* ctx)
+			{
+				mp_cb_pool = ctx->stack_cb_pool.pop();
+				mp_up_pool = ctx->stack_up_pool.pop();
+				mp_shader_uniform = ctx->stack_shader_uniform.pop();
+			});
 			reset_state_all();
 
 			// TODO: Yakuza 6 returns an error code here??

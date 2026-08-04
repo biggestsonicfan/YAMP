@@ -83,4 +83,22 @@ public:
 	virtual void criAtomExPlayer_SetVoicePoolIdentifier(CriAtomExPlayerTag*, unsigned int) override;
 	virtual void criAtomExPlayer_SetDspParameter(CriAtomExPlayerTag*, int, float) override;
 	virtual int criAtomExAcb_GetWaveformInfoByName(CriAtomExAcbTag*, const char*, CriAtomExWaveformInfoTag*) override;
+
+	// ---- Like a Dragon Gaiden's icri layout -------------------------------------------------
+	//
+	// The module calls this object through its C++ vtable by SLOT INDEX, and the Gaiden build
+	// (2023-11-27) was compiled against a newer CRIWARE whose icri has ONE EXTRA virtual method,
+	// inserted between criAtomExPlayer_SetCueName (slot 8) and criAtomExPlayer_SetVolume (slot 9).
+	// Every slot from 9 up is therefore one further along than icri.h declares.
+	//
+	// Measured, not guessed: sweeping every call made through the module's icri global gives 32
+	// distinct slots and 67 call sites in BOTH builds, and each slot is either identical (index
+	// <= 8) or exactly +8 bytes (index >= 9). The symptom of ignoring it is that the module's
+	// `alloc(size, align)` lands on YAMP's `free` — which is how this was found: a heap
+	// check_bytes failure inside Cri::free while loading stf.acf.
+	//
+	// The inserted method is never called by this module (the sweep finds no call to the slot it
+	// occupies), so a no-op stub in its place is sufficient and nothing else has to change.
+	// Repoints this object at a patched vtable; call once, before handing it to module_start.
+	void UseGaidenVtable();
 };

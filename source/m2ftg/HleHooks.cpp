@@ -1,5 +1,6 @@
 #include "HleHooks.h"
 
+#include "ModuleBuild.h"
 #include "../YAMPGeneral.h"
 #include "../YAMPSettings.h"
 #include "../DebugLog.h"
@@ -350,15 +351,26 @@ namespace
 	// running game's descriptor. A game with no entry here simply has no HLE hook feature -
 	// Update() and ApplyRetarget() become no-ops rather than misfiring on another DLL's
 	// addresses, which is what the old `GetGameId() != StF` early-outs bought.
+	// The four .data globals the installer works through. They are per module BUILD: the hook SET
+	// is a property of the game (all 76 of Sonic the Fighters' records have identical romOffsets
+	// in the Lost Judgment and Like a Dragon Gaiden DLLs, in the same order), but where the table
+	// and its ROM live is a property of the compile. See ../ModuleBuild.h.
+	struct HookBuild
+	{
+		uint32_t timestamp;
+		uintptr_t rvaTable;       // installer input, .data
+		uintptr_t rvaSavedWords;  // uint64[] - originals saved by the installer
+		uintptr_t rvaRomBase;     // 1 MB i960 program ROM (slot 0)
+		uintptr_t rvaBootState;   // ROM/CPU boot phase; 2 = board booted
+	};
+
 	struct GameHooks
 	{
 		const wchar_t* dllName;   // resolved with GetModuleHandleW; every module is ASLR'd
 		const Info* hooks;
 		size_t count;
-		uintptr_t rvaTable;       // installer input, .data
-		uintptr_t rvaSavedWords;  // uint64[] - originals saved by the installer
-		uintptr_t rvaRomBase;     // 1 MB i960 program ROM (slot 0)
-		uintptr_t rvaBootState;   // ROM/CPU boot phase; 2 = board booted
+		const HookBuild* builds;
+		size_t buildCount;
 		uint64_t defaultDisable[2];
 		const m2ftg::HleHooks::ConventionSite* convention;
 		size_t conventionCount;
@@ -403,10 +415,29 @@ namespace
 		{ "__yamp_hook_rand",            52, 0 },
 	};
 
+	// Sonic the Fighters in both titles that ship it. The Gaiden row was read straight out of
+	// that build's installer: the trap loop is
+	//     uVar10 = *(uint *)(&DAT_1801f31c0 + i * 0x10);                       <- table
+	//     (&DAT_180699f00)[n] = *(undefined8 *)(&DAT_180a03690 + uVar10);      <- savedWords, romBase
+	//     *(uint *)(&DAT_180a03690 + uVar10) = n * 4 | 0x4000000;
+	// and DAT_1806c4cc0 is the boot-phase counter it switches on. Every one of the four is
+	// +0xB9C0 from its Lost Judgment position, which is the uniform .data shift between the two
+	// builds and an independent check on all four numbers.
+	constexpr HookBuild STF_BUILDS[] = {
+		{ m2ftg::build::LJ_STF,     0x1E8870, 0x68E540, 0x9F7CD0, 0x6B9300 },
+		{ m2ftg::build::GAIDEN_STF, 0x1F31C0, 0x699F00, 0xA03690, 0x6C4CC0 },
+	};
+	constexpr HookBuild FV_BUILDS[] = {
+		{ m2ftg::build::LJ_FV, 0x1E5840, 0x690B40, 0x9FA2D0, 0x6BB900 },
+	};
+	constexpr HookBuild VF2_BUILDS[] = {
+		{ m2ftg::build::YLAD_VF2, 0x185640, 0x51D180, 0x980040, 0x641890 },
+	};
+
 	constexpr GameHooks GAME_STF = {
 		L"stf-pxd-w64-d3d12_retail.dll",
 		STF_HOOKS, std::size(STF_HOOKS),
-		0x1E8870, 0x68E540, 0x9F7CD0, 0x6B9300,
+		STF_BUILDS, std::size(STF_BUILDS),
 		{ (1ull << m2ftg::HleHooks::HOOK_STF_GAME_INT_TIME)
 		| (1ull << m2ftg::HleHooks::HOOK_STF_ATTRACT_TIMER), 0 },
 		STF_CONVENTION, std::size(STF_CONVENTION),
@@ -414,7 +445,7 @@ namespace
 	constexpr GameHooks GAME_FV = {
 		L"fv-pxd-w64-d3d12_retail.dll",
 		FV_HOOKS, std::size(FV_HOOKS),
-		0x1E5840, 0x690B40, 0x9FA2D0, 0x6BB900,
+		FV_BUILDS, std::size(FV_BUILDS),
 		{ 0, 0 },   // FV's GAME_INT hook is Inert - nothing to disable by default
 		FV_CONVENTION, std::size(FV_CONVENTION),
 	};
@@ -422,7 +453,7 @@ namespace
 	constexpr GameHooks GAME_VF2 = {
 		L"vf2-pxd-w64-retail.dll",
 		VF2_HOOKS, std::size(VF2_HOOKS),
-		0x185640, 0x51D180, 0x980040, 0x641890,
+		VF2_BUILDS, std::size(VF2_BUILDS),
 		{ 0, 0 },   // nothing to disable by default
 		VF2_CONVENTION, std::size(VF2_CONVENTION),
 	};
@@ -440,6 +471,19 @@ namespace
 		case YAMPGeneral::GameId::VF2: return &GAME_VF2;
 		default:                       return nullptr;
 		}
+	}
+
+	// The .data globals for the module build actually loaded. Falls back to the game's first row
+	// for an unrecognised build - GameVerify blocks those before LoadLibrary, so reaching the
+	// fallback means a table here is missing a row rather than a user having an odd file.
+	const HookBuild& CurrentBuildRvas(const GameHooks& game)
+	{
+		const uint32_t running = m2ftg::CurrentModuleBuild();
+		for (size_t i = 0; i < game.buildCount; i++)
+		{
+			if (game.builds[i].timestamp == running) return game.builds[i];
+		}
+		return game.builds[0];
 	}
 
 	// Used wherever a caller asks for a mask and the game has no table.
@@ -576,7 +620,8 @@ void m2ftg::HleHooks::Update()
 
 	// Nothing to restore until the installer has run; it does so in board bring-up stage 2,
 	// which is also when the boot state reaches 2.
-	if (*reinterpret_cast<const uint32_t*>(base + game->rvaBootState) != 2)
+	const HookBuild& rvas = CurrentBuildRvas(*game);
+	if (*reinterpret_cast<const uint32_t*>(base + rvas.rvaBootState) != 2)
 	{
 		return;
 	}
@@ -607,9 +652,9 @@ void m2ftg::HleHooks::Update()
 	const bool netplayLocked = net::SessionInProgress();
 	const uint64_t* wanted = netplayLocked ? netplayMask : settings->m_stfHleDisableMask;
 
-	const auto* table = reinterpret_cast<const HleTableEntry*>(base + game->rvaTable);
-	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + game->rvaSavedWords);
-	auto* rom = reinterpret_cast<uint8_t*>(base + game->rvaRomBase);
+	const auto* table = reinterpret_cast<const HleTableEntry*>(base + rvas.rvaTable);
+	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + rvas.rvaSavedWords);
+	auto* rom = reinterpret_cast<uint8_t*>(base + rvas.rvaRomBase);
 
 	// Enforced every frame rather than applied once. It is only a few dozen aligned dword
 	// compares, and it means the setting can be toggled live, survives a board reset
@@ -785,7 +830,7 @@ size_t m2ftg::HleHooks::ApplyRetarget(const std::string iniRetarget[MAX_COUNT])
 			declared, suppressed);
 	}
 
-	auto* table = reinterpret_cast<HleTableEntry*>(base + game->rvaTable);
+	auto* table = reinterpret_cast<HleTableEntry*>(base + CurrentBuildRvas(*game).rvaTable);
 	size_t changed = 0;
 	for (size_t i = 0; i < count; i++)
 	{
@@ -840,7 +885,7 @@ bool m2ftg::HleHooks::GetInstalledOffsets(uint32_t out[MAX_COUNT])
 		return false;
 	}
 
-	const auto* table = reinterpret_cast<const HleTableEntry*>(base + game->rvaTable);
+	const auto* table = reinterpret_cast<const HleTableEntry*>(base + CurrentBuildRvas(*game).rvaTable);
 	for (size_t i = 0; i < game->count; i++)
 	{
 		out[i] = table[i].romOffset;

@@ -50,9 +50,16 @@ namespace Verify
 			size_t outdatedCount;
 		};
 
+		// Sonic the Fighters ships in two titles. Both builds are hostable: the ROM, the sound
+		// archives and the shader archive are byte-identical between them, and the module protocol
+		// is unchanged (execute_info 0x1760, config 0x100C) — only the host DLL was recompiled.
+		// The per-build RVAs and the two pxd context sizes that differ live in m2ftg/ModuleBuild.h
+		// and the tables that key off it.
 		constexpr KnownModuleBuild STF_BUILDS[] = {
 			{ "DF7FE561ED3B2954066CC138C179B9DD5CE2F65D0EC4A4104A7AD161236A07BB", 2086896, 0x637B11A3,
 				"Lost Judgment (2022-11-21)" },
+			{ "991383EB33CA7E119425C69C6FBB48C9B09D3EC027BBC0264D505D449B6CB26F", 2132984, 0x65647FB5,
+				"Like a Dragon Gaiden (2023-11-27)" },
 		};
 		constexpr KnownModuleBuild FV_BUILDS[] = {
 			{ "0F1DAD193533C4C250EDA54BD3C5D63751D1E3431E4DD8F702010777B9754EC0", 2078704, 0x637B119D,
@@ -136,9 +143,11 @@ namespace Verify
 			const char* label;
 		};
 
-		struct ParentEntry
+		// One title that can supply a given arcade game. Most games have exactly one, but an
+		// arcade machine reused across releases has several — Sonic the Fighters ships in both
+		// Lost Judgment and Like a Dragon Gaiden, and owning EITHER is enough.
+		struct ParentTitle
 		{
-			YAMPGeneral::GameId id;
 			const wchar_t* exeName;
 			const char* exeNameUtf8;   // same name, for the UI and message text
 			// Where the executable sits relative to an install root, for the folders we probe
@@ -147,6 +156,13 @@ namespace Verify
 			size_t subdirCount;
 			const KnownExeBuild* builds;
 			size_t buildCount;
+		};
+
+		struct ParentEntry
+		{
+			YAMPGeneral::GameId id;
+			const ParentTitle* titles;
+			size_t titleCount;
 		};
 
 		// Both parent games keep their executable in runtime/media/, so one subdir list serves.
@@ -168,31 +184,55 @@ namespace Verify
 			{ 0x60AB8368, 0x039DC000, 38833000, "Yakuza 6: The Song of Life (Steam, 2021-05-24)" },
 		};
 
-		constexpr ParentEntry PARENT_ENTRIES[] = {
-			{ YAMPGeneral::GameId::StF, L"LostJudgment.exe", "LostJudgment.exe",
+		// Like a Dragon Gaiden, which ships stf/vf2/mr modules in runtime/media/m2ftg/ like
+		// Lost Judgment does. The executable is lowercase on disk; the search is case-insensitive
+		// on Windows, but the name is spelled as shipped so log lines match what the user sees.
+		constexpr KnownExeBuild GAIDEN_EXE_BUILDS[] = {
+			{ 0x67A1DC3D, 0x18D15000, 387517984, "Like a Dragon Gaiden (Steam)" },
+		};
+
+		// Sonic the Fighters is the first game YAMP can source from more than one title: Lost
+		// Judgment and Like a Dragon Gaiden ship byte-identical ROM and asset files, so owning
+		// EITHER is proof of ownership and the module that gets loaded decides which build runs.
+		constexpr ParentTitle STF_TITLES[] = {
+			{ L"LostJudgment.exe", "LostJudgment.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::FV, L"LostJudgment.exe", "LostJudgment.exe",
+			{ L"likeadragongaiden.exe", "likeadragongaiden.exe",
+				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
+				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
+		};
+		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), and MR's Gaiden build
+		// has not been brought up yet, so both stay Lost-Judgment-only.
+		constexpr ParentTitle LJ_TITLES[] = {
+			{ L"LostJudgment.exe", "LostJudgment.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::MR, L"LostJudgment.exe", "LostJudgment.exe",
-				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VF5FS_LJ, L"LostJudgment.exe", "LostJudgment.exe",
-				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VF2, L"YakuzaLikeADragon.exe", "YakuzaLikeADragon.exe",
+		};
+		constexpr ParentTitle YLAD_TITLES[] = {
+			{ L"YakuzaLikeADragon.exe", "YakuzaLikeADragon.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				YLAD_EXE_BUILDS, std::size(YLAD_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VF5FS_YLAD, L"YakuzaLikeADragon.exe", "YakuzaLikeADragon.exe",
-				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				YLAD_EXE_BUILDS, std::size(YLAD_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VF2_K2, L"YakuzaKiwami2.exe", "YakuzaKiwami2.exe",
+		};
+		constexpr ParentTitle K2_TITLES[] = {
+			{ L"YakuzaKiwami2.exe", "YakuzaKiwami2.exe",
 				nullptr, 0, K2_EXE_BUILDS, std::size(K2_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VON_K2, L"YakuzaKiwami2.exe", "YakuzaKiwami2.exe",
-				nullptr, 0, K2_EXE_BUILDS, std::size(K2_EXE_BUILDS) },
-			{ YAMPGeneral::GameId::VF5FS, L"Yakuza6.exe", "Yakuza6.exe",
+		};
+		constexpr ParentTitle Y6_TITLES[] = {
+			{ L"Yakuza6.exe", "Yakuza6.exe",
 				nullptr, 0, Y6_EXE_BUILDS, std::size(Y6_EXE_BUILDS) },
+		};
+
+		constexpr ParentEntry PARENT_ENTRIES[] = {
+			{ YAMPGeneral::GameId::StF, STF_TITLES, std::size(STF_TITLES) },
+			{ YAMPGeneral::GameId::FV, LJ_TITLES, std::size(LJ_TITLES) },
+			{ YAMPGeneral::GameId::MR, LJ_TITLES, std::size(LJ_TITLES) },
+			{ YAMPGeneral::GameId::VF5FS_LJ, LJ_TITLES, std::size(LJ_TITLES) },
+			{ YAMPGeneral::GameId::VF2, YLAD_TITLES, std::size(YLAD_TITLES) },
+			{ YAMPGeneral::GameId::VF5FS_YLAD, YLAD_TITLES, std::size(YLAD_TITLES) },
+			{ YAMPGeneral::GameId::VF2_K2, K2_TITLES, std::size(K2_TITLES) },
+			{ YAMPGeneral::GameId::VON_K2, K2_TITLES, std::size(K2_TITLES) },
+			{ YAMPGeneral::GameId::VF5FS, Y6_TITLES, std::size(Y6_TITLES) },
 		};
 
 		const ModuleEntry* FindModuleEntry(YAMPGeneral::GameId id)
@@ -321,7 +361,7 @@ namespace Verify
 		// folder and its two parents (LJ: runtime/media/m2ftg -> runtime/media), then YAMP.exe's
 		// folder and the CWD, then every Steam install. Roots also get the entry's subdirs
 		// appended, since a Steam install keeps the executable in runtime/media/.
-		std::vector<fs::path> ParentSearchDirs(const ParentEntry& entry, const fs::path& dllDir)
+		std::vector<fs::path> ParentSearchDirs(const ParentTitle& entry, const fs::path& dllDir)
 		{
 			std::vector<fs::path> dirs;
 
@@ -395,7 +435,15 @@ namespace Verify
 		std::wstring FormatParentFailure(const ParentEntry& entry)
 		{
 			const std::wstring parent = UTF8ToWchar(gGeneral.GetParentGameName());
-			return parent + L" could not be found.\n\nYAMP looked for " + entry.exeName +
+			// A game that ships in several titles lists all of them, so the message never tells
+			// someone who owns Like a Dragon Gaiden to go and buy Lost Judgment.
+			std::wstring exeNames = entry.titles[0].exeName;
+			for (size_t i = 1; i < entry.titleCount; i++)
+			{
+				exeNames += (i + 1 == entry.titleCount) ? L" or " : L", ";
+				exeNames += entry.titles[i].exeName;
+			}
+			return parent + L" could not be found.\n\nYAMP looked for " + exeNames +
 				L" next to the arcade module, next to YAMP.exe, in every folder beside YAMP.exe, and "
 				L"in every Steam and GOG install on this system, and found no copy of it.\n\nYAMP does "
 				L"not redistribute any game files: you must own " + parent + L" to play its arcade "
@@ -641,31 +689,48 @@ namespace Verify
 		const ParentEntry* entry = FindParentEntry(id);
 		if (entry == nullptr) return result;  // NotChecked: no table for this game yet
 
-		result.exeName = entry->exeNameUtf8;
+		result.exeName = entry->titles[0].exeNameUtf8;
 		result.status = ParentStatus::NotFound;
 
-		for (const fs::path& dir : ParentSearchDirs(*entry, dllDir))
+		// Owning ANY of the titles that ship this arcade game is enough, so keep looking until one
+		// verifies. A title that is present but of an unrecognised build is remembered and used
+		// only if nothing else verifies, so "I own Gaiden but my Lost Judgment is an odd build"
+		// still passes on the strength of the copy that did verify.
+		for (size_t t = 0; t < entry->titleCount; t++)
 		{
-			const fs::path candidate = dir / entry->exeName;
-			const PeIdentity identity = ReadPeIdentity(candidate);
-			if (!identity.valid) continue;
-
-			result.exePath = candidate;
-			result.status = ParentStatus::UnknownBuild;
-			for (size_t i = 0; i < entry->buildCount; i++)
+			const ParentTitle& title = entry->titles[t];
+			for (const fs::path& dir : ParentSearchDirs(title, dllDir))
 			{
-				const KnownExeBuild& build = entry->builds[i];
-				if (identity.timestamp == build.timestamp && identity.sizeOfImage == build.sizeOfImage
-					&& identity.fileSize == build.fileSize)
+				const fs::path candidate = dir / title.exeName;
+				const PeIdentity identity = ReadPeIdentity(candidate);
+				if (!identity.valid) continue;
+
+				ParentStatus status = ParentStatus::UnknownBuild;
+				const char* label = nullptr;
+				for (size_t i = 0; i < title.buildCount; i++)
 				{
-					result.status = ParentStatus::Verified;
-					result.buildLabel = build.label;
-					break;
+					const KnownExeBuild& build = title.builds[i];
+					if (identity.timestamp == build.timestamp && identity.sizeOfImage == build.sizeOfImage
+						&& identity.fileSize == build.fileSize)
+					{
+						status = ParentStatus::Verified;
+						label = build.label;
+						break;
+					}
 				}
+
+				// The nearest copy of THIS title wins even when it is an unrecognised build: a
+				// second, older install elsewhere should not decide the verdict for this one.
+				if (result.status == ParentStatus::NotFound || status == ParentStatus::Verified)
+				{
+					result.exePath = candidate;
+					result.exeName = title.exeNameUtf8;
+					result.status = status;
+					result.buildLabel = label;
+				}
+				break;
 			}
-			// The nearest copy wins even when it is an unrecognised build: a second, older
-			// install elsewhere on the system should not decide the verdict for this one.
-			break;
+			if (result.status == ParentStatus::Verified) break;
 		}
 		return result;
 	}
@@ -682,11 +747,16 @@ namespace Verify
 			gGeneral.SetDLLTimestamp(g_lastModule.timestamp);
 		}
 
-		DebugLog("[verify] module %s: %s (sha256 %s, %llu bytes)\n",
+		// The build LABEL is the useful half of this line once a game ships in more than one
+		// title: "Verified" alone does not say whether Sonic the Fighters came out of Lost
+		// Judgment or Like a Dragon Gaiden, and those are different DLLs with different RVAs.
+		DebugLog("[verify] module %s: %s%s%s (sha256 %s, %llu bytes)\n",
 			WcharToUTF8(dllPath.filename().wstring()).c_str(), Describe(g_lastModule.status),
+			g_lastModule.buildLabel ? " — " : "", g_lastModule.buildLabel ? g_lastModule.buildLabel : "",
 			g_lastModule.sha256.empty() ? "n/a" : g_lastModule.sha256.c_str(),
 			static_cast<unsigned long long>(g_lastModule.size));
-		DebugLog("[verify] parent game: %s (%s)\n", Describe(g_lastParent.status),
+		DebugLog("[verify] parent game: %s%s%s (%s)\n", Describe(g_lastParent.status),
+			g_lastParent.buildLabel ? " — " : "", g_lastParent.buildLabel ? g_lastParent.buildLabel : "",
 			g_lastParent.exePath.empty() ? "not located"
 				: WcharToUTF8(g_lastParent.exePath.wstring()).c_str());
 
