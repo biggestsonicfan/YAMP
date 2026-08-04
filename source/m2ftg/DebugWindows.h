@@ -212,5 +212,15 @@ namespace m2ftg
 		// evidence. 0 if no game is running.
 		uint32_t StateCheckValue();
 
+		// Whether StateCheckValue() returns a HASH (true) or the ROM's own frame counter (false),
+		// which decides how the plugin is allowed to compare two peers' values.
+		//
+		// This is not a detail the plugin can infer, and getting it wrong is silent: a counter
+		// tolerates a constant offset between the peers and a hash does not, so comparing a hash
+		// the counter way either fires on the frame after the baseline or - worse - baselines a
+		// genuine divergence and then treats it as expected. See
+		// yampnet_match_config::state_check_exact.
+		bool StateCheckIsHash();
+
 	}
 

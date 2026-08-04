@@ -191,8 +191,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
             return 0;
         }
 
+        // Optional netplay plugin, same as every other hosted path: absent yampnet.dll = netplay
+        // simply does not exist. Easy to forget and impossible to diagnose from the game - without
+        // it net::IsAvailable() stays false, so the session driver pre3::GameLoop calls is
+        // permanently inert and the Netplay page never appears, which reads as "the plugin will
+        // not load" when nothing ever asked it to. That is precisely how Virtual On presented; see
+        // the same note on the Kiwami 2 branch above.
+        net::ParseCommandLine();
+        net::Load();
+
         RenderWindow window(hInstance, dll, nShowCmd);
         pre3::Run(window);
+        net::Unload();
         ImGui::DestroyContext();
         return 0;
     }

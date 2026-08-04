@@ -8,6 +8,8 @@
 #include "m2ftg/DebugWindows.h"
 #include "m2ftg/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
+#include "pre3/HleHooks.h"
+#include "pre3/Determinism.h"
 
 #include "net/NetPlugin.h"
 
@@ -72,7 +74,51 @@ static bool IsPre3Game()
 // sustain a session" - and a game that gets one starts offering the page automatically.
 static bool IsNetplayGame()
 {
-	return m2ftg::NetplaySupported();
+	return m2ftg::NetplaySupported() || pre3::NetplaySupported();
+}
+
+// The two families answer "has the emulated board booted?" and "put it back to a clean state"
+// through their own emulators, and the netplay UI needs both without caring which is running.
+// Written as a pair of one-liners rather than a shared interface: two implementations do not
+// justify a vtable, and the alternative - the UI reaching for m2ftg unconditionally - is what
+// would silently do nothing on the Model 3 path.
+static bool NetplayBoardBooted()
+{
+	return IsPre3Game() ? pre3::IsBoardBooted() : m2ftg::IsBoardBooted();
+}
+
+// WHICH per-game setting a room publishes, if any. Not every game has one, and the lobby used to
+// assume that "not VF2" meant "has DAMAGE" - so Fighting Vipers, Motor Raid and both Model 3 games
+// were all shown a Damage column that means nothing to them. DAMAGE is Sonic the Fighters' alone
+// (m2ftg::UpdateDamageAssignment no-ops for every other game), and the Model 3 boards publish
+// something else entirely: which state a round starts from.
+enum class RoomSetting { None, Damage, Vf2Version, Pre3Start };
+
+static RoomSetting CurrentRoomSetting()
+{
+	switch (gGeneral.GetGameId())
+	{
+	case YAMPGeneral::GameId::StF:     return RoomSetting::Damage;
+	case YAMPGeneral::GameId::VF2:
+	case YAMPGeneral::GameId::VF2_K2:  return RoomSetting::Vf2Version;
+	case YAMPGeneral::GameId::FV2:
+	case YAMPGeneral::GameId::SRC2:    return RoomSetting::Pre3Start;
+	default:                           return RoomSetting::None;
+	}
+}
+
+// VS mode is an m2ftg config byte all three of those games read at boot. The Model 3 round-start
+// reset restores a whole saved machine over the top of it, so publishing it there would claim an
+// agreement that decides nothing.
+static bool RoomHasVsMode()
+{
+	return !IsPre3Game();
+}
+
+static void NetplayResetBoard()
+{
+	if (IsPre3Game()) pre3::ResetBoard();
+	else              m2ftg::ResetBoard();
 }
 
 // The Virtua Fighter 2 MODULE, in either of the two parent games that ship it. Separate from the
@@ -137,6 +183,20 @@ void YAMPUserInterface::Draw()
 	}
 	m2ftg::UpdateGameDebugFlag();
 	m2ftg::HleHooks::Update();
+	// The pre3 boards keep their hooks in the PowerPC core's decoded trace rather than in the
+	// ROM image, so this reconciles that instead - same once-a-frame, applies-live contract.
+	//
+	// FORCED TO THE SHIPPED DEFAULT DURING NETPLAY, which is how the two peers are made to agree
+	// about it. The mask changes what the board DOES - Patch hooks rewrite instructions, Removed
+	// hooks delete them, and the default itself disables two (the start-up warning screen) - so
+	// two machines running different masks are running different games. It is a uint64_t[2], which
+	// does not fit in the room's flag word, and negotiating it would mean a new wire field for a
+	// setting nobody wants to vary mid-match anyway. Pinning it to one value both sides compute
+	// locally is the same answer for none of the cost, and it matches how every other board-facing
+	// control behaves while a session is up: switched off for the duration.
+	pre3::HleHooks::Update(net::SessionInProgress()
+		? pre3::HleHooks::DefaultDisableMask()
+		: gGeneral.GetSettings()->m_stfHleDisableMask);
 
 	// Likewise the netplay status: it has to be visible while the settings window is CLOSED,
 	// which is where a session spends all of its time once it is running.
@@ -341,6 +401,7 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	copyToBuffer(m_netFingerprint, sizeof(m_netFingerprint), settings->m_netCertFingerprint);
 	copyToBuffer(m_netComId, sizeof(m_netComId), settings->m_netComId);
 	m_netFrameDelay = settings->m_netFrameDelay;
+	m_netPre3VsStart = settings->m_netPre3VsStart;
 
 	m_dontApplyPatches = settings->m_dontApplyPatches;
 	m_useD3DDebugLayer = settings->m_useD3DDebugLayer;
@@ -352,12 +413,16 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_stfHleDisableMask[1] = settings->m_stfHleDisableMask[1];
 
 	// In case non-default Debug options are present, don't nag about the consequences of Debug options for this session.
-	// The hook mask is compared against its DEFAULT, not against zero: hook 16 is disabled out of
-	// the box (HleHooks.h), and that alone must not read as "the user has been poking at things".
+	// The hook mask is compared against its DEFAULT, not against zero: StF's hook 16 and the pre3
+	// boards' boot-screen trio are disabled out of the box (each family's HleHooks.h), and that
+	// alone must not read as "the user has been poking at things".
+	const uint64_t* hleDefault = pre3::HleHooks::Supported()
+		? pre3::HleHooks::DefaultDisableMask()
+		: m2ftg::HleHooks::DefaultDisableMask();
 	if (m_dontApplyPatches || m_useD3DDebugLayer || m_stfShowDebugFeatures || m_stfLooseRomFiles || m_stfGameDebugFlag ||
 		!m_stfFixBackupTimeIndex ||
-		m_stfHleDisableMask[0] != m2ftg::HleHooks::DefaultDisableMask()[0] ||
-		m_stfHleDisableMask[1] != m2ftg::HleHooks::DefaultDisableMask()[1])
+		m_stfHleDisableMask[0] != hleDefault[0] ||
+		m_stfHleDisableMask[1] != hleDefault[1])
 	{
 		m_debugInfoAccepted.reset();
 	}
@@ -1100,9 +1165,11 @@ void YAMPUserInterface::DrawControlsStFPlayer(int player)
 		for (uint32_t action = 0; action < Input::Action_Count; action++)
 		{
 			// Test / Service are switches on the arcade cabinet's service panel, which only the
-			// m2ftg boards emulate — the VF5FS builds have no I/O board to wire them to, so
-			// offering the bindings there would just be a row that does nothing.
-			if ((action == Input::Action_Test || action == Input::Action_Service) && !IsM2ftgGame())
+			// emulated boards have — the m2ftg Model 2 ones and the pre3 Model 3 ones. The VF5FS
+			// builds have no I/O to wire them to, so offering the bindings there would just be a
+			// row that does nothing.
+			if ((action == Input::Action_Test || action == Input::Action_Service)
+				&& !IsM2ftgGame() && !IsPre3Game())
 			{
 				continue;
 			}
@@ -1466,6 +1533,168 @@ void YAMPUserInterface::DrawDebug()
 	// is Sonic the Fighters AND Fighting Vipers. It self-gates on HleHooks::Count(), so a game
 	// without a table draws nothing rather than an empty list.
 	DrawStfHleHooks();
+	// The Model 3 boards' equivalent. Self-gating the same way, and mutually exclusive with the
+	// panel above in practice - no game has both kinds of table.
+	DrawPre3HleHooks();
+}
+
+void YAMPUserInterface::DrawPre3HleHooks()
+{
+	namespace Hle = pre3::HleHooks;
+
+	const size_t hookCount = Hle::Count();
+	if (hookCount == 0)
+	{
+		return;
+	}
+
+	if (!ImGui::CollapsingHeader("HLE ROM hooks"))
+	{
+		return;
+	}
+
+	ImGui::PushTextWrapPos();
+	ImGui::Text("The Model 3 board's PowerPC core is a decoded-trace interpreter, and the module hooks %zu "
+		"addresses in it by substituting a native handler while that trace is built. Guest memory is never "
+		"touched, so unlike the Model 2 boards nothing here is visible in the ROM image. Disabling a hook "
+		"restores the trace entry to the instruction the board actually decoded, which hands the code back "
+		"to the emulated CPU. Applied live, every frame.", hookCount);
+	ImGui::Spacing();
+	ImGui::TextUnformatted("There are no ROM symbols for this board, so each row is named by what its handler "
+		"does rather than by the routine it replaces - which is knowable exactly, where the name is not.");
+	if (net::SessionInProgress())
+	{
+		ImGui::Spacing();
+		ImGui::TextColored(WARNING_COLOUR,
+			"Netplay is running, so the board is held at the default mask below and these boxes do "
+			"nothing until the session ends. The mask changes what the board does, and two players "
+			"on different masks are not playing the same game.");
+	}
+	ImGui::PopTextWrapPos();
+	ImGui::Spacing();
+
+	if (ImGui::Button("Restore defaults"))
+	{
+		m_stfHleDisableMask[0] = Hle::DefaultDisableMask()[0];
+		m_stfHleDisableMask[1] = Hle::DefaultDisableMask()[1];
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Every hook on except hooks 7 and 10, which between them skip the board's start-up\n"
+			"warning screen. Like a Dragon Gaiden skips it because the emulator is a minigame there;\n"
+			"YAMP is the cabinet, so the screen the real board shows on power-up is what you get.");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Enable all"))
+	{
+		m_stfHleDisableMask[0] = 0;
+		m_stfHleDisableMask[1] = 0;
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Every hook on, including the boot-screen skip - i.e. exactly what the module\n"
+			"does inside Like a Dragon Gaiden.");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Disable native routines"))
+	{
+		Hle::MaskForKinds(m_stfHleDisableMask, Hle::NATIVE_ROUTINE_KINDS);
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Every whole-routine native reimplementation off, so the emulated PowerPC runs the\n"
+			"ROM's own code instead. Slower, and the way to find out whether one of them is wrong.");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Disable all"))
+	{
+		Hle::MaskForKinds(m_stfHleDisableMask, Hle::ALL_KINDS);
+		m_pageModified = true;
+	}
+
+	size_t disabledCount = 0;
+	for (size_t i = 0; i < hookCount; i++)
+	{
+		disabledCount += Hle::MaskTest(m_stfHleDisableMask, i) ? 1 : 0;
+	}
+	ImGui::Text("%zu of %zu hooks disabled", disabledCount, hookCount);
+	if (!Hle::Live())
+	{
+		// Before the board is up there is no trace to patch, and after a table mismatch the
+		// module refuses to touch one. Say which, rather than letting the checkboxes look live.
+		if (Hle::LiveRecordCount() != 0 && Hle::LiveRecordCount() != hookCount)
+		{
+			ImGui::TextColored(WARNING_COLOUR,
+				"The module's live table has %zu records, not %zu - these descriptions are for a "
+				"different build, so nothing is being applied.", Hle::LiveRecordCount(), hookCount);
+		}
+		else
+		{
+			ImGui::TextDisabled("Waiting for the board to start - changes apply as soon as it does.");
+		}
+	}
+	ImGui::Spacing();
+
+	if (ImGui::BeginTable("##pre3hle", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
+		| ImGuiTableFlags_ScrollY, ImVec2(0.0f, 320.0f)))
+	{
+		ImGui::TableSetupColumn("Off", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("What the handler does", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupScrollFreeze(0, 1);
+		ImGui::TableHeadersRow();
+
+		for (size_t i = 0; i < hookCount; i++)
+		{
+			const Hle::Info& info = Hle::Get(i);
+			ImGui::TableNextRow();
+			ImGui::PushID(static_cast<int>(i));
+
+			ImGui::TableNextColumn();
+			bool disabled = Hle::MaskTest(m_stfHleDisableMask, i);
+			if (ImGui::Checkbox("##off", &disabled))
+			{
+				Hle::MaskSet(m_stfHleDisableMask, i, disabled);
+				m_pageModified = true;
+			}
+
+			ImGui::TableNextColumn();
+			ImGui::Text("%zu", i);
+
+			ImGui::TableNextColumn();
+			if (info.kind == Hle::Kind::Core)
+			{
+				ImGui::TextColored(WARNING_COLOUR, "%s", Hle::KindName(info.kind));
+			}
+			else
+			{
+				ImGui::TextUnformatted(Hle::KindName(info.kind));
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", Hle::KindDescription(info.kind));
+			}
+
+			ImGui::TableNextColumn();
+			ImGui::Text("%06X", info.guestAddress);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Guest address in the board's code.\nHandler: module + 0x%X",
+					info.handlerRva);
+			}
+
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(info.note);
+
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
 }
 
 void YAMPUserInterface::DrawStfHleHooks()
@@ -1942,6 +2171,36 @@ void YAMPUserInterface::DrawNetplay()
 	}
 	ImGui::PopItemWidth();
 
+	// Which state a ROUND starts from, on the boards that have a choice. Read when the room is
+	// created, so it is greyed out once one exists: the room owns the value from then on, and a
+	// control that silently stopped mattering would be worse than one that says so.
+	if (CurrentRoomSetting() == RoomSetting::Pre3Start)
+	{
+		const bool roomExists = status.state == YAMPNET_STATE_IN_ROOM
+			|| status.state == YAMPNET_STATE_SYNCING
+			|| status.state == YAMPNET_STATE_IN_MATCH;
+		if (roomExists)
+		{
+			ImGui::LabelText("Rounds start",
+				status.pre3_vs_start ? "in a versus match" : "at power-on");
+		}
+		else if (ImGui::Checkbox("Start rounds in a versus match", &m_netPre3VsStart))
+		{
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip(
+				"Both machines restore the same saved board when a round starts, so this is a\n"
+				"property of the ROOM - the host's choice, adopted by whoever joins.\n\n"
+				"Off: the board's POWER-ON state. The round plays forward through the boot, the\n"
+				"attract demo and the credit screen - which is where the AI runs, and so where a\n"
+				"divergence between the two machines shows itself.\n\n"
+				"On: the versus start state the board ships. Straight into a match, no boot to\n"
+				"sit through.");
+		}
+	}
+
 	if (accountLocked)
 	{
 		ImGui::PopStyleVar();
@@ -2019,7 +2278,8 @@ void YAMPUserInterface::DrawNetplay()
 			const YAMPSettings* set = gGeneral.GetSettings();
 			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage,
 				set != nullptr && set->m_vf2Version20,
-				set != nullptr && set->m_m2VersusMode);
+				set != nullptr && set->m_m2VersusMode,
+				set != nullptr && set->m_netPre3VsStart);
 		}
 		if (ImGui::IsItemHovered())
 		{
@@ -2049,19 +2309,38 @@ void YAMPUserInterface::DrawNetplay()
 		net::RoomRow rooms[16];
 		const unsigned int roomCount = net::GetRooms(rooms, static_cast<unsigned int>(std::size(rooms)));
 
-		if (ImGui::BeginTable("##rooms", 6,
+		// Only the columns this game actually has. A room publishes at most one per-game setting
+		// and not every game has one, so the table is built from CurrentRoomSetting rather than
+		// from "is it VF2?" - which is what used to show Fighting Vipers and the Model 3 boards a
+		// Damage column that nothing on either side reads.
+		const RoomSetting roomSetting = CurrentRoomSetting();
+		const bool showVs = RoomHasVsMode();
+		const int roomColumns = 4 + (roomSetting != RoomSetting::None ? 1 : 0) + (showVs ? 1 : 0);
+
+		if (ImGui::BeginTable("##rooms", roomColumns,
 			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
 			{ 0.0f, 130.0f }))
 		{
 			ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-			// Column header follows the same per-game rule as the cell below it.
-			ImGui::TableSetupColumn(
-				gGeneral.GetGameId() == YAMPGeneral::GameId::VF2 ? "Version" : "Damage",
-				ImGuiTableColumnFlags_WidthFixed, 60.0f);
-			// VS mode gets its own column rather than sharing the per-game one: it applies to all
-			// three games, and it is orthogonal to Damage/Version rather than an alternative to it.
-			ImGui::TableSetupColumn("VS", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+			switch (roomSetting)
+			{
+			case RoomSetting::Damage:
+				ImGui::TableSetupColumn("Damage", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				break;
+			case RoomSetting::Vf2Version:
+				ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				break;
+			case RoomSetting::Pre3Start:
+				ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+				break;
+			case RoomSetting::None:
+				break;
+			}
+			if (showVs)
+			{
+				ImGui::TableSetupColumn("VS", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+			}
 			ImGui::TableSetupColumn("Locked", ImGuiTableColumnFlags_WidthFixed, 55.0f);
 			ImGui::TableSetupColumn("Room ID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
 			ImGui::TableHeadersRow();
@@ -2079,29 +2358,40 @@ void YAMPUserInterface::DrawNetplay()
 				}
 				ImGui::TableSetColumnIndex(1);
 				ImGui::Text("%u/%u", rooms[i].players, rooms[i].max_players);
-				ImGui::TableSetColumnIndex(2);
-				// The host's cabinet setting, published with the room. Worth a column of its own
-				// because it is not a preference you keep on joining - it is how that match will
-				// play. Which setting that is depends on the game: Sonic the Fighters has
-				// DAMAGE, Virtua Fighter 2 has the 2.0/2.1 version flag, and those two versions
-				// are mechanically different games.
-				if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+				// The host's published room setting, if this game has one. Worth a column of its
+				// own because it is not a preference you keep on joining - it is how that match
+				// will play.
+				int col = 2;
+				switch (roomSetting)
 				{
-					ImGui::TextUnformatted(rooms[i].vf2_version20 ? "2.0" : "2.1");
-				}
-				else
-				{
+				case RoomSetting::Damage:
+					ImGui::TableSetColumnIndex(col++);
 					ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
+					break;
+				case RoomSetting::Vf2Version:
+					// 2.0 and 2.1 are mechanically different games, not a tuning option.
+					ImGui::TableSetColumnIndex(col++);
+					ImGui::TextUnformatted(rooms[i].vf2_version20 ? "2.0" : "2.1");
+					break;
+				case RoomSetting::Pre3Start:
+					ImGui::TableSetColumnIndex(col++);
+					ImGui::TextUnformatted(rooms[i].pre3_vs_start ? "Versus" : "Power-on");
+					break;
+				case RoomSetting::None:
+					break;
 				}
-				ImGui::TableSetColumnIndex(3);
-				// Blank rather than "no" when off, so a browser full of ordinary arcade rooms
-				// stays quiet and the VS ones stand out.
-				ImGui::TextUnformatted(rooms[i].vs_mode ? "yes" : "");
-				ImGui::TableSetColumnIndex(4);
+				if (showVs)
+				{
+					ImGui::TableSetColumnIndex(col++);
+					// Blank rather than "no" when off, so a browser full of ordinary arcade rooms
+					// stays quiet and the VS ones stand out.
+					ImGui::TextUnformatted(rooms[i].vs_mode ? "yes" : "");
+				}
+				ImGui::TableSetColumnIndex(col++);
 				// A locked room cannot be entered without the password at all: the server only
 				// hands a password-less joiner a PUBLIC slot, and a locked room has none.
 				ImGui::TextUnformatted(rooms[i].has_password ? "yes" : "");
-				ImGui::TableSetColumnIndex(5);
+				ImGui::TableSetColumnIndex(col);
 				ImGui::Text("%llu", rooms[i].room_id);
 				ImGui::PopID();
 			}
@@ -2152,19 +2442,27 @@ void YAMPUserInterface::DrawNetplay()
 		// What this match will actually be played under, stated for BOTH players: the host has to
 		// see what it published (the room is fixed now, so a later settings change is not it), and
 		// the guest has to see what it has just adopted.
-		if (gGeneral.GetGameId() == YAMPGeneral::GameId::VF2)
+		const char* const bySetter = status.hosting ? "" : " (set by the host)";
+		switch (CurrentRoomSetting())
 		{
-			ImGui::Text("Version: %s%s", status.vf2_version20 ? "2.0" : "2.1",
-				status.hosting ? "" : " (set by the host)");
+		case RoomSetting::Damage:
+			ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal", bySetter);
+			break;
+		case RoomSetting::Vf2Version:
+			ImGui::Text("Version: %s%s", status.vf2_version20 ? "2.0" : "2.1", bySetter);
+			break;
+		case RoomSetting::Pre3Start:
+			ImGui::Text("Rounds start: %s%s",
+				status.pre3_vs_start ? "in a versus match" : "at power-on", bySetter);
+			break;
+		case RoomSetting::None:
+			break;
 		}
-		else
+		if (RoomHasVsMode())
 		{
-			ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal",
-				status.hosting ? "" : " (set by the host)");
+			// Stated for every m2ftg game, because they all read it and it changes the boot itself.
+			ImGui::Text("Versus mode: %s%s", status.vs_mode ? "on" : "off", bySetter);
 		}
-		// Stated for every game, because every game reads it and it changes the boot itself.
-		ImGui::Text("Versus mode: %s%s", status.vs_mode ? "on" : "off",
-			status.hosting ? "" : " (set by the host)");
 		ImGui::PushTextWrapPos();
 		if (status.hosting)
 		{
@@ -2175,6 +2473,12 @@ void YAMPUserInterface::DrawNetplay()
 		// So "waiting for them to join" is not something the lobby can honestly display.
 		ImGui::TextUnformatted("Both players press Start match. Nothing happens until both have - "
 			"the board is reset on both machines at that point so the round starts from the same state.");
+		if (IsPre3Game())
+		{
+			ImGui::TextUnformatted("This board restores its own versus start state rather than "
+				"rebooting, so the match picks up from there instead of from the attract screen. "
+				"Your HLE hook settings are held at their defaults until the session ends.");
+		}
 		ImGui::PopTextWrapPos();
 
 		if (ImGui::Button("Start match"))
@@ -2237,7 +2541,7 @@ void YAMPUserInterface::DrawNetplayOverlay()
 			// Leave RPCN entirely (not just the room) so nothing reconnects behind the player's
 			// back, then put the board back to a clean attract mode.
 			net::EndSession();
-			m2ftg::ResetBoard();
+			NetplayResetBoard();
 		}
 		ImGui::End();
 		return;
@@ -2262,10 +2566,10 @@ void YAMPUserInterface::DrawNetplayOverlay()
 	{
 		ImGui::Text("Room ID: %llu", status.room_id);
 	}
-	// The round cannot start until this machine's board has booted (see m2ftg::IsBoardBooted).
-	// Say so, or the wait looks like the session having stalled.
+	// The round cannot start until this machine's board has booted (see m2ftg::IsBoardBooted /
+	// pre3::IsBoardBooted). Say so, or the wait looks like the session having stalled.
 	if ((status.state == YAMPNET_STATE_IN_ROOM || status.state == YAMPNET_STATE_SYNCING)
-		&& !m2ftg::IsBoardBooted())
+		&& !NetplayBoardBooted())
 	{
 		ImGui::TextUnformatted("Waiting for the emulated board to finish booting...");
 	}
@@ -2521,6 +2825,7 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_netCertFingerprint = m_netFingerprint;
 	settings->m_netComId = m_netComId;
 	settings->m_netFrameDelay = m_netFrameDelay;
+	settings->m_netPre3VsStart = m_netPre3VsStart;
 
 	settings->m_dontApplyPatches = m_dontApplyPatches;
 	settings->m_useD3DDebugLayer = m_useD3DDebugLayer;

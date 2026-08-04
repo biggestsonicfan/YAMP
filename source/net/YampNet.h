@@ -26,6 +26,12 @@
 //     the two peers WILL diverge. The seed is delivered by the plugin because only the plugin
 //     knows which peer is authoritative; applying it stays in YAMP because it touches m2ftg
 //     internals (Patch.cpp) that the plugin has no business reaching into.
+//
+//     The Model 3 module (pre3) has NO rand hook at all - its board is frame-deterministic by
+//     construction - and its single host-varying input is the real-time clock. It therefore
+//     applies the same match seed to a different thing: pre3::SetDeterministicClock pins the
+//     board's RTC to it. Same contract, same call, different destination; see
+//     docs/pre3-netplay.md.
 
 #pragma once
 
@@ -38,7 +44,7 @@ extern "C" {
 // Bump on ANY change to the structs or the function table below. The loader refuses a plugin
 // whose version does not match exactly - a stale DLL is rejected at load rather than being
 // allowed to scribble through a shifted struct.
-#define YAMPNET_ABI_VERSION 6u
+#define YAMPNET_ABI_VERSION 7u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -87,15 +93,29 @@ typedef enum yampnet_step
 // Layout handshake
 // ---------------------------------------------------------------------------------------------
 //
-// The plugin writes m2ftg's execute_info.pad[] directly, so it is coupled to those struct
-// layouts. That coupling is the price of keeping pad conversion out of YAMP; this handshake is
-// what stops it becoming a memory-corruption bug. YAMP fills every field from offsetof()/sizeof()
-// on its own headers, and the plugin compares against the values it was built with. A mismatch
-// fails the load loudly instead of silently writing at the wrong offsets.
+// The plugin writes execute_info.pad[] directly, so it is coupled to those struct layouts. That
+// coupling is the price of keeping pad conversion out of YAMP; this handshake is what stops it
+// becoming a memory-corruption bug. YAMP fills every field from offsetof()/sizeof() on its own
+// headers, and the plugin compares against the values it was built with. A mismatch fails the
+// load loudly instead of silently writing at the wrong offsets.
+//
+// TWO STRUCT FAMILIES, ONE HANDSHAKE (since ABI 7). YAMP now hosts two arcade emulators whose
+// execute_info blocks differ in SIZE - m2ftg's is 0x1760, the Model 3 module's (pre3, Fighting
+// Vipers 2 / Sega Rally 2) is 0x1780 with four pad slots and a save-data region - but whose PAD
+// GEOMETRY is byte-for-byte identical, because both are the same pxd generation and use the same
+// pxd::lj_pad_t at the same two offsets. Since the pads are the only thing the plugin touches,
+// the five pad fields below are what get compared EXACTLY, and the size is a BOUND rather than an
+// identity: the session is created once, before YAMP knows which game will run, so an equality
+// test against one of the two families would refuse the other for no reason.
+//
+// The host declares the SMALLEST execute_info it may ever hand step(); the plugin's only interest
+// is that the pads fit inside it. source/net/NetPlugin.cpp static_asserts the two families'
+// agreement, so if a future module moves a pad the build stops rather than the handshake.
 typedef struct yampnet_layout
 {
-    uint32_t execute_info_size;      // sizeof(m2ftg_execute_info_t)      expect 0x1760
-    uint32_t pad_size;               // sizeof(m2ftg_pad_t)               expect 0x190
+    // The smallest execute_info YAMP may pass to step(). NOT an identity - see above.
+    uint32_t execute_info_size;      // min(m2ftg 0x1760, pre3 0x1780)   expect 0x1760
+    uint32_t pad_size;               // sizeof(pxd::lj_pad_t)             expect 0x190
     uint32_t pad0_offset;            // offsetof(execute_info, pad[0])    expect 0x20
     uint32_t pad1_offset;            // offsetof(execute_info, pad[1])    expect 0x1B0
     uint32_t pad_buttons_offset;     // offsetof(pad, m_buttons)          expect 0xA0
@@ -174,6 +194,21 @@ typedef struct yampnet_rpcn_config
 // rather than the ROM's fixed sequence. Two peers disagreeing about it are not playing the same
 // game, and the one that has it on is drawing from a generator the other never touches.
 #define YAMPNET_ROOM_FLAG_VS_MODE 0x00000004u      // m2ftg_config_t.is_vs_mode, config +0x0A
+// pre3 (Model 3) only: WHICH STATE A ROUND STARTS FROM. Unlike every flag above this is not a
+// cabinet setting at all - it selects between two different reset mechanisms, both of which are
+// the module's own:
+//
+//   clear  the board's PRISTINE POST-BOOT state, captured by YAMP itself through the module's
+//          save-state request (machine+0x120 bit 0) before a single guest frame has run. A round
+//          therefore starts at power-on and plays forward through the boot, the attract demo and
+//          the credit screen - which is what makes the AI observable, and is the closest analogue
+//          to what the m2ftg path's ResetBoard does.
+//   set    image/fv2/vs_start.bin, the versus start state the module ships and restores for
+//          itself in VS mode (machine+0x120 bit 4). Straight into a match, no boot to sit through.
+//
+// A room property rather than a preference because the two peers must restore the SAME state:
+// the whole point of the round-start reset is that both boards begin from identical bytes.
+#define YAMPNET_ROOM_FLAG_PRE3_VS_START 0x00000008u
 // Adding a bit here needs no ABI bump and no plugin rebuild: the plugin carries game_flags
 // verbatim between the room and its peers and never interprets it.
 
@@ -215,6 +250,22 @@ typedef struct yampnet_match_config
     uint8_t  frame_delay;            // typical 2-4
     uint8_t  input_redundancy;       // frames of input re-sent per packet; PS3 used 10
     uint32_t stall_timeout_ms;       // step() returns TIMEOUT past this
+    // --- ABI 7 ---
+    // How submit_state_check's values are to be COMPARED, which depends on what they are and only
+    // YAMP knows that.
+    //
+    //   0  COUNTER. The plugin baselines the difference between the peers on the first comparable
+    //      frame and then watches for that difference to CHANGE. Right for Sonic the Fighters and
+    //      Fighting Vipers, which submit the ROM's own frame_counter: the two boards need not
+    //      re-enter a round at the same absolute count, and a constant offset is harmless because
+    //      both still advance one per frame.
+    //
+    //   1  EXACT. The values must be EQUAL. Required for anything that submits a HASH - Virtua
+    //      Fighter 2 and the Model 3 boards both do - because the difference between two hashes is
+    //      meaningless: it is not constant when the peers agree, so baselining it would either
+    //      report a desync on the frame after the baseline or, if the baseline itself were taken
+    //      from a disagreeing pair, treat a genuine divergence as the expected offset.
+    uint8_t  state_check_exact;
 } yampnet_match_config;
 
 // ---------------------------------------------------------------------------------------------

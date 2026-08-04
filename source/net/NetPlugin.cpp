@@ -10,6 +10,7 @@
 #include "../DebugLog.h"
 #include "../YAMPGeneral.h"
 #include "../m2ftg/m2ftg.h"
+#include "../pre3/pre3.h"
 
 namespace net
 {
@@ -81,6 +82,22 @@ namespace net
         // Filled from YAMP's own headers. The plugin compares these against the values it was
         // built with and refuses to run on a mismatch - it writes execute_info.pad[] directly,
         // so a shifted layout would be silent memory corruption rather than a visible bug.
+        //
+        // The session is created at start-up, BEFORE the game is chosen, so this one layout has to
+        // describe every execute_info YAMP might later hand step(). Both families qualify because
+        // their pads coincide exactly - the asserts below are what keeps that true rather than
+        // merely currently-so, and they name the m2ftg struct as the reference because it is the
+        // smaller of the two (its 0x1760 is the bound the plugin bounds-checks against).
+        static_assert(sizeof(pre3::pre3_pad_t) == sizeof(m2ftg::m2ftg_pad_t),
+            "pre3 and m2ftg must share one pad layout - the netplay plugin writes both through "
+            "a single handshake");
+        static_assert(offsetof(pre3::pre3_execute_info_t, pad)
+            == offsetof(m2ftg::m2ftg_execute_info_t, pad), "pad[0] must sit at one offset");
+        static_assert(offsetof(pre3::pre3_execute_info_t, pad[1])
+            == offsetof(m2ftg::m2ftg_execute_info_t, pad[1]), "pad[1] must sit at one offset");
+        static_assert(sizeof(pre3::pre3_execute_info_t) >= sizeof(m2ftg::m2ftg_execute_info_t),
+            "execute_info_size below is declared as the SMALLEST struct the host may pass");
+
         yampnet_layout BuildLayout()
         {
             using m2ftg::m2ftg_execute_info_t;
@@ -178,7 +195,7 @@ namespace net
         if (!s_session)
         {
             SetError(err == YAMPNET_ERR_LAYOUT
-                         ? "plugin was built against different m2ftg struct layouts (rebuild it)"
+                         ? "plugin was built against different pad struct layouts (rebuild it)"
                          : "plugin create() failed (%d)",
                      static_cast<int>(err));
             s_api = nullptr;
@@ -492,6 +509,8 @@ namespace net
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
         st.vs_mode =
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
+        st.pre3_vs_start =
+            (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
         if (s_api->get_desync(s_session, &dFrame, &dLocal, &dRemote) != 0)
@@ -576,7 +595,8 @@ namespace net
         NetLog("ui: disconnected");
     }
 
-    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode)
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
+                  bool pre3VsStart)
     {
         if (!UiMayAct())
             return false;
@@ -590,7 +610,8 @@ namespace net
         // match is played under from here on.
         rcfg.game_flags = (realDamage ? YAMPNET_ROOM_FLAG_REAL_DAMAGE : 0u)
                         | (vf2Version20 ? YAMPNET_ROOM_FLAG_VF2_VERSION20 : 0u)
-                        | (vsMode ? YAMPNET_ROOM_FLAG_VS_MODE : 0u);
+                        | (vsMode ? YAMPNET_ROOM_FLAG_VS_MODE : 0u)
+                        | (pre3VsStart ? YAMPNET_ROOM_FLAG_PRE3_VS_START : 0u);
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
         {
@@ -663,6 +684,8 @@ namespace net
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VF2_VERSION20) != 0;
             out[i].vs_mode =
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
+            out[i].pre3_vs_start =
+                (rooms[i].game_flags & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
         }
         return n;
     }
@@ -695,6 +718,15 @@ namespace net
             return localSetting;
         }
         return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
+    }
+
+    bool EffectivePre3VsStart(bool localSetting)
+    {
+        if (!SessionInProgress())
+        {
+            return localSetting;
+        }
+        return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
     }
 
     void LeaveRoom()

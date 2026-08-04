@@ -4,6 +4,7 @@
 #include "m2ftg/DisplayModes.h"
 
 #include "m2ftg/HleHooks.h"
+#include "pre3/HleHooks.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -30,6 +31,20 @@ static std::wstring HleKeyW(const wchar_t* base)
 		return base;
 	}
 	return std::wstring(base) + L"." + UTF8ToWchar(gGeneral.GetGameTag());
+}
+
+// The running game's out-of-the-box hook mask. TWO families of hook table exist and a game is
+// described by at most one of them - the m2ftg boards patch i960 instructions in the ROM image,
+// the pre3 Model 3 boards substitute handlers in the PowerPC core's decoded trace - so this asks
+// whichever one claims the game. Both return a zero mask for a game they do not describe, which
+// is also the right answer for a game with no hook table at all.
+static const uint64_t* HleDefaultDisableMask()
+{
+	if (pre3::HleHooks::Supported())
+	{
+		return pre3::HleHooks::DefaultDisableMask();
+	}
+	return m2ftg::HleHooks::DefaultDisableMask();
 }
 
 static float GetPrivateProfileFloatW(LPCWSTR lpAppName, LPCWSTR lpKeyName, float fDefault, LPCWSTR lpFileName)
@@ -139,6 +154,16 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 {
 	const std::filesystem::path iniPath = dirPath / std::filesystem::u8path(INI_FILE_NAME);
 
+	// BEFORE the version gate below, which returns outright for a missing or stale settings.ini.
+	// Every other setting's default is its member initialiser, but this one's depends on which
+	// game is running, so a member initialiser cannot express it - and taking the early return
+	// with a zero mask is not "the default", it is "every hook enabled". That is the wrong answer
+	// for a fresh install: the pre3 boards ship three hooks off so the board's own start-up screen
+	// plays, and Sonic the Fighters ships two off so its matches and attract demo are not cut to
+	// two seconds. Seeding here means the ini only ever OVERRIDES the default.
+	m_stfHleDisableMask[0] = HleDefaultDisableMask()[0];
+	m_stfHleDisableMask[1] = HleDefaultDisableMask()[1];
+
 	{
 		const wchar_t* SECTION_NAME = L"General";
 		if (int version = GetPrivateProfileIntW(SECTION_NAME, L"Version", 0, iniPath.c_str()); version != SETTINGS_VERSION)
@@ -197,6 +222,7 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		{
 			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
 		}
+		m_netPre3VsStart = GetPrivateProfileIntW(L"Netplay", L"Pre3VsStart", 0, iniPath.c_str()) != 0;
 		// Divergence diagnostics. No UI: hand-edited for a measurement run, and both default off
 		// so a normal session is unaffected by their presence.
 		m_netTimerTrace = GetPrivateProfileIntW(L"Netplay", L"TimerTrace", 0, iniPath.c_str()) != 0;
@@ -216,9 +242,9 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		// one game is a Core hook in the other. StF keeps the unsuffixed key so existing ini
 		// files still load.
 		m_stfHleDisableMask[0] = GetPrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksLo").c_str(),
-			m2ftg::HleHooks::DefaultDisableMask()[0], iniPath.c_str());
+			HleDefaultDisableMask()[0], iniPath.c_str());
 		m_stfHleDisableMask[1] = GetPrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksHi").c_str(),
-			m2ftg::HleHooks::DefaultDisableMask()[1], iniPath.c_str());
+			HleDefaultDisableMask()[1], iniPath.c_str());
 		// Belt and braces with the strip on save: a hand-edited ini must not be able to make
 		// YAMP unbootable either, since a hung board also takes the settings UI down with it.
 		m2ftg::HleHooks::MaskStripKinds(m_stfHleDisableMask, m2ftg::HleHooks::SESSION_ONLY_KINDS);
@@ -350,6 +376,7 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileStdStringA("Netplay", "CertFingerprint", m_netCertFingerprint, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "CommunicationId", m_netComId, iniPath);
 		WritePrivateProfileIntW(L"Netplay", L"FrameDelay", m_netFrameDelay, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"Pre3VsStart", m_netPre3VsStart, iniPath.c_str());
 		// Written back so a Save from the UI cannot silently drop a hand-edited diagnostic.
 		WritePrivateProfileIntW(L"Netplay", L"TimerTrace", m_netTimerTrace, iniPath.c_str());
 		WritePrivateProfileIntW(L"Netplay", L"ForceUnsupported", m_netForceUnsupported, iniPath.c_str());

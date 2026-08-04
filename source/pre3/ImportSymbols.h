@@ -6,9 +6,10 @@
 // other (see IB_CREATE in Gaiden/ImportSymbols.cpp).
 //
 // Deliberately smaller than the m2ftg set: everything there that serves Sonic the Fighters' ROM
-// work (HLE traps, the i960 fetch dispatcher, the I/O-refresh call site, the frame-submit and
-// live-execute_info globals) has no counterpart here — pre3 emulates a PowerPC 603e, not an
-// i960, and none of that machinery has been ported. This is the pxd PLATFORM set plus nothing.
+// work (HLE traps, the i960 fetch dispatcher, the frame-submit and live-execute_info globals)
+// has no counterpart here — pre3 emulates a PowerPC 603e, not an i960, and none of that
+// machinery has been ported. This is the pxd PLATFORM set plus the one emulator function the
+// cabinet's TEST / SERVICE switches need.
 
 #include "../pxd/Imports.h"
 
@@ -44,8 +45,15 @@ namespace pre3
 		// over this, so the host reconstructs it instead. See Gaiden/ImportSymbols.cpp.
 		SL_KERNEL_ALLOC,
 
-		// OPTIONAL — resolved when present, absent otherwise. See the notes in
-		// Gaiden/ImportSymbols.cpp.
+		// ---- OPTIONAL — resolved when present, absent otherwise --------------------------
+		// Neither is in RequiredButMissing: a build without them still boots, it just loses the
+		// feature that hangs off it. See the notes in Gaiden/ImportSymbols.cpp.
+
+		// M3EInput::read_port — the emulated Model 3 board's I/O read accessor, and the only
+		// reader of its JAMMA register block. Wanted for the cabinet TEST / SERVICE switches,
+		// which the module itself never drives. See SystemSwitches.h.
+		IO_READ_PORT,
+
 		IB_CREATE,
 	};
 

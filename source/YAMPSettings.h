@@ -144,6 +144,15 @@ public:
 	// stalls rather than desyncs if this is too low for the link.
 	int m_netFrameDelay = 3;
 
+	// pre3 (Model 3) only: start a round from the board's shipped VERSUS START state rather than
+	// from its power-on state. Published with the room, so this is only the value THIS machine
+	// offers when it hosts - a guest plays under whatever the host chose.
+	//
+	// Off by default because the power-on state is the more useful of the two: a round then plays
+	// forward through the boot, the attract demo and the credit screen, which is where the AI runs
+	// and therefore where a divergence shows itself. Turning it on skips straight into a match.
+	bool m_netPre3VsStart = false;
+
 	// ---- Divergence diagnostics -------------------------------------------------------------
 	// Both are INI-only on purpose: they exist to run a two-machine measurement, not to be
 	// discovered and flipped from the settings panel. See docs/vf2-hle-hooks.md.

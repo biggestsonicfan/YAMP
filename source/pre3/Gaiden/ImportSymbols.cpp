@@ -92,6 +92,24 @@ namespace pre3
 			// slot index differs, which is why m2ftg's wlock pattern finds nothing here even
 			// before the reader/writer ambiguity comes into it.
 			{ S::ARCHIVE_LOCK_WLOCK, get_module_pattern(dll, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 65 48 8B 04 25 58 00 00 00 48 8B F9 8B 15 ? ? ? ? 48 8B 1C D0 B8 10 00 00 00 80 3C 18 00 75 05 E8 ? ? ? ? B8 08 00 00 00 8B 34 18 85 F6 75 07 E8 ? ? ? ? 8B F0 8B EE C1 E5 10 8B 07 33 DB 85 C0") },
+
+			// ---- M3EInput::read_port ------------------------------------------------------
+			//
+			// The emulator side rather than the pxd side, so nothing in the m2ftg table relates
+			// to it. Found from the M3EInput RTTI (the module carries full MSVC RTTI): it is
+			// vtable slot 0 of M3EInput and of every M3ERom subclass, which is also how
+			// InstallSystemSwitches finds the entries to redirect.
+			//
+			// Whole body, no wildcards at all — it is branch-and-return only, with no
+			// rip-relative operand anywhere in it, and the pattern below is unique in the image:
+			//
+			//     port 0x04 -> ~[this+0x28]   SYSTEM  (coin, start, and the service panel)
+			//     port 0x08 -> ~[this+0x29]   player 1
+			//     port 0x0C -> ~[this+0x2A]   player 2
+			//     port 0x3C -> the 8-byte ADC ring at [this+0x2B], indexed by the channel
+			//                  register at [this+0x33], which post-increments mod 8
+			//     anything else -> 0xFF
+			{ S::IO_READ_PORT, get_module_pattern(dll, "4C 8B C1 80 FA 04 74 34 80 FA 08 74 28 80 FA 0C 74 1C 80 FA 3C 75 14") },
 		};
 
 		// ---- gs::ib_create: NOT PRESENT IN THIS MODULE ------------------------------------

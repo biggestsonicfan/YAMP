@@ -25,6 +25,10 @@ void AdvanceFrameStampNow();
 
 #include "../pre3.h"
 #include "../ImportSymbols.h"
+#include "../SystemSwitches.h"
+#include "../BoardVtables.h"
+#include "../Determinism.h"
+#include "../NetSession.h"
 
 #include "../../input/Input.h"
 // Presentation helpers only (aspect ratio + the Escape pause shell). They live in the m2ftg
@@ -312,6 +316,26 @@ namespace pre3
 		//
 		// Two, to match the swap chain YAMP actually creates (RenderWindow::kBufferCount).
 		gs::with_tail([](auto* ctx) { ctx->backbuffer_count = 2; });
+
+		// Host redirects into the board's own vtables: the cabinet TEST / SERVICE switches, and
+		// the real-time clock a netplay session pins. Both need the .rdata unprotect above and
+		// must run before module_start constructs the board.
+		//
+		// The vtables are located ONCE and handed to both, because locating them keys on slot 0 -
+		// which is exactly what InstallSystemSwitches replaces. Letting each installer find them
+		// itself would make the second one silently find nothing.
+		if (void* const readPort = symbolMap.TryGetSymbol(ImportSymbol::IO_READ_PORT))
+		{
+			void* vtables[MAX_BOARD_VTABLES];
+			const size_t count = FindBoardVtables(dll, readPort, vtables, MAX_BOARD_VTABLES);
+			InstallDeterministicClock(vtables, count);
+			InstallSystemSwitches(vtables, count);
+		}
+		else
+		{
+			DebugLog("[%s] No board I/O accessor - Test / Service and the clock pin are "
+				"unavailable.\n", gGeneral.GetGameTag());
+		}
 
 		// The pxd system shader set. MUST precede module_start: the module refers to these by
 		// handle id and ids are assigned in creation order, so they have to be created before the
@@ -623,6 +647,15 @@ namespace pre3
 		static bool s_coinPending = false;
 		static bool s_startToggle = false;
 
+		// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
+		// routing and the input suppression below all see the same answer for the whole frame.
+		// See NetSession.h for the four-call-point contract.
+		NetSession& net_ = NetplaySession();
+		const NetSession::Status netStatus = net_.GetStatus();
+		const bool netplayMatch = netStatus.inMatch;
+		const int32_t netplayLocalPad = netStatus.localPad;
+		const bool netplayLocked = netStatus.locked;
+
 		const auto* settings = gGeneral.GetSettings();
 
 		{
@@ -652,9 +685,19 @@ namespace pre3
 
 		static bool s_pauseMenuOpen = false;
 		{
+			// DISABLED DURING NETPLAY. Pausing is host->module input like any other: status bit0
+			// stops the emulated board, and stopping it on one machine only desyncs the pair. It
+			// also suppresses the per-frame submit and the upload-stamp advance below, so an "only
+			// cosmetic" pause would still change how much work this side does. There is no
+			// per-player pause in an arcade match.
+			if (netplayLocked)
+			{
+				s_pauseMenuOpen = false;   // close it if a session started while it was open
+			}
+
 			static bool s_escWasDown = false;
 			const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-			if (escDown && !s_escWasDown)
+			if (escDown && !s_escWasDown && !netplayLocked)
 			{
 				s_pauseMenuOpen = !s_pauseMenuOpen;
 			}
@@ -669,8 +712,25 @@ namespace pre3
 		// cabinet; the other two slots stay zeroed (m_is_connected false), which is what an
 		// unoccupied seat looks like.
 		Input::PollPads();
-		s_pads[0].set_state(0);
-		s_pads[1].set_state(1);
+		if (netplayMatch && netplayLocalPad >= 0 && netplayLocalPad < 2)
+		{
+			// ONLINE, YOU ALWAYS PLAY AS PLAYER 1 LOCALLY. The guest occupies pad slot 1 in the
+			// match, but they are the only person at that keyboard/controller and have their own
+			// Player 1 bindings set up - making them remap to the Player 2 controls just to play
+			// online would be absurd. So this machine's P1 bindings drive whichever slot this
+			// machine owns on the wire.
+			//
+			// The other slot is filled from P2 purely to keep it well-formed for this frame:
+			// step() overwrites BOTH pads from the transmitted inputs before the update stage sees
+			// them, so nothing local survives into the simulation.
+			s_pads[netplayLocalPad].set_state(0);
+			s_pads[1 - netplayLocalPad].set_state(1);
+		}
+		else
+		{
+			s_pads[0].set_state(0);
+			s_pads[1].set_state(1);
+		}
 		for (int i = 0; i < 2; i++)
 		{
 			memcpy(&execute_info.pad[i], &s_pads[i], 0xE0);
@@ -679,12 +739,33 @@ namespace pre3
 			execute_info.pad[i].m_is_connected = true;
 		}
 
+		// What each of the module's eight button slots means, exactly as the m2ftg hosts hand it
+		// over — same table, same slot order (see execute_info::assign in pre3.h). Rewritten every
+		// frame because the board takes its copy every frame.
+		for (int p = 0; p < 2; p++)
+		{
+			for (int i = 0; i < 8; i++)
+			{
+				execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
+			}
+		}
+
+		// Dedicated coin binding: a press becomes the coin status bit (host->module bit5), which
+		// the module turns into the SYSTEM port's coin line for one frame. Sent regardless of the
+		// free-play setting, because on the cabinet the coin switch is wired to that line whatever
+		// the dip switches say - the board's own input test shows it, and with free play on the
+		// ROM simply does not credit it. Still swallowed while the pause menu is open, like every
+		// other input.
 		{
 			static bool s_coinWasDown[2] = {};
 			for (int p = 0; p < 2; p++)
 			{
 				const bool down = Input::ActionDown(p, Input::Action_Coin);
-				if (down && !s_coinWasDown[p] && !settings->m_m2Freeplay && !s_pauseMenuOpen)
+				// Not transmitted, so it cannot be honoured during netplay without desyncing: it
+				// would raise the coin status bit on one machine only. A round starts from the
+				// board's VS start state, which is already credited, so there is nothing it would
+				// buy either.
+				if (down && !s_coinWasDown[p] && !s_pauseMenuOpen && !netplayLocked)
 				{
 					execute_info.status |= 0x20;
 				}
@@ -692,11 +773,40 @@ namespace pre3
 			}
 		}
 
+		// Cabinet service panel (see InstallSystemSwitches): TEST opens the board's own service
+		// menu - the operator's input test, which is how the panel wiring gets checked - and
+		// SERVICE is the credit / navigate button beside it. Held lines, like the panel; the ROM
+		// decides what latches. Either player's binding closes the one switch, and both are
+		// suppressed while paused so a menu keystroke cannot reach the board.
+		{
+			// Suppressed while paused, and for the whole of a netplay session: neither is in the
+			// transmitted pad, so honouring them would drop one machine into the operator's menu
+			// (or feed it a service credit) while the other carried on playing.
+			bool test = false;
+			bool service = false;
+			if (!s_pauseMenuOpen && !netplayLocked)
+			{
+				for (int p = 0; p < 2; p++)
+				{
+					test = test || Input::ActionDown(p, Input::Action_Test);
+					service = service || Input::ActionDown(p, Input::Action_Service);
+				}
+			}
+			SetSystemSwitches(test, service);
+		}
+
 		// The arcade coin/start protocol, same shape as m2ftg's: while the module reports the
 		// start screen (status bit6), a START press becomes a coin insert and START is then
 		// injected on alternating frames until the module leaves that screen. Only meaningful
 		// with the freeplay dip switch off.
-		if (!settings->m_m2Freeplay && !s_pauseMenuOpen)
+		//
+		// OFF FOR THE WHOLE OF A NETPLAY SESSION, and unlike the m2ftg path it is not re-run after
+		// step() either. It both reads and writes pad[0] and raises the coin status bit from what
+		// it finds, which on m2ftg had to be moved after the pads were synchronised or it desynced
+		// them. Here it has nothing to do: a round starts from the board's own VS start savestate,
+		// which is past the credit screen by construction, so the honest behaviour is for the
+		// protocol simply not to run.
+		if (!settings->m_m2Freeplay && !s_pauseMenuOpen && !netplayLocked)
 		{
 			if (s_coinPending && s_startScreen)
 			{
@@ -733,34 +843,102 @@ namespace pre3
 
 		gs::with_tail([](auto* ctx) { ResetCbvSrvRingCursors(ctx); });
 
+		// ---- NETPLAY SESSION DRIVER ----------------------------------------------------
+		// (2) Poll the plugin and run the round-start state machine, and (3) decide whether the
+		// emulator may advance. Drive() runs HERE rather than at the top of the frame on purpose:
+		// GetStatus() above is deliberately last frame's answer, so the frame on which a barrier
+		// releases still routes its pads against a stable view. See NetSession.h.
+		net_.Drive();
+
+		// THE POWER-ON SNAPSHOT, and it has to be requested HERE - before the update stage, on the
+		// first frame the machine reports itself running. At that point the board has reached its
+		// terminal phase but has not stepped a single guest frame (phase becomes 0x10 at the end of
+		// one update stage; stepping begins on the next), so what gets captured is the pristine
+		// post-boot state. Two peers reach it identically by construction, which is the entire
+		// reason a round can be started from it. Asking a frame later would capture a board that
+		// had already run, and "how many frames had it run?" is a host-timing question.
+		//
+		// Unconditional rather than netplay-gated: the request is one byte and the capture is one
+		// frame, and making it depend on whether a session happens to be up would make WHEN it was
+		// taken depend on the player, which is exactly what must not vary. Self-limiting - see
+		// SaveResetSnapshot.
+		SaveResetSnapshot();
+		// Step() also overwrites BOTH pads in execute_info with the transmitted inputs, which is
+		// why it runs after the local pad fill above: whatever csl_pad produced is a local
+		// prediction that the network's copy must replace, or the two machines simulate different
+		// inputs and desync. On the savestate-restore frame it zeroes them instead.
+		const bool advanceFrame = net_.Step(execute_info);
+
+		// The host zeroes output_texid every frame and the module fills it in. On a stalled frame
+		// nothing runs, so it would stay 0 - and 0 is not a valid handle (the pxd handle table is
+		// 1-based and asserts on get(0)). Remember the last good id so a stall re-presents the
+		// previous frame.
+		static unsigned int s_lastOutputTexId = 0;
+
 		// All three stages, in the module's own order. The update stage advances the emulated
 		// board; the two render stages are what actually record anything — 0x18 uploads the
 		// 0x120000 scroll buffer, 0x20 walks the texture tables and issues the geometry, 0x28
 		// closes the frame and flips the buffer parity. Running only the first is why this
 		// rendered nothing at all: the board simulated correctly and drew zero primitives.
-		SetModuleRenderActiveNow(true);
-		int funcResult = entries.update(sizeof(execute_info), &execute_info);
-		if (funcResult == 0 && entries.render_begin != nullptr)
+		//
+		// A netplay stall skips ALL THREE rather than just the update: the render stages read the
+		// board state the update stage produced, so re-recording them against an unchanged board
+		// would only redraw the frame already on screen at the cost of a full frame's GPU work.
+		// Re-presenting the last texture is the same picture for nothing.
+		int funcResult = 0;
+		if (advanceFrame)
 		{
-			funcResult = entries.render_begin(sizeof(execute_info), &execute_info);
+			SetModuleRenderActiveNow(true);
+			funcResult = entries.update(sizeof(execute_info), &execute_info);
+			if (funcResult == 0 && entries.render_begin != nullptr)
+			{
+				funcResult = entries.render_begin(sizeof(execute_info), &execute_info);
+			}
+			if (funcResult == 0 && entries.render_end != nullptr)
+			{
+				funcResult = entries.render_end(sizeof(execute_info), &execute_info);
+			}
+			SetModuleRenderActiveNow(false);
+
+			if (execute_info.output_texid != 0)
+			{
+				s_lastOutputTexId = execute_info.output_texid;
+			}
+
+			// (4) The frame really ran, so submit the desync canary and advance the netplay frame
+			// index. Only reachable here - a stalled frame must not advance it.
+			net_.EndFrame(execute_info);
 		}
-		if (funcResult == 0 && entries.render_end != nullptr)
+		else
 		{
-			funcResult = entries.render_end(sizeof(execute_info), &execute_info);
+			// Stalled: show the frame we already have.
+			execute_info.output_texid = s_lastOutputTexId;
 		}
-		SetModuleRenderActiveNow(false);
 
 		s_startScreen = (execute_info.status & 0x40) != 0;
+
+		// The netplay groundwork's own health line - see LogBoardStateOnce. Deliberately outside
+		// any netplay condition: its whole value is that an ordinary run reports whether a round
+		// COULD have worked.
+		LogBoardStateOnce();
 
 		{
 			static int s_frame = 0;
 			static int s_lastLogged = -1;
-			// Health line for smoke runs: status changes plus a periodic heartbeat.
-			if ((execute_info.status != s_lastLogged || s_frame % 120 == 0) && s_frame < 4000)
+			static int s_lastMode = -1;
+			// Health line for smoke runs: status or board-mode changes, plus a periodic
+			// heartbeat. The mode pair is what makes an input verifiable without a screenshot —
+			// it moves the moment the ROM changes screen, so a TEST press that reaches the board
+			// shows up here even on a headless -frames run.
+			const int mode = execute_info.game_mode << 8 | execute_info.game_sub_mode;
+			if ((execute_info.status != s_lastLogged || mode != s_lastMode || s_frame % 120 == 0)
+				&& s_frame < 4000)
 			{
-				DebugLogFile("[pre3] frame=%d status=0x%X result=0x%X texid=%u\n",
-					s_frame, execute_info.status, execute_info.result, execute_info.output_texid);
+				DebugLogFile("[pre3] frame=%d status=0x%X result=0x%X texid=%u mode=%02X/%02X\n",
+					s_frame, execute_info.status, execute_info.result, execute_info.output_texid,
+					execute_info.game_mode, execute_info.game_sub_mode);
 				s_lastLogged = execute_info.status;
+				s_lastMode = mode;
 			}
 			s_frame++;
 		}

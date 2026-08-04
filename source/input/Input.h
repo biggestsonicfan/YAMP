@@ -34,9 +34,10 @@ namespace Input
 		Action_KG,
 		Action_PKG,
 		Action_Back,
-		// The cabinet's service-panel switches, wired to the emulated Model 2 I/O board's system
-		// port rather than to a player's buttons (m2ftg boards only - see
-		// m2ftg::InstallSystemSwitches). TEST opens the board's own service menu; SERVICE is the
+		// The cabinet's service-panel switches, wired to the emulated board's system input port
+		// rather than to a player's buttons - the Model 2 I/O board on the m2ftg path (see
+		// m2ftg::InstallSystemSwitches) and the Model 3 JAMMA registers on the pre3 one (see
+		// pre3::InstallSystemSwitches). TEST opens the board's own service menu; SERVICE is the
 		// credit / navigate button next to it. Per-player only because bindings are stored that
 		// way - either player's binding closes the one cabinet switch.
 		Action_Test,

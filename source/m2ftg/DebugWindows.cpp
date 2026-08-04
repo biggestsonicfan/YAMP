@@ -1553,6 +1553,14 @@ bool m2ftg::SetVsMode(bool vsMode)
 	return WriteConfigByte(CONFIG_IS_VS_MODE, vsMode ? 1u : 0u);
 }
 
+bool m2ftg::StateCheckIsHash()
+{
+	const DwGame* game = CurrentDw();
+	// Same test StateCheckValue branches on, deliberately read from the same field rather than
+	// listed per game: a game that gains a hash range gains the right comparison with it.
+	return game != nullptr && game->stateHashLen != 0;
+}
+
 uint32_t m2ftg::StateCheckValue()
 {
 	const DwGame* game = CurrentDw();

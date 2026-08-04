@@ -195,7 +195,43 @@ namespace pre3
 		std::byte gap_1678[0x167C - 0x1678];
 		float volume_channel5;
 		float volume_channels0_4;
-		std::byte tail[0x1780 - 0x1684];
+
+		// +0x1684: the BUTTON ASSIGN TABLE, one row of eight per player, and the same thing
+		// m2ftg's execute_info.assign is — same assign_t values, same eight module slots, in the
+		// same order (see Input::MODULE_ASSIGN, which transfers verbatim).
+		//
+		// It reaches the board as part of one block copy: M3EInput's per-frame update (DLL
+		// 0x1800336D0) memcpys 0x100 bytes from execute_info+0x1678 into the board object at
+		// +0x368, which is why the two volume scalars above sit immediately in front of it. The
+		// game's own button mapper (FV2: DLL 0x180037090) then walks the eight slot masks the
+		// M3EInput constructor set up —
+		//
+		//     slot 0..7 mask = 0x08, 0x02, 0x04, 0x01, 0x40, 0x10, 0x80, 0x20
+		//
+		// tested against the pad's m_now UNPERMUTED, so in sl terms the slots are Y, B, X, A, LT,
+		// LB, RT, RB — exactly the order Input::MODULE_ASSIGN is written in — and ORs the assigned
+		// P/K/G combination into the player's input register.
+		//
+		// A ZERO row matches none of the mapper's cases, so leaving this unset does not produce a
+		// default layout: it produces a board on which no attack button exists at all, while the
+		// lever and START (which the shared base mapper handles) keep working. Directly visible in
+		// the board's own input test.
+		uint8_t assign[2][8];
+
+		// +0x1694: the module->host TELEMETRY block, which is how Like a Dragon Gaiden tracks its
+		// arcade minigame (rank reached, character used, whether a match finished). Written by
+		// each game's own per-frame input override — FV2's is DLL 0x180036BF0 — from guest RAM.
+		// YAMP has no use for most of it, but the two BYTES below are worth naming because they
+		// are the only cheap window the host has into what the board is doing.
+
+		// The board's current game mode and sub-mode, read straight out of guest RAM every frame
+		// (FV2: 0x58FD98 / 0x58FD99). Purely informational — nothing the host does depends on
+		// them — but they change the instant the ROM switches screens, which makes them the
+		// headless way to tell that an input actually reached the board.
+		uint8_t game_mode;
+		uint8_t game_sub_mode;
+
+		std::byte tail[0x1780 - 0x1696];
 	};
 	static_assert(sizeof(pre3_execute_info_t) == 0x1780);
 	static_assert(offsetof(pre3_execute_info_t, sound_volume) == 0x1C);
@@ -205,6 +241,8 @@ namespace pre3
 	static_assert(offsetof(pre3_execute_info_t, p_work_ptr) == 0x1660);
 	static_assert(offsetof(pre3_execute_info_t, volume_channel5) == 0x167C);
 	static_assert(offsetof(pre3_execute_info_t, volume_channels0_4) == 0x1680);
+	static_assert(offsetof(pre3_execute_info_t, assign) == 0x1684);
+	static_assert(offsetof(pre3_execute_info_t, game_mode) == 0x1694);
 
 	// The module drives six audio channels (the frame callback loops 0..5 calling its own
 	// per-channel volume and pause setters), against m2ftg's single master. Nothing in the

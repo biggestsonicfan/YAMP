@@ -11,6 +11,20 @@ namespace yampnet
         // the threshold itself can change without breaking cross-version determinism mid-round.
         constexpr float kStickDeadzone = 0.5f;
 
+        // THE VERTICAL AXIS POINTS DOWN. m_y1 is POSITIVE when the player pushes DOWN - that is
+        // the sl convention the whole host uses, and it is not a guess: source/input/Input.h says
+        // so on PadState ("y+ = down (sl convention)"), the XInput reader negates sThumbLY to get
+        // there, and csl_pad::set_state writes -1.0f for UP and +1.0f for DOWN.
+        //
+        // This file had it backwards in both directions, and the round trip turned a vertical
+        // press into nothing at all rather than into its opposite: pressing UP set BUTTON_UP in
+        // m_now AND, through the sign error here, BUTTON_L_DOWN as well - so the receiver saw up
+        // and down held together, cancelled them to m_y1 = 0.0f, and handed the board a pad with
+        // both directions asserted. Horizontal was unaffected, which is why it survived being
+        // played: x is negative-left on both sides.
+        constexpr float kUp = -1.0f;
+        constexpr float kDown = 1.0f;
+
         inline uint32_t Bit(pxd::sl::BUTTON b) { return 1u << static_cast<uint32_t>(b); }
     }
 
@@ -23,8 +37,8 @@ namespace yampnet
         // reconstruct a float it was not sent.
         if (pad.m_x1 <= -kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_LEFT);
         if (pad.m_x1 >= kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_RIGHT);
-        if (pad.m_y1 >= kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_UP);
-        if (pad.m_y1 <= -kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_DOWN);
+        if (pad.m_y1 <= kUp * kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_UP);
+        if (pad.m_y1 >= kDown * kStickDeadzone) input |= Bit(pxd::sl::BUTTON_L_DOWN);
 
         return input & kInputMask;
     }
@@ -56,8 +70,10 @@ namespace yampnet
         const bool up = (input & (Bit(pxd::sl::BUTTON_UP) | Bit(pxd::sl::BUTTON_L_UP))) != 0;
         const bool down = (input & (Bit(pxd::sl::BUTTON_DOWN) | Bit(pxd::sl::BUTTON_L_DOWN))) != 0;
 
+        // Same convention csl_pad::set_state fills a local pad with, or the module is handed one
+        // pad that means "up" and one that means "down" depending on which machine produced it.
         out.m_x1 = (right ? 1.0f : 0.0f) - (left ? 1.0f : 0.0f);
-        out.m_y1 = (up ? 1.0f : 0.0f) - (down ? 1.0f : 0.0f);
+        out.m_y1 = (up ? kUp : 0.0f) + (down ? kDown : 0.0f);
         out.m_x2 = 0.0f;
         out.m_y2 = 0.0f;
 

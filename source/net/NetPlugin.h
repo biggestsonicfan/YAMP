@@ -109,6 +109,10 @@ namespace net
         // All three games: the room plays in VS mode (m2ftg_config_t.is_vs_mode). Selects a
         // different simulation, not a variant of one - see YAMPNET_ROOM_FLAG_VS_MODE.
         bool vs_mode = false;
+        // pre3 only: the room starts its rounds from the board's shipped VERSUS START state when
+        // set, and from its power-on state when clear. Not a cabinet setting - it selects which
+        // of the module's two reset mechanisms the round uses. See YAMPNET_ROOM_FLAG_PRE3_VS_START.
+        bool pre3_vs_start = false;
     };
     Status GetStatus();
 
@@ -119,7 +123,8 @@ namespace net
     void Disconnect();
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage.
-    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode);
+    bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
+                  bool pre3VsStart);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -137,6 +142,9 @@ namespace net
         bool vf2_version20 = false;
         // The host's VS-mode switch, shown for the same reason.
         bool vs_mode = false;
+        // The host's pre3 round-start choice, shown for the same reason: it decides whether a
+        // round begins at power-on or already in a match.
+        bool pre3_vs_start = false;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();
@@ -172,6 +180,10 @@ namespace net
     // credits both players and draws the stage from the second RNG stream at all. A peer with it
     // off never touches that generator, so a mismatch is not a difference of degree.
     bool EffectiveVsMode(bool localSetting);
+    // The same rule for the pre3 round-start state. Not a cabinet setting but subject to the same
+    // logic and for a stronger reason than any of them: the two peers must restore the SAME state,
+    // or the round starts from two different boards and every later frame is meaningless.
+    bool EffectivePre3VsStart(bool localSetting);
 
     // Called by the host loop when a round ends because the other player went away. Latches the
     // reason for the dialog; harmless to call repeatedly.

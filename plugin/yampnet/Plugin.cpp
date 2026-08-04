@@ -46,14 +46,26 @@ namespace
         return l;
     }
 
-    bool LayoutMatches(const yampnet_layout& a, const yampnet_layout& b)
+    // `host` is what YAMP declared; `built` is what this plugin was compiled against.
+    //
+    // The four PAD fields are compared exactly - the plugin dereferences through every one of
+    // them, so a difference is memory corruption waiting to happen. execute_info_size is NOT,
+    // and deliberately: since ABI 7 the host declares the SMALLEST execute_info it may pass
+    // (YAMP now hosts two arcade emulators whose blocks are 0x1760 and 0x1780 and whose pads
+    // coincide), so the only thing this plugin needs from it is that the pads fit. Testing it
+    // for equality would refuse the larger family for a field the plugin never reads.
+    bool LayoutMatches(const yampnet_layout& host, const yampnet_layout& built)
     {
-        return a.execute_info_size == b.execute_info_size
-            && a.pad_size == b.pad_size
-            && a.pad0_offset == b.pad0_offset
-            && a.pad1_offset == b.pad1_offset
-            && a.pad_buttons_offset == b.pad_buttons_offset
-            && a.pad_port_offset == b.pad_port_offset;
+        if (host.pad_size != built.pad_size
+            || host.pad0_offset != built.pad0_offset
+            || host.pad1_offset != built.pad1_offset
+            || host.pad_buttons_offset != built.pad_buttons_offset
+            || host.pad_port_offset != built.pad_port_offset)
+        {
+            return false;
+        }
+        // Every byte this plugin writes lies inside pad[1], so this is the whole of its reach.
+        return host.execute_info_size >= host.pad1_offset + host.pad_size;
     }
 }
 
@@ -179,12 +191,6 @@ namespace
         if (!s->local_checks.Get(frame, &mine) || !s->remote_checks.Get(frame, &theirs))
             return;
 
-        // Compare the RELATIONSHIP between the two counters, not their absolute values. The
-        // board reset that precedes a round does not guarantee both machines re-enter the round
-        // with the ROM's frame_counter at the same absolute value, and a constant offset is
-        // harmless - both simulations still advance one frame per frame. What is never harmless
-        // is that offset CHANGING, which is exactly "one side executed game code the other did
-        // not". Baselining on the first comparable frame catches that with no false alarms.
         // A counter still sitting at 0 means that peer's ROM has not started running frames yet,
         // so any baseline taken from it is meaningless - that is exactly how the first version of
         // this reported a desync at frame 44 while both boards were merely still booting. The
@@ -192,6 +198,29 @@ namespace
         if (mine == 0 || theirs == 0)
             return;
 
+        // EXACT: the values are a hash, so the only agreement that means anything is equality.
+        // Baselining a difference between two hashes is not a weaker test, it is a meaningless
+        // one - see yampnet_match_config::state_check_exact.
+        if (s->match.state_check_exact)
+        {
+            if (mine == theirs)
+                return;
+            s->desync_frame = frame;
+            s->desync_local = mine;
+            s->desync_remote = theirs;
+            s->Log(YAMPNET_LOG_ERROR,
+                   "DESYNC at frame %u: local state 0x%08X, peer 0x%08X - the simulations parted "
+                   "company here",
+                   frame, mine, theirs);
+            return;
+        }
+
+        // COUNTER: compare the RELATIONSHIP between the two counters, not their absolute values.
+        // The board reset that precedes a round does not guarantee both machines re-enter the
+        // round with the ROM's frame_counter at the same absolute value, and a constant offset is
+        // harmless - both simulations still advance one frame per frame. What is never harmless
+        // is that offset CHANGING, which is exactly "one side executed game code the other did
+        // not". Baselining on the first comparable frame catches that with no false alarms.
         const uint32_t delta = mine - theirs;   // unsigned wrap is intentional
         if (!s->check_baseline_set)
         {

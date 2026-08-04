@@ -305,6 +305,12 @@ void m2ftg::NetSession::Drive()
 					? settings->m_netFrameDelay : 3);
 			mc.input_redundancy = 10;
 			mc.stall_timeout_ms = 10000;
+			// How the canary is to be compared, which depends on WHAT this game submits: StF and
+			// FV send the ROM's frame counter (a constant offset between peers is harmless), VF2
+			// sends a hash of work RAM (only equality means anything). See
+			// yampnet_match_config::state_check_exact - before it existed, the plugin applied the
+			// counter rule to VF2's hash as well.
+			mc.state_check_exact = StateCheckIsHash() ? 1 : 0;
 			// Round number: counts up per round so late packets from the PREVIOUS round cannot
 			// poison this one. A guest's count would drift from the host's (neither knows how
 			// many rounds the other played), so the plugin makes the HOST authoritative - a

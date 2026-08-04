@@ -42,6 +42,7 @@ private:
 	// Per-hook control over the module's HLE ROM patches, for every LJ m2ftg game that has a
 	// hook table - StF (76 hooks) and FV (95). Self-gating: draws nothing when there is none.
 	void DrawStfHleHooks();
+	void DrawPre3HleHooks();
 	// The netplay page: persisted RPCN account settings on top, the live lobby below.
 	void DrawNetplay();
 	// The lobby's status line as an in-game overlay, so a connecting/waiting session is visible
@@ -116,6 +117,8 @@ private:
 	char m_netFingerprint[72] = {};
 	char m_netComId[16] = {};
 	int m_netFrameDelay = 3;
+	// pre3 only: what this machine publishes as the round-start state when it HOSTS.
+	bool m_netPre3VsStart = false;
 	// Lobby-only state: never persisted, never part of the Apply flow.
 	bool m_netShowToken = false;
 	char m_netJoinRoomId[24] = {};
