@@ -1,4 +1,4 @@
-#include "YAMPSettings.h"
+﻿#include "YAMPSettings.h"
 
 #include "YAMPGeneral.h" // UTF8ToWchar / WcharToUTF8, for the string-valued settings
 #include "m2ftg/DisplayModes.h"
@@ -260,6 +260,7 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"StF";
 		m_m2Aspect = GetPrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_m2Aspect, iniPath.c_str());
+		m_pre3RenderScale = GetPrivateProfileIntW(SECTION_NAME, L"Pre3RenderScale", m_pre3RenderScale, iniPath.c_str());
 		m_m2CrtFilter = GetPrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str()) != 0;
 		m_m2Difficulty = GetPrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
 		m_m2Country = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
@@ -375,6 +376,7 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"StF";
 		WritePrivateProfileIntW(SECTION_NAME, L"AspectRatio", m_m2Aspect, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Pre3RenderScale", m_pre3RenderScale, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());

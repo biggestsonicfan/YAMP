@@ -44,6 +44,16 @@ public:
 	bool m_m2WindowMatchesRender = false;
 	// Aspect: 0 = 4:3 (original), 1 = 16:9 (stretched), 2 = fill window. Applied live.
 	uint32_t m_m2Aspect = 0;
+
+	// Model 3 (pre3 module) internal render scale. pre3 has NO display-mode table: its option
+	// parser handles nine switches and not one of them is a resolution (the -vga/-svga/-wxga
+	// lines in its usage text are dead, inherited from the arcade source, with no matching option
+	// strings and no readers for anything the parser does set). The whole resolution story is
+	// config+0x1008, the render HEIGHT, from which the module derives the width at a fixed
+	// 496/384. So this is a multiple of the native 384: 0 = match the window height, which is
+	// what Like a Dragon Gaiden itself feeds the module; 1..6 pin it to Nx native instead.
+	// Read once at module_start (restart to change).
+	uint32_t m_pre3RenderScale = 0;
 	// Lost Judgment's own CRT shader (exact port), applied in the host blit. Applied live.
 	bool m_m2CrtFilter = false;
 	// m2ftg_config_t dip switches, read once at module_start (restart to change).

@@ -1,4 +1,4 @@
-#include "Cri.h"
+﻿#include "Cri.h"
 #include "../DebugLog.h"
 #include "AtomEngine.h"
 
@@ -287,7 +287,17 @@ namespace
 	// it. Deliberately takes only `this`: with nothing known about its real signature, a callee
 	// that touches no argument is the safe shape under the Microsoft x64 convention, where the
 	// CALLER cleans up the stack.
-	void __fastcall CriGaidenInsertedSlot(void*) {}
+	// The method Gaiden's CRIWARE inserted into icri, one slot after criAtomExPlayer_SetCueName:
+	// its by-NUMBER counterpart. Gaiden's Sonic the Fighters module never calls it, which is why a
+	// no-op stub was enough for that game. pre3 (Model 3) calls almost nothing else - its play
+	// routine branches on a sign bit and takes the numeric path for every ordinary sound - so with
+	// a stub here Fighting Vipers 2 selected no cue at all and ran silent while the rest of CRI
+	// came up perfectly. Signature matches SetCueName's (player, acb, x) with a number for x.
+	void __fastcall CriGaidenSetCueId(void*, CriAtomExPlayerTag* player, CriAtomExAcbTag* acb,
+		unsigned int cueId)
+	{
+		cri::atom::PlayerSetCueId(player, acb, cueId);
+	}
 
 	// Storage for the patched vtable. Static rather than heap so its lifetime outlives the
 	// stack-allocated Cri the hosts hand to module_start.
@@ -304,12 +314,12 @@ void Cri::UseGaidenVtable()
 
 	void** const vt = *reinterpret_cast<void***>(this);
 	std::memcpy(g_criGaidenVtable, vt, kInsertAt * sizeof(void*));
-	g_criGaidenVtable[kInsertAt] = reinterpret_cast<void*>(&CriGaidenInsertedSlot);
+	g_criGaidenVtable[kInsertAt] = reinterpret_cast<void*>(&CriGaidenSetCueId);
 	std::memcpy(g_criGaidenVtable + kInsertAt + 1, vt + kInsertAt,
 		(kSlots - kInsertAt) * sizeof(void*));
 
 	*reinterpret_cast<void***>(this) = g_criGaidenVtable;
-	DebugLog("[cri] using the Like a Dragon Gaiden icri layout (stub slot at %zu)\n", kInsertAt);
+	DebugLog("[cri] using the Like a Dragon Gaiden icri layout (SetCueId at slot %zu)\n", kInsertAt);
 }
 
 int Cri::criAtomEx_CalculateWorkSizeForRegisterAcfData(void*, int)

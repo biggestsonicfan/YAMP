@@ -29,6 +29,8 @@ private:
 	void DrawGraphics();
 	void DrawGame();
 	void DrawGameStF();
+	// The two Model 3 games (pre3). See the comment on the definition.
+	void DrawGamePre3();
 	void DrawControls();
 	void DrawControlsStF();
 	void DrawControlsStFPlayer(int player);
@@ -90,6 +92,8 @@ private:
 	uint32_t m_m2RenderMode = 0;
 	bool m_m2WindowMatchesRender = false;
 	uint32_t m_m2Aspect = 0;
+	// Model 3 (pre3) internal render scale; 0 = match the window. See YAMPSettings.h.
+	uint32_t m_pre3RenderScale = 0;
 	bool m_m2CrtFilter = false;
 	uint32_t m_m2Difficulty = 1;
 	uint32_t m_m2Country = 0;

@@ -550,8 +550,12 @@ namespace pre3
 		// 1162x900 targets, and 900 was that window's height), so do the same: the module's
 		// buffers then scale with the window exactly as they do natively. Floored at the native
 		// 384 so a tiny or not-yet-sized window cannot hand it a degenerate target again.
-		params.config.render_height =
-			std::max<int32_t>(NATIVE_HEIGHT, static_cast<int32_t>(window.GetHeight()));
+		// Setting 0 keeps that native behaviour; 1..6 pin the board to N x its native 384 instead,
+		// which is what an arcade emulator is usually wanted to do. Floored either way.
+		const uint32_t renderScale = settings->m_pre3RenderScale;
+		params.config.render_height = renderScale > 0
+			? NATIVE_HEIGHT * static_cast<int32_t>(renderScale)
+			: std::max<int32_t>(NATIVE_HEIGHT, static_cast<int32_t>(window.GetHeight()));
 		DebugLogFile("[%s] render target %dx%d (window height %u)\n", gGeneral.GetGameTag(),
 			static_cast<int>(params.config.render_height * NATIVE_WIDTH / NATIVE_HEIGHT),
 			params.config.render_height, window.GetHeight());

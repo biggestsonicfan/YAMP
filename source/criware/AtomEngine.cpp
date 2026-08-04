@@ -1,4 +1,4 @@
-// XAudio2 2.9 needs a Win10 SDK target; the project globally targets Win7, so bump it for
+﻿// XAudio2 2.9 needs a Win10 SDK target; the project globally targets Win7, so bump it for
 // this TU only (must happen before any Windows header).
 #ifdef _WIN32_WINNT
 #undef _WIN32_WINNT
@@ -108,7 +108,29 @@ namespace cri::atom
 					}
 					m_fields.push_back(f);
 				}
-				return rowOff <= m_rowSize || m_rowCount == 0;
+
+				// The row STRIDE is the schema's, not the header's. @UTF version 1 (Like a Dragon
+				// Gaiden's pre3 ACBs — fv2.acb/src2.acb) writes a rowLength that omits the three
+				// trailing data columns of the ROOT table (PaddingArea, StreamAwbTocWork,
+				// StreamAwbAfs2Header): it says 415 where the schema sums to 439. Rejecting that
+				// mismatch is what made every pre3 ACB fail to parse, so the game loaded no cues
+				// and ran silent while every other part of CRI came up fine.
+				//
+				// Measured on both generations, every table: the derived stride lands the row block
+				// exactly on the string table in 13/13 cases, while the header field is right in 12
+				// of 13. So the schema is the reliable source and this is not a pre3 special case —
+				// v0 files (stf/fv/mr/omg) derive byte-identical values and are unaffected.
+				if (m_rowCount != 0 && rowOff != m_rowSize)
+				{
+					DebugLog("[cri] @UTF v%u: header rowLength=%u but the schema sums to %u; "
+						"using the schema\n", Be16(m_base), m_rowSize, rowOff);
+				}
+				if (rowOff != 0)
+					m_rowSize = uint16_t(rowOff);
+
+				// Still bounded: the row block has to fit inside the table.
+				return m_rowCount == 0
+					|| size_t(m_rowsOff) + size_t(m_rowCount) * m_rowSize <= m_size;
 			}
 
 			uint32_t RowCount() const { return m_rowCount; }
@@ -270,6 +292,12 @@ namespace cri::atom
 			uint64_t serial = 0;       // unique per load (cache keys must survive addr reuse)
 			std::vector<uint8_t> data; // owned copy of the whole .acb
 			std::unordered_map<std::string, WaveformRef> cues;
+			// pre3 (Model 3) selects cues NUMERICALLY, never by name: its play routine branches on a
+			// sign bit and calls the by-number setter, which is the very slot Gaiden's CRIWARE
+			// inserted into icri. Both keys are kept because CueId and the CueTable row index are
+			// distinct numbering schemes and only a live capture says which one a module passes.
+			std::unordered_map<uint32_t, std::string> cueNameById;
+			std::unordered_map<uint32_t, std::string> cueNameByIndex;
 
 			const uint8_t* memAwb = nullptr; // internal AFS2 blob (into `data`)
 			uint32_t memAwbSize = 0;
@@ -492,7 +520,13 @@ namespace cri::atom
 
 			std::error_code cwdEc;
 			const fs::path roots[] = { exeDir, fs::current_path(cwdEc) };
-			const fs::path subdirs[] = { L"rom/sound", L"vf2/rom/sound" };
+			// "image/sound" is where the Model 3 module (pre3) keeps its sheets — fv2.acb/.awb,
+			// src2.acb/.awb — rather than the m2ftg "rom/sound". Both spellings of the root are
+			// listed because the launcher runs with the game's media directory as the CWD while a
+			// direct `YAMP.exe -fv2` runs from the exe directory, where it is under `pre3/`.
+			const fs::path subdirs[] = {
+				L"rom/sound", L"vf2/rom/sound", L"image/sound", L"pre3/image/sound",
+			};
 			std::error_code ec;
 			for (const auto& root : roots)
 			{
@@ -609,6 +643,12 @@ namespace cri::atom
 				if (w.streaming)
 					++streamedCues;
 				acb.cues.emplace(name, w);
+				acb.cueNameByIndex.emplace(cueIndex, name);
+				{
+					uint32_t cueId;
+					if (t.cue.GetU32(cueIndex, "CueId", cueId))
+						acb.cueNameById.emplace(cueId, name);
+				}
 			}
 			if (unresolved)
 				DebugLog("[cri] %u cues unresolved\n", unresolved);
@@ -1199,6 +1239,35 @@ namespace cri::atom
 		auto& v = E().players;
 		v.erase(std::remove(v.begin(), v.end(), p), v.end());
 		delete p;
+	}
+
+	// Numeric cue selection, resolved to a name and handed to the by-name path so cue lookup,
+	// ACB fallback and every diagnostic stay in one place. Tries CueId first (what CRI's
+	// SetCueId means) and falls back to the CueTable row index, reporting which one hit so the
+	// ambiguity can be settled from a log rather than guessed at.
+	void PlayerSetCueId(CriAtomExPlayerTag* handle, CriAtomExAcbTag* acb, uint32_t id)
+	{
+		const std::string* name = nullptr;
+		const char* how = nullptr;
+		auto look = [&](Acb* a)
+		{
+			if (!a || name) return;
+			auto i = a->cueNameById.find(id);
+			if (i != a->cueNameById.end()) { name = &i->second; how = "CueId"; return; }
+			auto j = a->cueNameByIndex.find(id);
+			if (j != a->cueNameByIndex.end()) { name = &j->second; how = "CueIndex"; }
+		};
+		look(reinterpret_cast<Acb*>(acb));
+		for (Acb* a : E().registry) look(a);
+
+		static int logged = 0;
+		if (++logged <= 12)
+		{
+			DebugLog("[cri] SetCueId(%u) -> %s (by %s)\n", id,
+				name ? name->c_str() : "*** NO SUCH CUE ***", how ? how : "-");
+		}
+		if (!name) return;
+		PlayerSetCueName(handle, acb, name->c_str());
 	}
 
 	void PlayerSetCueName(CriAtomExPlayerTag* handle, CriAtomExAcbTag* acb, const char* cueName)

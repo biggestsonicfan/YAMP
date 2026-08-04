@@ -45,6 +45,17 @@ static bool IsM2ftgGame()
 		|| gGeneral.GetGameId() == YAMPGeneral::GameId::VF2;
 }
 
+// The two Model 3 games, both out of Like a Dragon Gaiden's pre3 module. They share the m2ftg
+// dip switches (difficulty/region/free play/versus are the same config bytes) but nothing else:
+// there is no display-mode table, no CRT filter and no HLE hook table here. Without this they
+// fell through to the VF5FS branch of DrawGame and were offered Language / Confirmation button /
+// Arcade Machine Mode, none of which mean anything to a Model 3 board.
+static bool IsPre3Game()
+{
+	const auto id = gGeneral.GetGameId();
+	return id == YAMPGeneral::GameId::FV2 || id == YAMPGeneral::GameId::SRC2;
+}
+
 // Netplay hangs off the LJ m2ftg host loop, but holding two emulators in lockstep needs the
 // determinism work as well: board reset, host-RNG seeding, the texture-budget pin, and the ROM
 // frame counter the round anchors and desync-checks against. All of it is now reconstructed for
@@ -303,6 +314,7 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_m2WindowMatchesRender = settings->m_m2WindowMatchesRender;
 	m_m2Aspect = settings->m_m2Aspect;
 	m_m2CrtFilter = settings->m_m2CrtFilter;
+	m_pre3RenderScale = settings->m_pre3RenderScale;
 	m_m2Difficulty = settings->m_m2Difficulty;
 	m_m2Country = settings->m_m2Country;
 	m_m2Freeplay = settings->m_m2Freeplay;
@@ -457,6 +469,127 @@ void YAMPUserInterface::DrawGraphics()
 	}
 }
 
+// The Model 3 panel. pre3's resolution is not a display mode - the module has no such table -
+// but config+0x1008, the render HEIGHT, from which it derives the width at a fixed 496/384. Like
+// a Dragon Gaiden feeds it its own output height, so "Match window" is the native behaviour and
+// the default; the fixed multiples are here because a Model 3 board at exactly Nx its native
+// 496x384 is the thing people actually want from an arcade emulator.
+void YAMPUserInterface::DrawGamePre3()
+{
+	{
+		const char* labels[] = {
+			"Match window (native behaviour)",
+			"1x  (496x384)", "2x  (992x768)", "3x  (1488x1152)",
+			"4x  (1984x1536)", "5x  (2480x1920)", "6x  (2976x2304)",
+		};
+		if (m_pre3RenderScale >= std::size(labels))
+		{
+			m_pre3RenderScale = 0;
+		}
+		if (ImGui::BeginCombo("Internal resolution", labels[m_pre3RenderScale]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_pre3RenderScale;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_pre3RenderScale = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The emulator's own render resolution, upscaled into whatever\n"
+				"window you chose. \"Match window\" is what Like a Dragon Gaiden\n"
+				"itself does. Requires a restart.");
+		}
+	}
+
+	ImGui::NewLine();
+	ImGui::Separator();
+	ImGui::TextUnformatted("ARCADE DIP SWITCHES:");
+
+	{
+		const char* labels[] = { "Easy", "Normal", "Hard", "Hardest" };
+		if (m_m2Difficulty >= std::size(labels))
+		{
+			m_m2Difficulty = 1;
+		}
+		if (ImGui::BeginCombo("Difficulty", labels[m_m2Difficulty]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_m2Difficulty;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_m2Difficulty = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Arcade difficulty dip switch (Normal is the arcade default).\nRequires a restart.");
+		}
+	}
+
+	{
+		const char* labels[] = { "Japan", "USA", "Export" };
+		if (m_m2Country >= std::size(labels))
+		{
+			m_m2Country = 0;
+		}
+		if (ImGui::BeginCombo("Region", labels[m_m2Country]))
+		{
+			for (uint32_t index = 0; index < std::size(labels); index++)
+			{
+				const bool isSelected = index == m_m2Country;
+				if (ImGui::Selectable(labels[index], isSelected))
+				{
+					m_pageModified = true;
+					m_m2Country = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Region the arcade board boots as.\nRequires a restart.");
+		}
+	}
+
+	if (ImGui::Checkbox("Free Play", &m_m2Freeplay))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("When unchecked, the game asks for credits like a real cabinet:\n"
+			"press Start (F key) on the coin screen to insert a coin.\nRequires a restart.");
+	}
+
+	if (ImGui::Checkbox("Versus mode", &m_m2VersusMode))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Boots the board in its versus cabinet configuration.\nRequires a restart.");
+	}
+}
+
 // TODO: This will have to be subclassed once more games are added
 void YAMPUserInterface::DrawGame()
 {
@@ -478,6 +611,12 @@ void YAMPUserInterface::DrawGame()
 	if (IsM2ftgGame())
 	{
 		DrawGameStF();
+		return;
+	}
+
+	if (IsPre3Game())
+	{
+		DrawGamePre3();
 		return;
 	}
 
@@ -2347,6 +2486,7 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_m2RenderMode = m_m2RenderMode;
 	settings->m_m2WindowMatchesRender = m_m2WindowMatchesRender;
 	settings->m_m2Aspect = m_m2Aspect;
+	settings->m_pre3RenderScale = m_pre3RenderScale;
 	settings->m_m2CrtFilter = m_m2CrtFilter;
 	settings->m_m2Difficulty = m_m2Difficulty;
 	settings->m_m2Country = m_m2Country;

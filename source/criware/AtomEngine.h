@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Clean-room CRI Atom playback engine backing Cri's icri implementation.
 //
@@ -38,6 +38,8 @@ namespace cri::atom
 	CriAtomExPlayerTag* PlayerCreate();
 	void PlayerDestroy(CriAtomExPlayerTag* p);
 	void PlayerSetCueName(CriAtomExPlayerTag* p, CriAtomExAcbTag* acb, const char* cueName);
+	// Numeric cue selection (pre3/Model 3 uses this instead of the by-name path).
+	void PlayerSetCueId(CriAtomExPlayerTag* p, CriAtomExAcbTag* acb, unsigned int id);
 	// Non-cue sources (the VF5FS BGM/voice path): a stream file on disk (ADX or HCA,
 	// auto-detected) or an in-memory blob. Format/channels/rate hints from the game are
 	// accepted but the file's own header is authoritative.
