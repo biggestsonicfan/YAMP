@@ -8,6 +8,7 @@
 #include "m2ftg/YLAD/VF2.h"
 #include "m2ftg/K2/K2Host.h"
 #include "m2ftg/LJ/LJHost.h"
+#include "pre3/Gaiden/Pre3Host.h"
 #include "imgui/imgui.h"
 #include "net/NetPlugin.h"
 
@@ -78,7 +79,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     // Kiwami 2's other module, Virtual On ("omg" = Operation Moon Gate). Same host as -vf2-k2.
     const bool runVON_K2 = wcsstr(cmdLine, L"-von-k2") != nullptr;
     const bool runVF2 = !runVF2_K2 && wcsstr(cmdLine, L"-vf2") != nullptr;
-    const bool runFV = !runVF2 && wcsstr(cmdLine, L"-fv") != nullptr;
+    // The two Model 3 games (Like a Dragon Gaiden's pre3 module). "-fv2" must be tested BEFORE
+    // "-fv", which is a prefix of it — the same trap as -vf2-k2 and -vf5fs-lj above, and the one
+    // that would otherwise send Fighting Vipers *2* to the Fighting Vipers host.
+    const bool runFV2 = wcsstr(cmdLine, L"-fv2") != nullptr;
+    const bool runSRC2 = wcsstr(cmdLine, L"-src2") != nullptr;
+    const bool runFV = !runVF2 && !runFV2 && wcsstr(cmdLine, L"-fv") != nullptr;
     const bool runMR = !runVF2 && !runFV && wcsstr(cmdLine, L"-mr") != nullptr;
     // Test the LJ and YLAD switches first: both contain "-vf5fs" as a prefix, so the Y6 test
     // must exclude them.
@@ -87,7 +93,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         && wcsstr(cmdLine, L"-vf5fs-ylad") != nullptr;
     const bool runVF5FS = !runVF2 && !runFV && !runMR && !runVF5FS_LJ && !runVF5FS_YLAD
         && wcsstr(cmdLine, L"-vf5fs") != nullptr;
-    const bool runStF = !runVF2 && !runVF2_K2 && !runVON_K2 && !runVF5FS && !runVF5FS_LJ && !runVF5FS_YLAD;
+    const bool runStF = !runVF2 && !runVF2_K2 && !runVON_K2 && !runVF5FS && !runVF5FS_LJ && !runVF5FS_YLAD
+        && !runFV2 && !runSRC2;
 
     // "-frames N": run N frames, then leave the loop normally and shut the module down. For
     // automated smoke tests, so a run ends through the real teardown path instead of being killed
@@ -98,7 +105,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     }
 
     const bool anyGameArg = runVF2 || runVF2_K2 || runVON_K2 || runFV || runMR || runVF5FS || runVF5FS_LJ || runVF5FS_YLAD
-        || wcsstr(cmdLine, L"-stf") != nullptr;
+        || runFV2 || runSRC2 || wcsstr(cmdLine, L"-stf") != nullptr;
     if (!anyGameArg) {
         Launcher::Run(hInstance, nShowCmd);
         ImGui::DestroyContext();
@@ -163,6 +170,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         vf5fs::YLAD::PreInitialize();
         RenderWindow window(hInstance, dll, nShowCmd);
         vf5fs::YLAD::Run(window);
+        ImGui::DestroyContext();
+        return 0;
+    }
+
+    if (runFV2 || runSRC2) {
+        // --- Model 3 path (Like a Dragon Gaiden's pre3 module, DX12). One DLL hosts both
+        // games; the GameId is what picks which of them module_start boots.
+        gGeneral.SetGameId(runSRC2 ? YAMPGeneral::GameId::SRC2 : YAMPGeneral::GameId::FV2);
+        HMODULE dll = pre3::LoadDLL();
+
+        gGeneral.SetDLLName(gGeneral.GetArcadeGameName());
+        gGeneral.SetDLLTimestamp(0);
+        gGeneral.SetDataPath();
+        gGeneral.LoadSettings();
+
+        if (!dll) {
+            // LoadDLL already told the user what is missing; nothing to run without it.
+            ImGui::DestroyContext();
+            return 0;
+        }
+
+        RenderWindow window(hInstance, dll, nShowCmd);
+        pre3::Run(window);
         ImGui::DestroyContext();
         return 0;
     }

@@ -747,6 +747,9 @@ namespace pxd
 				export_context_t export_context; // sbgl_context is 8 bytes larger than VF5FS
 				unsigned int frame_counter;
 				unsigned int max_frame_latency;
+				// +0x70. Read by pre3's screen object to size its scroll-buffer ring (see
+				// pre3/Gaiden/Pre3Host.cpp); no m2ftg or VF5FS module touches it, which is why
+				// it stayed unwritten for so long. The offset is asserted below.
 				unsigned int backbuffer_count;
 				unsigned int unk_int1;
 				csl_allocator* p_csl_allocator;
@@ -923,6 +926,10 @@ namespace pxd
 				static constexpr uint32_t size_of_struct = 0x3898C0;
 				static constexpr uint64_t up_ring_bytes = 0x8000000;   // 128 MB
 			};
+
+			// pre3's screen object reads backbuffer_count by raw offset, so pin it.
+			static_assert(offsetof(context_tmpl<GAP18_LJ>, backbuffer_count) == 0x70);
+			static_assert(offsetof(context_tmpl<GAP18_GAIDEN>, backbuffer_count) == 0x70);
 
 			void primitive_initialize();
 

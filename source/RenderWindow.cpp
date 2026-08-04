@@ -269,8 +269,21 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 	// Dump the stream BEFORE forwarding, so it is on disk even if the call faults.
 	if (psoLog != nullptr && pDesc != nullptr)
 	{
-		fprintf(psoLog, "=== CreatePipelineState SizeInBytes=%zu pStream=%p ===\n",
-			pDesc->SizeInBytes, pDesc->pPipelineStateSubobjectStream);
+		// Caller RVA too: the module chooses its shader variant before this hook ever runs, so the
+		// return address is the shortest route to the PSO builder that made the choice. Relative to
+		// the loaded module because every pxd module is ASLR'd.
+		const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
+		HMODULE owner = nullptr;
+		uintptr_t rva = 0;
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+			| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCWSTR>(ra), &owner) && owner != nullptr)
+		{
+			rva = ra - reinterpret_cast<uintptr_t>(owner);
+		}
+		fprintf(psoLog, "=== CreatePipelineState SizeInBytes=%zu pStream=%p callerRVA=0x%llX ===\n",
+			pDesc->SizeInBytes, pDesc->pPipelineStateSubobjectStream,
+			(unsigned long long)rva);
 		const uint8_t* p = static_cast<const uint8_t*>(pDesc->pPipelineStateSubobjectStream);
 		if (p != nullptr && pDesc->SizeInBytes <= 0x4000)
 		{

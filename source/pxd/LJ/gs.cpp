@@ -76,6 +76,19 @@ namespace pxd
 			// layout is loaded - hence the generic lambda rather than a plain `context_t*`.
 			void primitive_initialize()
 			{
+				// ib_create is not guaranteed to EXIST in the module. Gaiden's pre3 (Model 3)
+				// module references no index-buffer creation anywhere, so the linker discarded
+				// that COMDAT and the symbol genuinely is not there — see
+				// source/pre3/Gaiden/ImportSymbols.cpp for how that was established. A module
+				// that never creates an index buffer never draws with one either, so leaving the
+				// three shared buffers null is the correct outcome rather than a degraded one.
+				if (ib_create == nullptr)
+				{
+					DebugLogFile("[primitives] ib_create absent in this module; "
+						"p_ib_quad/p_ib_fan/p_ib_rect left null\n");
+					return;
+				}
+
 				with_tail([](auto* context)
 				{
 				for (size_t i = 0; i < 3; i++)
@@ -144,6 +157,17 @@ namespace pxd
 				DebugLogFile("[primitives] p_ib_quad=%p p_ib_fan=%p p_ib_rect=%p\n",
 					static_cast<void*>(context->p_ib_quad), static_cast<void*>(context->p_ib_fan),
 					static_cast<void*>(context->p_ib_rect));
+
+				// The object these produce is the ORACLE for hosts that must build their own: pre3's
+				// module has no ib_create (in Gaiden that lives in the host executable), so
+				// source/pre3 constructs the wrapper by hand. Layout read off a live Gaiden StF
+				// p_ib_quad — same pxd generation, so it is the shape pre3 expects:
+				//   +0x00 alive=1   +0x08 flags=0x201 (index buffer)   +0x0C byte size
+				//   +0x10 the object's OWN address (the state-cache id dc+0x13C20 compares)
+				//   +0x18 ID3D12Resource*  (a real D3D12 object, NOT an embedded sub-struct the
+				//                          way the DX11 generations' wrapper does it)
+				//   +0x20/+0x24 flags and byte size again
+				// p_ib_quad for 192 quads = 1152 indices = 0x900 bytes, which is what that dump read.
 				});
 			}
 
@@ -236,7 +260,11 @@ namespace pxd
 				gs::inject_pointer(gs::sm_context);
 				mp_vb = gs::vb_create(0xE00003u, m_vb_size / 16, gs::VB_USAGE_DYNAMIC, 0xF0000000, nullptr, nullptr);
 			}
-			if (m_ib_size != 0)
+			// Same guard as primitive_initialize: ib_create is not present in every module (the
+			// pre3 Model 3 one references no index-buffer creation, so it was linked out). Unlike
+			// mp_vb below, a null mp_ib is survivable for exactly the module that lacks the
+			// symbol — one that cannot create an index buffer never binds one either.
+			if (m_ib_size != 0 && gs::ib_create != nullptr)
 			{
 				mp_ib = gs::ib_create(m_ib_size / 2, gs::IB_USAGE_DYNAMIC, 0xF0000000, nullptr, nullptr);
 			}

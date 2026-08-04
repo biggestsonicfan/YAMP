@@ -13,6 +13,7 @@
 #include <cstring>
 #include <malloc.h>
 #include <mutex>
+#include <unordered_set>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -130,8 +131,15 @@ namespace pxd
 				if (desc)
 				{
 					const uint64_t* d = reinterpret_cast<const uint64_t*>(desc);
+					// TEMPORARY (pre3 bring-up): DebugLogFile, not DebugLog. This line was
+					// OutputDebugString-only, so in a normal run it went nowhere and the factory
+					// looked like it was never called. pre3's texture upload asks this factory for
+					// an INTERMEDIATE TEXTURE (FUN_18007dda0 names the result
+					// "pbgl::intermidate_texture%lld"), and we hand back a generic 8 MiB ROW_MAJOR
+					// BUFFER regardless of the desc - which a CopyTextureRegion cannot read as a
+					// texture subresource. Dump the real descs so the desc layout can be parsed.
 					DebugLog(
-						"[StF cdevice] CreateResource fmt=0x%X tag=0x%X desc=[%016llX %016llX %016llX %016llX %016llX %016llX]\n",
+						"[cdevice] CreateResource fmt=0x%X tag=0x%X desc=[%016llX %016llX %016llX %016llX %016llX %016llX]\n",
 						fmt, tag,
 						(unsigned long long)d[0], (unsigned long long)d[1], (unsigned long long)d[2],
 						(unsigned long long)d[3], (unsigned long long)d[4], (unsigned long long)d[5]);
@@ -332,15 +340,52 @@ namespace pxd
 			// (a healthy StF run is ~0.7 draws/frame; zero means the module never reached render code).
 			typedef void (STDMETHODCALLTYPE* DrawInstanced_t)(ID3D12GraphicsCommandList*, UINT, UINT, UINT, UINT);
 			typedef void (STDMETHODCALLTYPE* DrawIndexed_t)(ID3D12GraphicsCommandList*, UINT, UINT, UINT, INT, UINT);
+			typedef void (STDMETHODCALLTYPE* Dispatch_t)(ID3D12GraphicsCommandList*, UINT, UINT, UINT);
 			static DrawInstanced_t g_origDrawInstanced = nullptr;
 			static DrawIndexed_t   g_origDrawIndexed   = nullptr;
+			static Dispatch_t      g_origDispatch      = nullptr;
 			static uint64_t g_drawInstCount = 0, g_drawIdxCount = 0, g_drawVertsTotal = 0;
+			// Compute. Counted for the same reason the draws are: a module whose work is dispatched
+			// rather than drawn would otherwise show up as a completely idle frame. pre3 (Model 3)
+			// is the case that needs it — a PIX capture of Like a Dragon Gaiden running Fighting
+			// Vipers 2 has 3 Dispatch calls per frame alongside the module's 189 draws, and with
+			// only the draw hooks in place there was no way to tell whether ours were running.
+			static uint64_t g_dispatchCount = 0;
+			// Totals for the two render-entry probes below. Those log only their first few calls, so
+			// without these the tally line is the only place the real counts appear — reading a
+			// capped log as a count is a mistake worth not repeating.
+			extern uint64_t g_moduleBufCopyCount;
+			extern uint64_t g_moduleTexCopyCount;
+			extern uint64_t g_moduleTexCopyOutsideFrame;
 			static void LogDrawTally()
 			{
-				if ((g_drawInstCount + g_drawIdxCount) % 500 == 1)
-					DebugLogFile("[draw] instanced=%llu indexed=%llu vertsTotal=%llu\n",
+				// The format string used to take six specifiers while eight arguments were passed,
+				// so the two texture-copy totals were silently dropped. They are the health signal
+				// for pre3's Model 3 texture uploads, so they are printed now.
+				if ((g_drawInstCount + g_drawIdxCount) % 100 == 1)
+					DebugLogFile("[draw] instanced=%llu indexed=%llu vertsTotal=%llu dispatch=%llu"
+						" bufcopy=%llu texcopy=%llu texcopyLoader=%llu\n",
 						(unsigned long long)g_drawInstCount, (unsigned long long)g_drawIdxCount,
-						(unsigned long long)g_drawVertsTotal);
+						(unsigned long long)g_drawVertsTotal, (unsigned long long)g_dispatchCount,
+						(unsigned long long)g_moduleBufCopyCount,
+						(unsigned long long)g_moduleTexCopyCount,
+						(unsigned long long)g_moduleTexCopyOutsideFrame);
+			}
+
+			static void STDMETHODCALLTYPE HookedDispatch(ID3D12GraphicsCommandList* self,
+				UINT x, UINT y, UINT z)
+			{
+				g_dispatchCount++;
+				// Flagged like a draw: a list that only ever dispatches is still the module's, and
+				// SubmitModuleFrameList has to close and execute it or the work never reaches the GPU.
+				if (ModuleRenderActive()) MarkModuleRenderList(self);
+				// Logged individually rather than via the shared tally — these are rare enough (a
+				// handful per frame) that the first few are worth seeing in full, and a module that
+				// dispatches zero times never reaches LogDrawTally's 500-call cadence at all.
+				if (g_dispatchCount <= 8)
+					DebugLogFile("[dispatch] #%llu %ux%ux%u%s\n", (unsigned long long)g_dispatchCount,
+						x, y, z, ModuleRenderActive() ? " (module)" : "");
+				g_origDispatch(self, x, y, z);
 			}
 
 			static void STDMETHODCALLTYPE HookedDrawInstanced(ID3D12GraphicsCommandList* self,
@@ -779,6 +824,12 @@ namespace pxd
 				g_origReset(s_shadowCopyList, s_shadowCopyAlloc, nullptr);
 				s_shadowCopyPending = 0;
 			}
+			// Buffer copies the MODULE issued. Counted (and the first few logged) because the copy
+			// is the one part of a module's frame that happens before any draw: pre3's render pass
+			// opens by uploading its 0x120000 scroll buffer, so whether that copy appears at all
+			// separates "the render path never started" from "it started and found nothing to draw".
+			uint64_t g_moduleBufCopyCount = 0;
+
 			static void STDMETHODCALLTYPE HookedCopyBufferRegion(ID3D12GraphicsCommandList* self, ID3D12Resource* dst, UINT64 dstOff, ID3D12Resource* src, UINT64 srcOff, UINT64 bytes)
 			{
 				// GATE ON THE CALLER, not ModuleRenderActive(): the module records copies from
@@ -786,9 +837,53 @@ namespace pxd
 				// loaded game DLL's range is definitively the module, never d3d11on12/YAMP.
 				const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
 				if (IsGameDllAddr(ra))
+				{
+					if (++g_moduleBufCopyCount <= 8)
+						DebugLogFile("[bufcopy] #%llu %llu bytes dst=%p+%llu src=%p+%llu%s\n",
+							(unsigned long long)g_moduleBufCopyCount, (unsigned long long)bytes,
+							static_cast<void*>(dst), (unsigned long long)dstOff,
+							static_cast<void*>(src), (unsigned long long)srcOff,
+							ModuleRenderActive() ? " (in frame)" : " (loader)");
 					ShadowRecordBufferCopy(dst, dstOff, src, srcOff, bytes);
+				}
 				g_origCopyBufferRegion(self, dst, dstOff, src, srcOff, bytes);
 			}
+			// CopyTextureRegion (slot 16) — DIAGNOSTIC for now, but on the same fault line as the
+			// CopyBufferRegion hook above. That one exists because the module records uploads from
+			// loader/worker threads OUTSIDE the frame bracket, onto lists the host never executes,
+			// so they are replayed onto a shadow list. Texture uploads take this path instead, and
+			// nothing replays them. For pre3 (Model 3) that would leave the polygons untextured —
+			// which is what "renders, but very dark" looks like. Counting first: if these fire
+			// outside the frame, they are being lost the same way buffer copies were.
+			typedef void (STDMETHODCALLTYPE* CopyTextureRegion_t)(ID3D12GraphicsCommandList*,
+				const D3D12_TEXTURE_COPY_LOCATION*, UINT, UINT, UINT,
+				const D3D12_TEXTURE_COPY_LOCATION*, const D3D12_BOX*);
+			static CopyTextureRegion_t g_origCopyTextureRegion = nullptr;
+			uint64_t g_moduleTexCopyCount = 0;
+			uint64_t g_moduleTexCopyOutsideFrame = 0;
+			static void STDMETHODCALLTYPE HookedCopyTextureRegion(ID3D12GraphicsCommandList* self,
+				const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, UINT z,
+				const D3D12_TEXTURE_COPY_LOCATION* src, const D3D12_BOX* box)
+			{
+				if (IsGameDllAddr(reinterpret_cast<uintptr_t>(_ReturnAddress())))
+				{
+					const bool inFrame = ModuleRenderActive();
+					if (!inFrame) g_moduleTexCopyOutsideFrame++;
+					++g_moduleTexCopyCount;
+					// LOAD-BEARING, not a diagnostic. pre3 records its Model 3 texture uploads onto a
+					// command list that carries NO draws (measured: of 91 distinct copy destinations,
+					// the 2D tilemap is on the draw list and all 90 game textures are on one draw-free
+					// list). SubmitModuleFrameList only submits lists the DRAW hooks flagged, so that
+					// list was never closed or executed and every Model 3 texture stayed empty - the
+					// symptom being perfect black silhouettes with correct pose, depth and animation.
+					// Flagging here puts it in the frame batch, which runs uploads before the draws
+					// that consume them. Measured no-op for the other games: MR is byte-identical and
+					// StF stays inside its run-to-run spread (3 samples per arm, -frames 2000).
+					MarkModuleRenderList(self);
+				}
+				g_origCopyTextureRegion(self, dst, x, y, z, src, box);
+			}
+
 			// ResolveSubresource hook (slot 19). The MSAA->non-MS resolve DST = the Model 2 3D scene
 			// layer (1024x768), which the host composites (see RenderWindow::BlitDX12Texture). StF
 			// leaves it SHADER-READABLE (0xC0) at frame end (fight-capture final-state ground truth).
@@ -805,6 +900,7 @@ namespace pxd
 				g_origResolveSubresource(self, dst, dstSub, src, srcSub, fmt);
 			}
 
+
 			// Patch the ID3D12GraphicsCommandList vtable. NOTE: that vtable is SHARED by every list in
 			// the process, so each hook below also fires on d3d11on12's internal blit lists — only slots
 			// the host genuinely needs are patched, and each hook is written to be inert for foreign
@@ -812,6 +908,11 @@ namespace pxd
 			// resources). Do not add diagnostic-only hooks here.
 			//      10 Reset            clear the list's module flag (its recording is gone).
 			//   12/13 Draw*            flag the list the module records into (the submit set).
+			//      14 Dispatch         same job as the Draw hooks, for compute. A module whose frame
+			//                          is dispatched rather than drawn would otherwise record into a
+			//                          list nothing ever flags, so the submit set would miss it and
+			//                          the work would never reach the GPU. Not diagnostic-only: the
+			//                          counter it also keeps is a by-product, not the reason.
 			//      15 CopyBufferRegion replay the module's buffer uploads onto the shadow copy list.
 			//      19 ResolveSubresource  capture the 3D-layer resolve dst the host composites.
 			//      25 SetPipelineState inject the module's descriptor heaps + root signature.
@@ -830,7 +931,10 @@ namespace pxd
 					{ 10, reinterpret_cast<void**>(&g_origReset),              reinterpret_cast<void*>(&HookedReset) },
 					{ 12, reinterpret_cast<void**>(&g_origDrawInstanced),      reinterpret_cast<void*>(&HookedDrawInstanced) },
 					{ 13, reinterpret_cast<void**>(&g_origDrawIndexed),        reinterpret_cast<void*>(&HookedDrawIndexed) },
+					{ 14, reinterpret_cast<void**>(&g_origDispatch),           reinterpret_cast<void*>(&HookedDispatch) },
 					{ 15, reinterpret_cast<void**>(&g_origCopyBufferRegion),   reinterpret_cast<void*>(&HookedCopyBufferRegion) },
+					// LOAD-BEARING: flags pre3's draw-free texture-upload list for submission.
+					{ 16, reinterpret_cast<void**>(&g_origCopyTextureRegion),  reinterpret_cast<void*>(&HookedCopyTextureRegion) },
 					{ 19, reinterpret_cast<void**>(&g_origResolveSubresource), reinterpret_cast<void*>(&HookedResolveSubresource) },
 					{ 26, reinterpret_cast<void**>(&g_origResourceBarrier),    reinterpret_cast<void*>(&HookedResourceBarrier) },
 					// SetPipelineState last: g_origSetPSO doubles as the "already hooked" sentinel above.

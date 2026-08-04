@@ -104,6 +104,16 @@ namespace Verify
 				"Yakuza Kiwami 2 GOG (2019-09-30)" },
 		};
 
+		// Like a Dragon Gaiden's Model 3 emulator, runtime/media/pre3/. ONE module for both
+		// Fighting Vipers 2 and Sega Rally Championship 2 (and four more games it has no data
+		// for), so the two GameIds below share this table — which game runs is a config byte,
+		// not a different file. Built 2024-03-10, four months after the same title's m2ftg
+		// modules, but the same pxd generation as them.
+		constexpr KnownModuleBuild PRE3_BUILDS[] = {
+			{ "B44ED5A7D95076EDF84F48FC02773EB42F1830FEBDF32DEA33E4F0C639FDB98E", 1665008, 0x65EE7212,
+				"Like a Dragon Gaiden (2024-03-10)" },
+		};
+
 		// "omg" = Operation Moon Gate, i.e. Virtual On.
 		constexpr KnownModuleBuild VON_K2_BUILDS[] = {
 			{ "99AD0D31AE5949F6C5F521119FC9E26FF5CA602B1629583CBF478D1FCDC4D39C", 4734976, 0x5D91BBCA,
@@ -130,6 +140,8 @@ namespace Verify
 			{ YAMPGeneral::GameId::VF5FS_YLAD, VF5FS_YLAD_BUILDS, std::size(VF5FS_YLAD_BUILDS), nullptr, 0 },
 			{ YAMPGeneral::GameId::VF2_K2, VF2_K2_BUILDS, std::size(VF2_K2_BUILDS), nullptr, 0 },
 			{ YAMPGeneral::GameId::VON_K2, VON_K2_BUILDS, std::size(VON_K2_BUILDS), nullptr, 0 },
+			{ YAMPGeneral::GameId::FV2, PRE3_BUILDS, std::size(PRE3_BUILDS), nullptr, 0 },
+			{ YAMPGeneral::GameId::SRC2, PRE3_BUILDS, std::size(PRE3_BUILDS), nullptr, 0 },
 			{ YAMPGeneral::GameId::VF5FS, VF5FS_BUILDS, std::size(VF5FS_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
 		};
@@ -202,6 +214,13 @@ namespace Verify
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
 		};
+		// The Model 3 games come only from Like a Dragon Gaiden — Lost Judgment ships no pre3
+		// module at all, so unlike Sonic the Fighters there is no second source for them.
+		constexpr ParentTitle GAIDEN_TITLES[] = {
+			{ L"likeadragongaiden.exe", "likeadragongaiden.exe",
+				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
+				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
+		};
 		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), and MR's Gaiden build
 		// has not been brought up yet, so both stay Lost-Judgment-only.
 		constexpr ParentTitle LJ_TITLES[] = {
@@ -232,6 +251,8 @@ namespace Verify
 			{ YAMPGeneral::GameId::VF5FS_YLAD, YLAD_TITLES, std::size(YLAD_TITLES) },
 			{ YAMPGeneral::GameId::VF2_K2, K2_TITLES, std::size(K2_TITLES) },
 			{ YAMPGeneral::GameId::VON_K2, K2_TITLES, std::size(K2_TITLES) },
+			{ YAMPGeneral::GameId::FV2, GAIDEN_TITLES, std::size(GAIDEN_TITLES) },
+			{ YAMPGeneral::GameId::SRC2, GAIDEN_TITLES, std::size(GAIDEN_TITLES) },
 			{ YAMPGeneral::GameId::VF5FS, Y6_TITLES, std::size(Y6_TITLES) },
 		};
 

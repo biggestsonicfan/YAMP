@@ -102,6 +102,15 @@ namespace Launcher
 			{ L"m2ftg\\omg-pxd-w64-gog_retail.dll", L"m2ftg" },
 		};
 
+		// Like a Dragon Gaiden's Model 3 emulator sits in runtime/media/pre3/ beside the m2ftg
+		// folder. Both Model 3 games come out of this ONE DLL, so the two entries below share a
+		// candidate list and differ only in the switch they pass on.
+		constexpr DllCandidate PRE3_CANDIDATES[] = {
+			{ L"pre3-pxd-w64-d3d12_retail.dll", L"." },
+			{ L"pre3\\pre3-pxd-w64-d3d12_retail.dll", L"pre3" },
+			{ L"runtime\\media\\pre3\\pre3-pxd-w64-d3d12_retail.dll", L"runtime\\media\\pre3" },
+		};
+
 		constexpr GameInfo GAMES[] = {
 			// Like a Dragon Gaiden ships its m2ftg modules at the same runtime/media/m2ftg path
 			// Lost Judgment does, so the candidate list already finds it — the two titles differ
@@ -124,6 +133,10 @@ namespace Launcher
 				VON_K2_CANDIDATES, std::size(VON_K2_CANDIDATES) },
 			{ YAMPGeneral::GameId::VF5FS_YLAD, "Virtua Fighter 5: Final Showdown", "Yakuza: Like a Dragon",
 				L"-vf5fs-ylad", VF5FS_YLAD_CANDIDATES, std::size(VF5FS_YLAD_CANDIDATES) },
+			{ YAMPGeneral::GameId::FV2, "Fighting Vipers 2", "Like a Dragon Gaiden", L"-fv2",
+				PRE3_CANDIDATES, std::size(PRE3_CANDIDATES) },
+			{ YAMPGeneral::GameId::SRC2, "Sega Rally Championship 2", "Like a Dragon Gaiden", L"-src2",
+				PRE3_CANDIDATES, std::size(PRE3_CANDIDATES) },
 		};
 
 		struct SearchRoot
