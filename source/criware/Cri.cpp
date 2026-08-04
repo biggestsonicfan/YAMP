@@ -306,10 +306,16 @@ namespace
 
 void Cri::UseGaidenVtable()
 {
-	// icri declares 78 methods plus a virtual destructor = 79 slots; +1 for the inserted one.
-	// The highest slot the Gaiden module actually calls is 76, comfortably inside this.
+	// icri declares 78 methods plus a virtual destructor = 79 slots, and Cri appends one more of
+	// its own past the end of icri (criAtomExAcb_GetCueInfoById) = 80; +1 for the inserted one.
+	//
+	// kSlots WAS 79, on the reasoning that "the highest slot the Gaiden module actually calls is
+	// 76, comfortably inside this". That was measured on Sonic the Fighters and is NOT true of the
+	// Model 3 module, which calls slot 80 - and because this array is a static, the slot it read
+	// was a zero nobody had written. Fighting Vipers 2 crashed with rip=0 on one stage as a result.
+	// Anything appended to Cri past icri has to be counted here or it is invisible to the module.
 	constexpr size_t kInsertAt = 9;   // between criAtomExPlayer_SetCueName and _SetVolume
-	constexpr size_t kSlots = 79;
+	constexpr size_t kSlots = 80;
 	static_assert(kSlots + 1 <= std::size(g_criGaidenVtable), "grow g_criGaidenVtable");
 
 	void** const vt = *reinterpret_cast<void***>(this);
@@ -319,7 +325,32 @@ void Cri::UseGaidenVtable()
 		(kSlots - kInsertAt) * sizeof(void*));
 
 	*reinterpret_cast<void***>(this) = g_criGaidenVtable;
-	DebugLog("[cri] using the Like a Dragon Gaiden icri layout (SetCueId at slot %zu)\n", kInsertAt);
+
+	// EVERY slot must hold a real function before the module is handed this object. A hole is a
+	// call through null the moment some game reaches the code that uses it - which is exactly how
+	// the slot-80 bug presented: silent for two of the three games, then a crash several minutes
+	// into a match, on one stage of the third. The arithmetic above is easy to get wrong (it
+	// already was, once), so it is checked rather than trusted.
+	size_t holes = 0;
+	for (size_t i = 0; i <= kSlots; i++)
+	{
+		if (g_criGaidenVtable[i] == nullptr)
+		{
+			holes++;
+			DebugLogFile("[cri] WARNING: icri vtable slot %zu is NULL - any game that calls it "
+				"will crash with rip=0\n", i);
+		}
+	}
+	DebugLogFile("[cri] using the Like a Dragon Gaiden icri layout (SetCueId at slot %zu, "
+		"%zu slots, %zu holes)\n", kInsertAt, kSlots + 1, holes);
+}
+
+// See the long note on the declaration: returning 0 is "no cue info", which the module already
+// has a path for, and writing nothing into the caller's struct is the only safe answer while its
+// layout is unconfirmed.
+int Cri::criAtomExAcb_GetCueInfoById(CriAtomExAcbTag*, unsigned int, void*)
+{
+	return 0;
 }
 
 int Cri::criAtomEx_CalculateWorkSizeForRegisterAcfData(void*, int)
