@@ -223,6 +223,9 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 			m_netFrameDelay = 3;   // a hand-edited ini must not be able to wedge the lockstep
 		}
 		m_netPre3VsStart = GetPrivateProfileIntW(L"Netplay", L"Pre3VsStart", 0, iniPath.c_str()) != 0;
+		// [Debug] DrawLimit - see YAMPSettings::m_drawLimit. Read here rather than in the Debug
+		// block below so it lands next to the other diagnostics that are ini-only.
+		m_drawLimit = GetPrivateProfileIntW(L"Debug", L"DrawLimit", 0, iniPath.c_str());
 		// Divergence diagnostics. No UI: hand-edited for a measurement run, and both default off
 		// so a normal session is unaffected by their presence.
 		m_netTimerTrace = GetPrivateProfileIntW(L"Netplay", L"TimerTrace", 0, iniPath.c_str()) != 0;

@@ -513,6 +513,42 @@ what a round needs, demonstrated without a second machine.
 
 ---
 
+## 8a. Rendering faults found alongside this work
+
+Two module-hosting bugs surfaced while the netplay tooling was being used, both in shared code and
+so both affecting every game on the LJ-generation DX12 path.
+
+**icri vtable slot 80 was NULL** — Fighting Vipers 2 crashed with `rip=0` on one stage after minutes
+of play. `UseGaidenVtable` built 80 entries because "the highest slot the Gaiden module actually
+calls is 76"; that was measured on Sonic the Fighters and pre3 calls slot **80**
+(`criAtomExAcb_GetCueInfoById`). A full sweep of all 19 functions touching the icri global put the
+next-highest at 76, so exactly one method was missing. The vtable now self-checks for holes at
+start-up: `[cri] ... (SetCueId at slot 9, 81 slots, 0 holes)`.
+
+**Texture uploads executed AFTER the draws that sampled them.** `SubmitModuleFrameList` ran the
+module's command lists in the order they were first touched that frame. The module records texture
+uploads onto a draw-free list and its scene onto another, so whenever the scene list was touched
+first, that frame's uploads landed too late and those draws read the previous contents.
+
+Invisible while a texture is unchanged; visible exactly when textures are swapped — the stage
+background flickering through a round transition, and hit effects (which live one or two frames, so
+one frame late is most of their life) coming out black or a flat colour. The file already stated the
+principle for buffer copies, whose shadow list "goes FIRST so one-time uploads land before the draws
+that consume them"; the module's own upload lists now follow it. They cannot be replayed onto the
+shadow list the same way because their copy sources are transient placed footprints rather than
+persistent mapped buffers.
+
+Confirmed by a counter rather than by eye: `[pathb] upload-before-draw reorder applied on N frames`
+counts frames the old order got wrong. A session that reproduced the flicker before the fix logged
+64+ such frames after it, and the flicker was gone.
+
+Worth recording as method, because three earlier leads were wrong: sampler filtering (an artifact of
+comparing whole descriptor heaps), an uninitialised descriptor (PIX does not emit a view for every
+descriptor — Gaiden's capture has the same gaps), and the round-1 waterfall being absent at all
+(Gaiden does that too; it is the game's own behaviour). Comparing two PIX C++ exports mechanically
+ruled out geometry, PSOs, samplers, textures, mips and SRVs, but could not see the frame ORDERING
+that turned out to be the fault.
+
 ## 9. Files
 
 | file | role |

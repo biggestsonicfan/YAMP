@@ -6,6 +6,11 @@ void SetModuleRenderActiveNow(bool active);
 void SubmitModuleFrameListNow();
 bool ModuleExecDisabledNow();
 void AdvanceFrameStampNow();
+// Draw isolation, for chasing a rendering artifact down to the draw that makes it. See the note
+// on g_drawLimit in pxd/LJ/HostCdevice.cpp.
+void SetModuleDrawLimitNow(unsigned int limit);
+unsigned int ModuleDrawsLastFrameNow();
+unsigned int ModuleDrawLimitNow();
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -703,6 +708,16 @@ namespace pre3
 			}
 			s_escWasDown = escDown;
 		}
+		// The module's own pause: module_main freezes the board, pauses all six audio channels
+		// and records nothing, so the submit below is skipped too and the last completed frame
+		// keeps being presented. That is what Like a Dragon Gaiden does.
+		//
+		// A debug mode that froze the BOARD but kept the RENDERER going was tried here, to let the
+		// draw sliders be swept with the action held still. It cannot work: the module builds its
+		// draw list in the update stage, so skipping that stage leaves the render stages with
+		// nothing to record - a PIX capture taken in that mode contained three draws and none of
+		// the module's scene. Its own pause bit records nothing either, so there is no way through
+		// this module's interface to re-draw a frozen frame. Sweep with the game running.
 		if (s_pauseMenuOpen)
 		{
 			execute_info.status |= 1;
@@ -888,6 +903,16 @@ namespace pre3
 		int funcResult = 0;
 		if (advanceFrame)
 		{
+			// Draw isolation: seed the hook layer from the ini ONCE. After that the value is owned
+			// by the Debug page's slider, which writes it live - pushing the ini value every frame
+			// would fight the slider and pin it back to 0.
+			static bool s_drawLimitSeeded = false;
+			if (!s_drawLimitSeeded)
+			{
+				s_drawLimitSeeded = true;
+				if (settings->m_drawLimit != 0) SetModuleDrawLimitNow(settings->m_drawLimit);
+			}
+
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
 			if (funcResult == 0 && entries.render_begin != nullptr)
@@ -926,19 +951,37 @@ namespace pre3
 			static int s_frame = 0;
 			static int s_lastLogged = -1;
 			static int s_lastMode = -1;
+			static unsigned int s_lastDraws = 0;
 			// Health line for smoke runs: status or board-mode changes, plus a periodic
 			// heartbeat. The mode pair is what makes an input verifiable without a screenshot —
 			// it moves the moment the ROM changes screen, so a TEST press that reaches the board
 			// shows up here even on a headless -frames run.
 			const int mode = execute_info.game_mode << 8 | execute_info.game_sub_mode;
-			if ((execute_info.status != s_lastLogged || mode != s_lastMode || s_frame % 120 == 0)
-				&& s_frame < 4000)
+			// NO FRAME CAP on the interesting events. The cap used to be `s_frame < 4000`, which is
+			// about 66 seconds - fine for a smoke run, useless for anything that happens during
+			// PLAY. Chasing an object that only renders from the second round onwards produced no
+			// lines at all, because the round it had to be compared against was minutes in.
+			//
+			// What is kept is the sparseness: a line only when something CHANGES (host status, the
+			// board's mode pair, or the module's draw count moving by more than the couple of draws
+			// an animation adds and removes), plus a slow heartbeat. draws= is the one that matters
+			// for a missing object - it counts what the module ISSUED, before anything downstream
+			// could drop it, so it separates "the board never drew it" from "we lost it".
+			const unsigned int draws = ModuleDrawsLastFrameNow();
+			const bool drawsMoved = draws > s_lastDraws + 2 || draws + 2 < s_lastDraws;
+			if (execute_info.status != s_lastLogged || mode != s_lastMode || drawsMoved
+				|| s_frame % 600 == 0)
 			{
-				DebugLogFile("[pre3] frame=%d status=0x%X result=0x%X texid=%u mode=%02X/%02X\n",
+				// draws= is the upper bound for a draw-isolation sweep: the limit only means
+				// anything between 1 and this. See YAMPSettings::m_drawLimit.
+				DebugLogFile("[pre3] frame=%d status=0x%X result=0x%X texid=%u mode=%02X/%02X "
+					"draws=%u%s\n",
 					s_frame, execute_info.status, execute_info.result, execute_info.output_texid,
-					execute_info.game_mode, execute_info.game_sub_mode);
+					execute_info.game_mode, execute_info.game_sub_mode, draws,
+					ModuleDrawLimitNow() != 0 ? " (DRAW LIMIT ACTIVE)" : "");
 				s_lastLogged = execute_info.status;
 				s_lastMode = mode;
+				s_lastDraws = draws;
 			}
 			s_frame++;
 		}

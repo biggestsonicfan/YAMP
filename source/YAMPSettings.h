@@ -167,6 +167,16 @@ public:
 	// divergence observable, and a match run under it is expected to be wrong.
 	bool m_netForceUnsupported = false;
 
+	// ---- Draw isolation (rendering bugs) ----------------------------------------------------
+	// Drop every module draw whose per-frame index is >= this; 0 draws everything. Sweeping it
+	// assembles the scene one draw at a time, so the value at which an artifact first appears is
+	// the draw that produces it - see the note on g_drawLimit in pxd/LJ/HostCdevice.cpp. The index
+	// matches the draw order in a PIX capture of the same frame, which is what makes the answer
+	// useful afterwards: it names the draw whose textures and constants to go and read.
+	//
+	// INI-only, like the netplay diagnostics above: it is a probe, not a preference.
+	uint32_t m_drawLimit = 0;
+
 	// Misc
 	uint32_t m_buildLastShowedDisclaimer = 0;
 };

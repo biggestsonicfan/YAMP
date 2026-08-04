@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <malloc.h>
+#include <atomic>
 #include <mutex>
 #include <unordered_set>
 #include <utility>
@@ -332,8 +333,13 @@ namespace pxd
 			// Forward decls so the draw hooks (below) can flag the list they draw into as StF's. Flagging
 			// by draw (during func()) is far more reliable than by PSO: StF's scene lists use PSOs from a
 			// creation path IsModulePso() doesn't track, so PSO-flagging missed them and they never executed.
-			void MarkModuleRenderList(ID3D12GraphicsCommandList*);
+			// `fromDraw` false means the list was flagged because it recorded a COPY, not a draw.
+			// The submit uses it to run upload-only lists first - see SubmitModuleFrameList.
+			void MarkModuleRenderList(ID3D12GraphicsCommandList*, bool fromDraw = true);
 			bool ModuleRenderActive();
+			// Defined further down, next to the render-active flag it reads. Declared here because
+			// the draw hooks below are the only callers and they come first in the file.
+			static bool SkipModuleDraw();
 
 			// Draw hooks (slots 12/13): flag the list the module records into so SubmitModuleFrameList
 			// knows which lists to close + execute. The counters drive the periodic [draw] health line
@@ -394,6 +400,9 @@ namespace pxd
 				g_drawInstCount++; g_drawVertsTotal += static_cast<uint64_t>(vpi) * (inst ? inst : 1);
 				if (ModuleRenderActive()) MarkModuleRenderList(self); // this list records the module's scene
 				LogDrawTally();
+				// Dropped AFTER the list is marked: the list still belongs to the module and still
+				// has to be closed and executed, it just records one draw fewer.
+				if (SkipModuleDraw()) return;
 				g_origDrawInstanced(self, vpi, inst, svl, sil);
 			}
 
@@ -403,6 +412,7 @@ namespace pxd
 				g_drawIdxCount++; g_drawVertsTotal += static_cast<uint64_t>(ipi) * (inst ? inst : 1);
 				if (ModuleRenderActive()) MarkModuleRenderList(self); // this list records the module's scene
 				LogDrawTally();
+				if (SkipModuleDraw()) return;
 				g_origDrawIndexed(self, ipi, inst, sil, bvl, sivl);
 			}
 
@@ -454,7 +464,68 @@ namespace pxd
 			// GPU flush.
 			static std::mutex g_resStateMutex;
 			static bool g_inModuleRender = false;
-			void SetModuleRenderActive(bool active) { g_inModuleRender = active; }
+
+			// ---- DRAW ISOLATION -------------------------------------------------------------
+			//
+			// "Which of these 220 draws is the waterfall?" is the question every rendering bug
+			// starts with, and the answer normally comes from a graphics debugger's pixel history.
+			// When that is not available - PIX needs developer mode, experimental-feature support
+			// and a cooperative replay adapter, any of which can be missing - this answers it from
+			// inside the host instead, and it answers it on the machine that actually shows the bug.
+			//
+			// g_drawLimit is a CUTOFF, not a filter: draws with a per-frame index >= the limit are
+            // dropped. Sweeping it makes the scene assemble one draw at a time, so the value at
+			// which an artifact first appears IS the draw that produces it - a monotonic search,
+			// which is much easier to drive than skipping individual draws and much faster than
+			// stepping all of them (~8 tries over 220 by bisection).
+			//
+			// The index is per-frame and counts only draws recorded while the MODULE is rendering,
+			// so it lines up 1:1 with the DrawInstanced/DrawIndexedInstanced sequence in a PIX C++
+			// export of the same frame. That correspondence is the point: once the sweep names a
+			// draw, its bound textures and constants can be read straight out of the capture.
+			static std::atomic<uint32_t> g_drawLimit{ 0 };   // 0 = no limit
+			static uint32_t g_moduleDrawIndex = 0;           // reset each frame; module thread only
+
+			// SKIP-ONE, and for this renderer it is the mode that actually works.
+			//
+			// The cutoff above assumes the scene is visible as it is built. pre3's is not: it
+			// renders into offscreen targets and only becomes visible when its last two draws
+			// COMPOSITE them (the second-to-last one clears a render target and blits a quad into
+			// it). A cutoff therefore shows nothing at all until the composite and then everything
+			// at once, which says only "the composite is last" - true, and useless.
+			//
+			// Dropping exactly ONE draw leaves the composites intact, so the picture is the whole
+			// scene MINUS that draw: sweep it and whatever vanishes is what that draw renders.
+			// Slower to search than a cutoff (linear, not bisection) but it is the question worth
+			// asking of a deferred renderer.
+			inline constexpr uint32_t kNoSkip = 0xFFFFFFFFu;
+			static std::atomic<uint32_t> g_skipDraw{ kNoSkip };
+
+			void SetModuleDrawLimit(uint32_t limit) { g_drawLimit.store(limit, std::memory_order_relaxed); }
+			void SetModuleSkipDraw(uint32_t index) { g_skipDraw.store(index, std::memory_order_relaxed); }
+			uint32_t ModuleSkipDraw() { return g_skipDraw.load(std::memory_order_relaxed); }
+			uint32_t ModuleDrawLimit() { return g_drawLimit.load(std::memory_order_relaxed); }
+			uint32_t ModuleDrawsLastFrame() { return g_moduleDrawIndex; }
+
+			// True when this draw should be DROPPED. Also advances the per-frame index, so it must
+			// be called exactly once per module draw.
+			static bool SkipModuleDraw()
+			{
+				if (!g_inModuleRender) return false;   // not the module's; never touch it
+				const uint32_t index = g_moduleDrawIndex++;
+				const uint32_t limit = g_drawLimit.load(std::memory_order_relaxed);
+				if (limit != 0 && index >= limit) return true;
+				return index == g_skipDraw.load(std::memory_order_relaxed);
+			}
+
+			void SetModuleRenderActive(bool active)
+			{
+				// Reset on the LEADING edge: the host brackets the module's whole frame with this,
+				// so the index restarts once per frame and a swept limit means the same thing on
+				// every frame.
+				if (active && !g_inModuleRender) g_moduleDrawIndex = 0;
+				g_inModuleRender = active;
+			}
 			bool ModuleRenderActive() { return g_inModuleRender; }
 
 			// The swapchain backbuffers, registered from RenderWindow::CreateWrappedBackbuffers. Their
@@ -564,20 +635,41 @@ namespace pxd
 			// draws are dropped -> black. So collect EVERY StF list StF closes this frame, in close order,
 			// and submit them together in one call, flushing once.
 			static ID3D12GraphicsCommandList* g_moduleFlagged[64] = {}; // lists flagged StF since their last Reset
+			static bool g_moduleFlaggedHasDraw[64] = {};                // did this list record a DRAW this frame?
 			static int g_moduleFlaggedCount = 0;
+			// How often an upload-only list was flagged AFTER a draw list in the same frame - i.e.
+			// how often the old flagging-order submit would have run uploads too late. Reported so
+			// the reorder below can be shown to matter rather than assumed to.
+			static uint64_t g_uploadAfterDrawFrames = 0;
 			// Per-list allocator we own, so we can Reset (reopen) StF's lists each frame for it to re-record.
 			static std::unordered_map<ID3D12GraphicsCommandList*, ID3D12CommandAllocator*> g_listAlloc;
 			static ID3D12Fence* g_execFence = nullptr; static UINT64 g_execFv = 0; static HANDLE g_execEv = nullptr;
-			void MarkModuleRenderList(ID3D12GraphicsCommandList* l) // "this list is StF's" (from the PSO hook)
+			void MarkModuleRenderList(ID3D12GraphicsCommandList* l, bool fromDraw) // "this list is StF's"
 			{
 				if (!l) return;
-				for (int i = 0; i < g_moduleFlaggedCount; ++i) if (g_moduleFlagged[i] == l) return;
-				if (g_moduleFlaggedCount < 64) g_moduleFlagged[g_moduleFlaggedCount++] = l;
+				for (int i = 0; i < g_moduleFlaggedCount; ++i)
+				{
+					if (g_moduleFlagged[i] == l) { g_moduleFlaggedHasDraw[i] = g_moduleFlaggedHasDraw[i] || fromDraw; return; }
+				}
+				if (g_moduleFlaggedCount < 64)
+				{
+					// Was a draw list already flagged when this upload-only list arrived? That is the
+					// condition the reorder exists to correct.
+					if (!fromDraw)
+					{
+						for (int i = 0; i < g_moduleFlaggedCount; ++i)
+						{
+							if (g_moduleFlaggedHasDraw[i]) { g_uploadAfterDrawFrames++; break; }
+						}
+					}
+					g_moduleFlaggedHasDraw[g_moduleFlaggedCount] = fromDraw;
+					g_moduleFlagged[g_moduleFlaggedCount++] = l;
+				}
 				static int m = 0; if (m < 8) { DebugLogFile("[mark] %s list %p type=%d (flagged=%d)\n", gGeneral.GetGameTag(), static_cast<void*>(l), l->GetType(), g_moduleFlaggedCount); } m++;
 			}
 			static void UnflagModuleList(ID3D12GraphicsCommandList* l) // on Reset the recording is gone; re-earn it
 			{
-				for (int i = 0; i < g_moduleFlaggedCount; ++i) if (g_moduleFlagged[i] == l) { g_moduleFlagged[i] = g_moduleFlagged[--g_moduleFlaggedCount]; return; }
+				for (int i = 0; i < g_moduleFlaggedCount; ++i) if (g_moduleFlagged[i] == l) { g_moduleFlagged[i] = g_moduleFlagged[g_moduleFlaggedCount - 1]; g_moduleFlaggedHasDraw[i] = g_moduleFlaggedHasDraw[g_moduleFlaggedCount - 1]; --g_moduleFlaggedCount; return; }
 			}
 
 			// Frame-end submit (called from GameLoop after func()): ONE ExecuteCommandLists + ONE flush.
@@ -609,17 +701,42 @@ namespace pxd
 					{
 						shadowIdx = nn; gl[nn] = sc; lists[nn] = sc; ++nn;
 					}
-					for (int i = 0; i < g_moduleFlaggedCount && nn < 64; ++i)
+					// UPLOAD-ONLY LISTS BEFORE DRAW LISTS. Two passes over the same set, and the
+					// order is the whole point.
+					//
+					// The module records its texture uploads onto a command list that carries no
+					// draws, and its scene onto another. These used to be submitted in the order
+					// they were first touched that frame - so whenever the scene list was touched
+					// first, that frame's texture uploads executed AFTER the draws that sample
+					// them, and those draws read whatever the texture held beforehand.
+					//
+					// Invisible while a texture is unchanged, which is most of the time. Visible
+					// exactly when textures are being swapped: the stage background flickering
+					// through a round transition, and hit effects - which live one or two frames,
+					// so a one-frame-late upload is most of their life - coming out black or a flat
+					// colour. Both were reported; both are this.
+					//
+					// The principle is already established here for buffer copies (the shadow list
+					// goes first "so one-time uploads land before the draws that consume them").
+					// This extends it to the module's own upload lists, which cannot simply be
+					// replayed the same way because their copy sources are transient placed
+					// footprints in the upload ring rather than persistent mapped buffers.
+					for (int pass = 0; pass < 2; ++pass)
 					{
-						ID3D12GraphicsCommandList* l = g_moduleFlagged[i];
-						if (!l || l->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) continue;
-						const HRESULT hrc = g_origClose ? g_origClose(l) : l->Close(); // StF leaves them OPEN
-						if (FAILED(hrc))
+						const bool wantDraws = (pass == 1);
+						for (int i = 0; i < g_moduleFlaggedCount && nn < 64; ++i)
 						{
-							static int e = 0; if (e++ < 8) { DebugLogFile("[pathb] Close failed 0x%08X list=%p (skip)\n", static_cast<unsigned>(hrc), static_cast<void*>(l)); }
-							continue;
+							if (g_moduleFlaggedHasDraw[i] != wantDraws) continue;
+							ID3D12GraphicsCommandList* l = g_moduleFlagged[i];
+							if (!l || l->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) continue;
+							const HRESULT hrc = g_origClose ? g_origClose(l) : l->Close(); // StF leaves them OPEN
+							if (FAILED(hrc))
+							{
+								static int e = 0; if (e++ < 8) { DebugLogFile("[pathb] Close failed 0x%08X list=%p (skip)\n", static_cast<unsigned>(hrc), static_cast<void*>(l)); }
+								continue;
+							}
+							gl[nn] = l; lists[nn] = l; ++nn;
 						}
-						gl[nn] = l; lists[nn] = l; ++nn;
 					}
 					if (nn == 0) { g_moduleFlaggedCount = 0; return; }
 
@@ -629,6 +746,19 @@ namespace pxd
 					bool timedOut = false;
 					if (g_execFence) { g_yampQueue->Signal(g_execFence, ++g_execFv); if (g_execFence->GetCompletedValue() < g_execFv) { g_execFence->SetEventOnCompletion(g_execFv, g_execEv); timedOut = (WaitForSingleObject(g_execEv, 4000) == WAIT_TIMEOUT); } }
 					static int f = 0; if (f < 8) { DebugLogFile("[pathb] submitted %d %s list(s)%s\n", nn, gGeneral.GetGameTag(), timedOut ? " (FLUSH TIMEOUT - GPU HANG)" : ""); } f++;
+					// How many times an upload-only list turned up after a draw list was already
+					// flagged - i.e. how many frames the old order would have got wrong. A running
+					// total, reported sparsely, so one glance after a session says whether the
+					// reorder above is doing anything rather than leaving it assumed.
+					{
+						static uint64_t lastReported = 0;
+						if (g_uploadAfterDrawFrames >= lastReported + 64)
+						{
+							lastReported = g_uploadAfterDrawFrames;
+							DebugLogFile("[pathb] upload-before-draw reorder applied on %llu frames\n",
+								(unsigned long long)g_uploadAfterDrawFrames);
+						}
+					}
 
 					const HRESULT rr = s_device->GetDeviceRemovedReason();
 					if (timedOut || FAILED(rr))
@@ -879,7 +1009,9 @@ namespace pxd
 					// Flagging here puts it in the frame batch, which runs uploads before the draws
 					// that consume them. Measured no-op for the other games: MR is byte-identical and
 					// StF stays inside its run-to-run spread (3 samples per arm, -frames 2000).
-					MarkModuleRenderList(self);
+					// fromDraw = FALSE: this is an UPLOAD. The submit runs upload-only lists before
+					// draw lists so a texture reaches the GPU before the draw that samples it.
+					MarkModuleRenderList(self, false);
 				}
 				g_origCopyTextureRegion(self, dst, x, y, z, src, box);
 			}
@@ -1167,6 +1299,13 @@ bool ModuleExecDisabledNow() { return pxd::ModuleExecDisabled(); }
 // GameLoop brackets the DLL's per-frame render (func()) with this so the ResourceBarrier hook only
 // corrects StF's own barriers, not d3d11on12's blit barriers recorded outside func().
 void SetModuleRenderActiveNow(bool active) { pxd::SetModuleRenderActive(active); }
+// Draw isolation - see the note on g_drawLimit. Free functions like the rest of this file's
+// host-facing surface, so a host can drive it without pulling in the pxd namespace.
+void SetModuleDrawLimitNow(unsigned int limit) { pxd::SetModuleDrawLimit(limit); }
+unsigned int ModuleDrawsLastFrameNow() { return pxd::ModuleDrawsLastFrame(); }
+unsigned int ModuleDrawLimitNow() { return pxd::ModuleDrawLimit(); }
+void SetModuleSkipDrawNow(unsigned int index) { pxd::SetModuleSkipDraw(index); }
+unsigned int ModuleSkipDrawNow() { return pxd::ModuleSkipDraw(); }
 
 // RenderWindow registers the swapchain backbuffers so the ResourceBarrier hook dumps their transitions.
 void RegisterWatchResourceNow(ID3D12Resource* r) { pxd::RegisterWatchResource(r); }

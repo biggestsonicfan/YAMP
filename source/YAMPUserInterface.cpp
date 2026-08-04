@@ -11,6 +11,14 @@
 #include "pre3/HleHooks.h"
 #include "pre3/Determinism.h"
 
+// Draw isolation, defined in pxd/LJ/HostCdevice.cpp next to the D3D12 draw hooks it drives. Free
+// functions rather than a header, matching how the other host-facing entry points there are used.
+unsigned int ModuleDrawsLastFrameNow();
+void SetModuleDrawLimitNow(unsigned int limit);
+unsigned int ModuleDrawLimitNow();
+void SetModuleSkipDrawNow(unsigned int index);
+unsigned int ModuleSkipDrawNow();
+
 #include "net/NetPlugin.h"
 
 #include "imgui/imgui.h"
@@ -1459,6 +1467,70 @@ void YAMPUserInterface::DrawDebug()
 		ImGui::SetTooltip("Enables a debug D3D layer when supported by the system.");
 	}
 
+	// ---- Draw isolation ---------------------------------------------------------------------
+	//
+	// "Which of these 200 draws is the artifact?" answered without a graphics debugger. Every
+	// module draw whose per-frame index is >= the limit is dropped, so sweeping the slider
+	// assembles the scene one draw at a time and the value at which something first appears IS the
+	// draw that produces it.
+	//
+	// DELIBERATELY NOT PART OF THE APPLY FLOW. This writes straight through to the live settings
+	// rather than to a page copy, so dragging the slider changes the picture in real time - which
+	// is the entire point. Bisecting 200 draws through Apply-and-relaunch is eight rebuilds of
+	// your patience; bisecting it by dragging is about four seconds.
+	{
+		const unsigned int total = ModuleDrawsLastFrameNow();
+		if (total != 0)
+		{
+			// Straight to the hook layer, NOT through the settings object: the mutable settings
+			// accessor writes the ini file when its token goes out of scope, and a slider being
+			// dragged would rewrite it once per frame.
+			int limit = static_cast<int>(ModuleDrawLimitNow());
+			// Max is the live draw count, so the slider always spans exactly the draws that exist.
+			// It stays accurate while limiting, because the index advances for skipped draws too.
+			if (ImGui::SliderInt("Draw limit", &limit, 0, static_cast<int>(total),
+				limit == 0 ? "off (all %d draws)" : "%d"))
+			{
+				SetModuleDrawLimitNow(static_cast<unsigned int>(limit < 0 ? 0 : limit));
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"Draws only the first N of the module's draws this frame, live.\n\n"
+					"Sweep it to find which draw produces a rendering artifact: the value at which\n"
+					"the artifact first appears is the draw that makes it. 0 draws everything.\n\n"
+					"The index is the module's own draw order, which is also the draw order in a\n"
+					"PIX capture of the same frame - so the number is directly usable afterwards.\n\n"
+					"Not saved by Apply; it is a probe, not a preference.");
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("(%u draws this frame)", total);
+
+			// The mode that works on a DEFERRED renderer. pre3 composites its offscreen targets in
+			// its last two draws, so a cutoff shows nothing until the composite and then the whole
+			// scene at once. Dropping one draw keeps the composite and removes one thing from the
+			// picture, which is the question actually being asked.
+			const unsigned int NO_SKIP = 0xFFFFFFFFu;
+			const unsigned int skipNow = ModuleSkipDrawNow();
+			int skip = (skipNow == NO_SKIP) ? -1 : static_cast<int>(skipNow);
+			if (ImGui::SliderInt("Skip draw", &skip, -1, static_cast<int>(total) - 1,
+				skip < 0 ? "off" : "%d"))
+			{
+				SetModuleSkipDrawNow(skip < 0 ? NO_SKIP : static_cast<unsigned int>(skip));
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"Drops exactly ONE of the module's draws and renders everything else.\n\n"
+					"Use this rather than the limit above on this game: pre3 renders into offscreen\n"
+					"targets and only composites them in its last two draws, so a cutoff shows a\n"
+					"black screen until the composite and then the whole frame at once.\n\n"
+					"Sweep it and watch for something to VANISH - that draw is what renders it.");
+			}
+
+		}
+	}
+
 	// The DLL debug-menu windows and the emulated-RAM debug flag are reconstructed from
 	// StF-specific DLL data/addresses; the loose-ROM bypass is generic across the LJ m2ftg
 	// games (archive name and image list come from the GameDesc table).
@@ -2762,6 +2834,20 @@ void YAMPUserInterface::ApplySettings()
 	// StF's aspect ratio, CRT filter and button assignments are re-read by the game loop every
 	// frame, so they take effect immediately; only warn about a restart when a setting that is
 	// consumed once at startup actually changed.
+	// THE RULE: a setting belongs here only if nothing re-reads it while the game runs.
+	//
+	// Two were listed that do not qualify, and both told the player to restart for a change they
+	// could already hear or see:
+	//
+	//   m_volumePercent - every host writes it into execute_info from the settings struct on EVERY
+	//     frame of its game loop (the m2ftg/pre3 float at +0x1C, the VF5FS 0..20 byte). Moving the
+	//     slider and pressing Apply is audible immediately.
+	//   m_m2RealDamage  - not part of any config block; it is a byte of the ROM's live game
+	//     assignments that m2ftg::UpdateDamageAssignment writes once per EMULATED frame. The
+	//     comment on its combo box has said so all along.
+	//
+	// Everything left is read once, at module_start or window creation, and genuinely does need
+	// the game relaunching.
 	const bool needsRestart =
 		settings->m_resX != m_resolutions[m_currentResolutionIndex].width ||
 		settings->m_resY != m_resolutions[m_currentResolutionIndex].height ||
@@ -2771,14 +2857,12 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_arcadeMode != m_arcadeMode ||
 		settings->m_circleConfirm != m_circleConfirm ||
 		settings->m_language != m_language ||
-		settings->m_volumePercent != static_cast<uint32_t>(m_volumePercent) ||
 		settings->m_m2RenderMode != m_m2RenderMode ||
 		settings->m_m2WindowMatchesRender != m_m2WindowMatchesRender ||
 		settings->m_m2Difficulty != m_m2Difficulty ||
 		settings->m_m2Country != m_m2Country ||
 		settings->m_m2Freeplay != m_m2Freeplay ||
 		settings->m_m2VersusMode != m_m2VersusMode ||
-		settings->m_m2RealDamage != m_m2RealDamage ||
 		settings->m_vf2Version20 != m_vf2Version20 ||
 		settings->m_dontApplyPatches != m_dontApplyPatches ||
 		settings->m_useD3DDebugLayer != m_useD3DDebugLayer ||
