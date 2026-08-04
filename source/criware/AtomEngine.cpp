@@ -229,18 +229,36 @@ namespace cri::atom
 			{
 				if (!data || size < 16 || std::memcmp(data, "AFS2", 4) != 0)
 					return false;
+				// The two table field widths are declared in the header, they are NOT fixed:
+				// +5 = offset size, +6 = id size, each 2 or 4 bytes. Every m2ftg sheet is AFS2
+				// version 1 with 2-byte ids, so hardcoding that worked until pre3 — Like a Dragon
+				// Gaiden's Model 3 sheets are version 2 with **4-byte ids**. Reading those as 2
+				// bytes corrupts the id list AND starts the offset table count*2 bytes early, so
+				// every entry boundary is wrong: the correct waveform id then fetches a completely
+				// different sound. That is the whole "audio plays but the sounds are wrong" bug —
+				// the ACB side resolves perfectly (verified waveform 358 / MemoryAwbId 114 /
+				// 2ch 44100 for FV2's SEGA voice), and only the AWB slicing was off.
+				const uint8_t offSize = data[5];
+				const uint8_t idSize = data[6];
+				if ((offSize != 2 && offSize != 4) || (idSize != 2 && idSize != 4))
+					return false;
 				const uint32_t count = Le32(data + 8);
 				align = Le16(data + 12);
-				const size_t need = 0x10 + 2 * size_t(count) + 4 * (size_t(count) + 1);
+				const size_t need = 0x10 + size_t(idSize) * count
+					+ size_t(offSize) * (size_t(count) + 1);
 				if (align == 0 || count > 0xFFFF || size < need)
 					return false;
 				ids.resize(count);
 				offsets.resize(count + 1);
+				auto field = [](const uint8_t* p, uint8_t width)
+				{
+					return width == 2 ? uint32_t(Le16(p)) : Le32(p);
+				};
 				for (uint32_t i = 0; i < count; ++i)
-					ids[i] = Le16(data + 0x10 + 2 * i);
-				const size_t offTbl = 0x10 + 2 * size_t(count);
+					ids[i] = uint16_t(field(data + 0x10 + size_t(idSize) * i, idSize));
+				const size_t offTbl = 0x10 + size_t(idSize) * count;
 				for (uint32_t i = 0; i <= count; ++i)
-					offsets[i] = Le32(data + offTbl + 4 * i);
+					offsets[i] = field(data + offTbl + size_t(offSize) * i, offSize);
 				return true;
 			}
 
