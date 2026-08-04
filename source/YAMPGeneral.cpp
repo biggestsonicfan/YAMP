@@ -1,4 +1,4 @@
-#include "YAMPGeneral.h"
+﻿#include "YAMPGeneral.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -59,7 +59,13 @@ bool YAMPGeneral::IsModel2ArcadeGame() const
 	case GameId::MR:
 	case GameId::VF2:
 	case GameId::VF2_K2:
-	case GameId::VON_K2: return true;
+	case GameId::VON_K2:
+	// The Model 3 games too. The name says Model 2 but the test is really "a low-resolution
+	// arcade board", which is what the CRT filter and the 4:3 presentation are for - the
+	// exclusion it exists to make is the VF5FS builds (modern widescreen 3D). FV2 renders at
+	// 496x384 like the rest, so leaving it out only meant its CRT setting silently did nothing.
+	case GameId::FV2:
+	case GameId::SRC2: return true;
 	default: return false;
 	}
 }

@@ -510,6 +510,15 @@ void YAMPUserInterface::DrawGamePre3()
 		}
 	}
 
+	if (ImGui::Checkbox("CRT filter", &m_m2CrtFilter))
+	{
+		m_pageModified = true;
+	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Lost Judgment's own CRT effect (scanlines + aperture grille).\nApplies immediately.");
+	}
+
 	ImGui::NewLine();
 	ImGui::Separator();
 	ImGui::TextUnformatted("ARCADE DIP SWITCHES:");
