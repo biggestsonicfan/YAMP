@@ -19,6 +19,7 @@
 //     late packets from the round that just ended cannot poison the new one.
 
 #include <stdint.h>
+#include <stddef.h>   // offsetof, for kLinkHeaderBytes
 
 namespace yampnet
 {
@@ -110,12 +111,117 @@ namespace yampnet
     // a bigger one needs this raised on BOTH peers, which is what the ABI version is for.
     inline constexpr uint32_t kLinkPayloadMax = 0x700;
 
+    // Copies of each link datagram put on the wire. THREE, for the same reason the lockstep path
+    // re-carries ten frames of input: the payload's protocol has single-frame states that a lossy
+    // wire will otherwise eat. See the note in ApiLinkSend - this is not belt-and-braces, it is a
+    // measured fix for a stage desync that a one-shot send reproduces.
+    inline constexpr uint32_t kLinkRedundancy = 3;
+
+    // How `payload` is encoded. Self-describing on the wire rather than implied by a version,
+    // because the encoder falls back to raw whenever coding would EXPAND the packet - which it can,
+    // for an incompressible payload - so both forms occur in a healthy session.
+    enum LinkFormat : uint32_t
+    {
+        kLinkRaw = 0,
+        kLinkRle = 1,
+    };
+
     struct LinkPacket
     {
         PacketHeader header;
-        uint32_t len;                        // bytes of `payload` that are live
+        uint32_t format;                     // LinkFormat
+        uint32_t raw_len;                    // size after decoding
+        uint32_t len;                        // bytes of `payload` actually on the wire
         uint8_t payload[kLinkPayloadMax];
     };
+
+    // Everything before `payload`. From offsetof rather than a hand-added sum, so it cannot drift
+    // from the struct - and it is the one number both the sender's length and the receiver's
+    // bounds check are computed from.
+    inline constexpr uint32_t kLinkHeaderBytes =
+        static_cast<uint32_t>(offsetof(LinkPacket, payload));
+
+    // ---- Link payload compression -------------------------------------------------------------
+    //
+    // WHY THIS EXISTS. Virtual On's link payload is 0x700 bytes, which with a header is ~1804 on
+    // the wire against a 1500-byte path MTU: every datagram IP-fragments, and on the open internet
+    // a lost fragment loses the whole datagram. Measured on a live two-machine match, the payload
+    // is ~1600/1792 zero bytes and RLE-codes to 326 bytes on average, 333 at its densest. So a
+    // byte-wise RLE takes it under the MTU with room to spare and cuts the rate from ~200 KB/s to
+    // ~20 KB/s each way.
+    //
+    // STATELESS, deliberately, and that is the whole reason it is RLE and not a delta. Only ~5
+    // bytes change per frame, so delta-coding would win more - but a delta is meaningless unless
+    // the receiver holds the exact baseline it was coded against, which needs acknowledgement and
+    // retransmission. That would destroy the property the entire design rests on: every packet is
+    // a complete snapshot, so loss, duplication and reordering are all free and newest-wins ingest
+    // is correct. A compressed packet still stands alone.
+    //
+    // Format: one control byte, then data.
+    //   C <  0x80 : (C + 1) literal bytes follow          (1..128)
+    //   C >= 0x80 : (C - 0x80 + 3) copies of the next byte (3..130)
+    //
+    // Returns the encoded length, or 0 if encoding would not be smaller than the input (the caller
+    // then sends it raw). Never writes more than `cap` bytes.
+    inline uint32_t RleEncode(const uint8_t* src, uint32_t len, uint8_t* dst, uint32_t cap)
+    {
+        uint32_t o = 0, i = 0;
+        while (i < len)
+        {
+            uint32_t run = 1;
+            while (i + run < len && src[i + run] == src[i] && run < 130) ++run;
+            if (run >= 3)
+            {
+                if (o + 2 > cap || o + 2 >= len) return 0;
+                dst[o++] = static_cast<uint8_t>(0x80 + (run - 3));
+                dst[o++] = src[i];
+                i += run;
+                continue;
+            }
+            // Literals, up to 128, stopping early where a codeable run begins.
+            uint32_t lit = 0;
+            while (i + lit < len && lit < 128)
+            {
+                uint32_t ahead = 1;
+                while (i + lit + ahead < len && src[i + lit + ahead] == src[i + lit] && ahead < 3)
+                    ++ahead;
+                if (ahead >= 3) break;
+                ++lit;
+            }
+            if (lit == 0) lit = 1;
+            if (o + 1 + lit > cap || o + 1 + lit >= len) return 0;
+            dst[o++] = static_cast<uint8_t>(lit - 1);
+            for (uint32_t k = 0; k < lit; ++k) dst[o++] = src[i + k];
+            i += lit;
+        }
+        return o;
+    }
+
+    // Returns bytes written, or 0 if the input is malformed or would overrun `cap`. Every bound is
+    // checked: this decodes data straight off the wire into a buffer the emulated hardware reads.
+    inline uint32_t RleDecode(const uint8_t* src, uint32_t len, uint8_t* dst, uint32_t cap)
+    {
+        uint32_t o = 0, i = 0;
+        while (i < len)
+        {
+            const uint8_t c = src[i++];
+            if (c >= 0x80)
+            {
+                const uint32_t run = static_cast<uint32_t>(c - 0x80) + 3;
+                if (i >= len || o + run > cap) return 0;
+                const uint8_t v = src[i++];
+                for (uint32_t k = 0; k < run; ++k) dst[o++] = v;
+            }
+            else
+            {
+                const uint32_t lit = static_cast<uint32_t>(c) + 1;
+                if (i + lit > len || o + lit > cap) return 0;
+                for (uint32_t k = 0; k < lit; ++k) dst[o++] = src[i + k];
+                i += lit;
+            }
+        }
+        return o;
+    }
 
     // The round announcement doubles as seed distribution: the host's announce carries the
     // authoritative match seed and the guest adopts it. Both peers must re-seed the emulator's

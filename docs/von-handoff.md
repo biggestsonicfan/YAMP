@@ -30,7 +30,7 @@ rather than by guessing:
 - **The "+2 sequence number" is not a sequence number.** The receiver's test is
   `packet[+0x556] == packet[+2] ^ 0xAE5E` and both operands come out of the same datagram — a
   self-consistency stamp, not an ordering contract. Loss, duplication and reordering are all legal;
-  newest-wins is correct. (0x502236 is loaded once and stored never across the whole image.)
+  a gap is detectable rather than fatal. (0x502236 is loaded once and stored never across the whole image.) That does NOT mean packets may be skipped - see the stage handshake below.
 - **There is no second cRecn slot to fill.** The ROM writes slot 0 unconditionally and never writes
   slot 1 anywhere. cSend/cRecn are entirely the ROM's own staging — YAMP's whole job is the 0x700
   comm-RAM window between them.
@@ -120,9 +120,16 @@ which screen, and whether the log's last `[von]` line shows the peer's state.
 2. **Play the match out.** The pair enters `Game_01` together; nobody has played through a round,
    checked that both pods see the right inputs, or watched a round end. Freeplay ON on both (the
    coin line is dead during netplay).
-3. **Latency.** Loopback has none. The ROM expects a partner one frame away on a serial ring. Find
-   out what LAN RTT looks like before worrying about the internet.
-4. ~~**Room join.**~~ DONE - the room assigns MASTER/SLAVE and calls `SoftResetIntoRole` itself.
+3. **THE STAGE HANDSHAKE NEEDS EVERY PACKET, IN ORDER.** `WaitChallenger` (i960 0x196C0) makes a
+   ONE-SHOT decision on the peer's state byte and advances `SubMode` in every branch but the
+   `0x21` wait; the roller publishes `0x24` for a single board frame. Miss it and the adopter takes
+   the `0x20` branch, keeps its own stage, and the cabinets diverge with everything else looking
+   healthy. Hence the ordered receive queue and the one-take-per-board-frame rule. Assume any
+   linked-cabinet game does the same until its state machine has been read.
+4. ~~**Latency.**~~ Payload now RLE-codes to ~120 B a datagram (max 347) from 1792, so nothing
+   fragments and traffic is ~10x lower. Sent 3x (`kLinkRedundancy`). Untested against real internet
+   RTT and jitter; the LAN numbers say nothing about that.
+5. ~~**Room join.**~~ DONE - the room assigns MASTER/SLAVE and calls `SoftResetIntoRole` itself.
 
 ## The harness
 

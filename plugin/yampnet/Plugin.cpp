@@ -129,17 +129,70 @@ struct yampnet_session
 
     // ---- Linked-cabinet channel (kPacketLink) --------------------------------------------
     //
-    // ONE slot, newest wins, and that is the correct policy rather than a simplification: the
-    // payload is a complete snapshot of the peer cabinet every frame, so an older datagram says
-    // nothing a newer one does not, and queueing them would feed the emulated hardware stale
-    // state one frame at a time. Deliberately independent of round state, generation and the
-    // input rings - two cabinets link during their boot-time network check and stay linked
-    // between matches, which is long before and long after any round exists.
-    uint8_t link_in[yampnet::kLinkPayloadMax] = {};
-    uint32_t link_in_len = 0;
-    bool link_have = false;
+    // A SHORT QUEUE, drained in order - NOT a newest-wins slot, and that distinction cost two
+    // two-machine debugging sessions.
+    //
+    // The obvious reading is that newest-wins must be right: the payload is a complete snapshot of
+    // the peer cabinet, so an older datagram says nothing a newer one does not. That is true of the
+    // STATE the packet carries and false of the EVENTS the ROM signals through it. Several of the
+    // link protocol's handshake states last exactly ONE board frame - 0x24, "I rolled the stage,
+    // it is at +8", among them - and the peer emits one packet per ITS board frame while we consume
+    // one per OURS. Any jitter that lands two of its packets between two of our reads made the
+    // older one vanish, and if that was the 0x24 the two cabinets loaded different stages while
+    // every other symptom looked healthy.
+    //
+    // So they queue, and `link_take` pops the OLDEST. Bounded because a peer that is persistently
+    // faster must not grow this without limit; overflow drops the oldest, which is the same
+    // failure as before but only under sustained rate mismatch rather than incidental jitter.
+    //
+    // Deliberately independent of round state, generation and the input rings - two cabinets link
+    // during their boot-time network check and stay linked between matches.
+    static constexpr uint32_t kLinkQueue = 8;
+    uint8_t link_q[kLinkQueue][yampnet::kLinkPayloadMax] = {};
+    uint32_t link_q_len[kLinkQueue] = {};
+    uint32_t link_q_head = 0;    // next to pop
+    uint32_t link_q_count = 0;
+    uint32_t link_drops = 0;     // queue overflows, for the log
+
+    // Most recently ENQUEUED payload, so the kLinkRedundancy copies of one packet collapse to one
+    // entry. Comparing the bytes rather than the ROM's +2 counter because that counter is zero on
+    // every packet until the cabinet's link check completes, and those must dedupe too.
+    uint8_t link_last[yampnet::kLinkPayloadMax] = {};
+    uint32_t link_last_len = 0;
+
+    bool LinkPush(const uint8_t* data, uint32_t len)
+    {
+        if (len == link_last_len && memcmp(data, link_last, len) == 0)
+            return false;                       // a redundancy copy of one we already hold
+        memcpy(link_last, data, len);
+        link_last_len = len;
+        if (link_q_count == kLinkQueue)
+        {
+            link_q_head = (link_q_head + 1) % kLinkQueue;   // drop the oldest
+            --link_q_count;
+            ++link_drops;
+        }
+        const uint32_t slot = (link_q_head + link_q_count) % kLinkQueue;
+        memcpy(link_q[slot], data, len);
+        link_q_len[slot] = len;
+        ++link_q_count;
+        return true;
+    }
+
+    uint32_t LinkPop(uint8_t* out, uint32_t cap)
+    {
+        if (link_q_count == 0) return 0;
+        const uint32_t len = link_q_len[link_q_head];
+        if (len == 0 || len > cap) { link_q_head = (link_q_head + 1) % kLinkQueue; --link_q_count; return 0; }
+        memcpy(out, link_q[link_q_head], len);
+        link_q_head = (link_q_head + 1) % kLinkQueue;
+        --link_q_count;
+        return len;
+    }
     uint32_t link_rx = 0;    // counters, for the log only
     uint32_t link_tx = 0;
+    uint64_t link_tx_bytes = 0;
+    uint32_t link_tx_max = 0;
 
     void Log(yampnet_log_level level, const char* fmt, ...)
     {
@@ -356,21 +409,33 @@ namespace
                 if (!s->IsHost() && hdr->player == 0)
                     s->match_seed = ann->seed;
             }
-            else if (hdr->type == kPacketLink
-                     && got >= static_cast<int>(sizeof(PacketHeader) + sizeof(uint32_t)))
+            else if (hdr->type == kPacketLink && got >= static_cast<int>(kLinkHeaderBytes))
             {
                 // Opaque cargo. Newest wins, no ordering, no round, no generation check - see
-                // kPacketLink. The only validation is that the declared length fits, because
-                // everything past this point is a memcpy into emulated hardware.
+                // kPacketLink. Everything past this point is a memcpy into emulated hardware, so
+                // every declared length is checked against what actually arrived, and the decoder
+                // bounds-checks besides.
                 const auto* link = reinterpret_cast<const LinkPacket*>(buf);
                 const uint32_t len = link->len;
-                if (len != 0 && len <= kLinkPayloadMax
-                    && got >= static_cast<int>(sizeof(PacketHeader) + sizeof(uint32_t) + len))
+                const uint32_t raw = link->raw_len;
+                if (len != 0 && len <= kLinkPayloadMax && raw != 0 && raw <= kLinkPayloadMax
+                    && got >= static_cast<int>(kLinkHeaderBytes + len))
                 {
-                    memcpy(s->link_in, link->payload, len);
-                    s->link_in_len = len;
-                    s->link_have = true;
-                    ++s->link_rx;
+                    uint8_t decoded[kLinkPayloadMax];
+                    uint32_t out = 0;
+                    if (link->format == kLinkRle)
+                        out = RleDecode(link->payload, len, decoded, kLinkPayloadMax);
+                    else if (link->format == kLinkRaw && len == raw)
+                        { memcpy(decoded, link->payload, len); out = len; }
+
+                    // A payload that does not decode to the size its sender declared is a build
+                    // mismatch or a corrupt datagram; drop it rather than hand the hardware a
+                    // short buffer with stale bytes behind it.
+                    if (out == raw)
+                    {
+                        if (s->LinkPush(decoded, out))
+                            ++s->link_rx;
+                    }
                 }
             }
             else if (hdr->type == kPacketSeed && got >= static_cast<int>(sizeof(AnnouncePacket)))
@@ -820,13 +885,68 @@ namespace
         pkt.header.player = static_cast<uint8_t>(s->local_player < 0 ? 0 : s->local_player);
         pkt.header.generation = static_cast<uint8_t>(s->generation & 0x1F);
         pkt.header.session = s->SessionId();
-        pkt.len = len;
-        memcpy(pkt.payload, data, len);
-        // Only the live bytes go on the wire - the payload array is a maximum, not a size.
-        const uint32_t bytes = sizeof(PacketHeader) + sizeof(uint32_t) + len;
-        if (!s->transport.Send(0, &pkt, bytes))
-            return 0;
+        pkt.raw_len = len;
+
+        // Compress, and fall back to raw when coding would not be smaller - which RleEncode
+        // reports by returning 0 rather than by producing something bigger. Measured on a live
+        // match this takes 1792 bytes to ~326, which is what keeps the datagram under the path
+        // MTU and stops it fragmenting. See the note on RleEncode.
+        const uint32_t coded = RleEncode(static_cast<const uint8_t*>(data), len,
+                                         pkt.payload, kLinkPayloadMax);
+        if (coded != 0)
+        {
+            pkt.format = kLinkRle;
+            pkt.len = coded;
+        }
+        else
+        {
+            pkt.format = kLinkRaw;
+            pkt.len = len;
+            memcpy(pkt.payload, data, len);
+        }
+
+        // REDUNDANCY: the same datagram, kLinkRedundancy times.
+        //
+        // The ROM's link protocol was designed for a serial ring that does not drop anything, and
+        // it leans on that: several of its handshake states last exactly ONE board frame. State
+        // 0x24 - "I have rolled the stage, here it is at +8" - is one of them, and losing that
+        // single datagram makes the two cabinets load different stages while everything else about
+        // the link looks perfectly healthy.
+        //
+        // This used to be covered by accident. The exchange ran two or three times per board frame
+        // and re-sent the same packet each time, so a lost datagram was almost always repaired.
+        // Rate-limiting the send to once per board frame (which is what made the bandwidth figures
+        // respectable) removed that cover and the stage desync came straight back - measured, on
+        // the joiner: `stage rx=0006` present, `rx=24` never seen, `sel` never adopted.
+        //
+        // So make it deliberate, exactly as the lockstep path does with kRedundancy. It is cheap
+        // now in a way it was not before: at ~100 bytes a packet, three copies still cost an order
+        // of magnitude less than the single uncompressed 1804-byte datagram did. Duplicates are
+        // free to the receiver - newest-wins ingest is idempotent.
+        const uint32_t bytes = kLinkHeaderBytes + pkt.len;
+        for (uint32_t i = 0; i < kLinkRedundancy; ++i)
+        {
+            if (!s->transport.Send(0, &pkt, bytes))
+                return i == 0 ? 0 : static_cast<int32_t>(len);
+        }
         ++s->link_tx;
+
+        // Report what the datagram actually cost, because "it compresses well" is a claim about a
+        // measurement and this is the measurement. The number that matters is the MAX: it is what
+        // decides whether anything fragments, and one packet over the MTU is enough to reintroduce
+        // the failure this exists to remove.
+        s->link_tx_bytes += bytes;
+        if (bytes > s->link_tx_max) s->link_tx_max = bytes;
+        if ((s->link_tx % 600) == 0)
+        {
+            // Per DATAGRAM, with the redundancy factor stated separately - folding the copies
+            // into the average produced an "avg 353 B, max 202 B" line, which is not a thing.
+            s->Log(YAMPNET_LOG_INFO,
+                   "link: %u frames sent, datagram avg %llu B max %u B (x%u copies = %llu B/frame)"
+                   " from %u raw",
+                   s->link_tx, s->link_tx_bytes / s->link_tx, s->link_tx_max, kLinkRedundancy,
+                   (s->link_tx_bytes / s->link_tx) * kLinkRedundancy, len);
+        }
         return static_cast<int32_t>(len);
     }
 
@@ -838,12 +958,9 @@ namespace
         if (!s || !out || cap == 0)
             return 0;
         DrainSocket(s);
-        if (!s->link_have || s->link_in_len == 0 || s->link_in_len > cap)
-            return 0;
-        const uint32_t len = s->link_in_len;
-        memcpy(out, s->link_in, len);
-        s->link_have = false;
-        return static_cast<int32_t>(len);
+        // OLDEST first - see the queue's note. Handing back the newest would skip the very
+        // transitions the ROM's protocol signals in a single frame.
+        return static_cast<int32_t>(s->LinkPop(static_cast<uint8_t*>(out), cap));
     }
 
     // "Is there a peer to link with right now?" - the one question the cabinet's firmware model

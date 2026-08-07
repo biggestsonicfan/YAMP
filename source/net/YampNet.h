@@ -54,7 +54,16 @@ extern "C" {
 // but touching none of it. Appended to the end of the table and adding no struct, so the bump is
 // only about the three new entries existing - but that is exactly what a stale plugin would not
 // have, and calling through a null tail pointer is not a failure mode worth allowing.
-#define YAMPNET_ABI_VERSION 9u
+// ABI 10 changes no function signature: it changes the linked-cabinet channel's WIRE format,
+// which now carries an RLE-coded payload (the raw 0x700 fragmented against a 1500-byte MTU). The
+// function table is untouched, so this bump exists purely to stop a YAMP.exe and a yampnet.dll
+// from different builds pairing up - they would agree on every call and disagree on the bytes.
+//
+// NOTE what a version cannot do here: it guards YAMP.exe against ITS plugin, not one machine
+// against another. Two peers on different builds still have to be updated together. That is
+// survivable rather than silent - a mismatched packet decodes to the wrong length, is dropped,
+// and the link simply never comes up.
+#define YAMPNET_ABI_VERSION 10u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.

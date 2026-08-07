@@ -1481,6 +1481,12 @@ namespace m2ftg
 		static uint8_t s_peerPacket[OmgRva::COMM_PAYLOAD];
 		static bool s_peerHave = false;
 
+		// Counts datagrams actually put on the wire, so the send-rate change is measurable rather
+		// than asserted. Reset per host frame by LogLinkState.
+		static uint32_t s_linkSends = 0;
+		static bool s_sentThisHostFrame = false;
+		static void LinkSendMark() { ++s_linkSends; s_sentThisHostFrame = true; }
+
 		// The SEND half: our CommSend onto the wire. Runs before module_main, which is where the
 		// bank it reads comes from - MEASURED, not assumed. Both banks of CommSend hold a valid
 		// stamped packet at any time, and the one matching the counter the ROM stamped into cSend
@@ -1518,9 +1524,45 @@ namespace m2ftg
 			{
 				return;
 			}
+			const uint8_t* const outgoing = block + 0x2000 + front;
+
+			// ONE PACKET OUT AND ONE PACKET IN PER BOARD FRAME, NOT PER module_main CALL.
+			//
+			// `StepOneBoardFrame` calls this before every call it makes, which is one to three per
+			// board frame in the steady state and up to sixteen during boot - so the same packet
+			// went out two or three times over. The ROM stamps a fresh counter at +2 exactly once
+			// per board frame (i960 0x14F8), which makes "is this a packet the peer has not seen"
+			// free to answer and needs no state of our own beyond the last value sent.
+			//
+			// The heartbeat is NOT optional. Before `net_flag` goes up the ROM stamps nothing, so
+			// the counter is frozen at zero and a pure change-detector would transmit nothing at
+			// all - and it is exactly that traffic which brings the peer's ring up in the first
+			// place. So: act on a new stamp, or once per host frame when there is no stamp yet.
+			//
+			// THE TAKE IS RATE-LIMITED FOR A SHARPER REASON THAN THE SEND. The plugin queues
+			// received packets in order so no one-frame state is discarded on the way in - but
+			// `DeliverCommPayload` lays down whatever `s_peerPacket` holds, and the ROM reads the
+			// comm window ONCE per board frame. Taking a packet per module_main call therefore
+			// overwrote s_peerPacket two or three times between reads and showed the ROM only the
+			// last of them, which is the same discard the queue exists to prevent, just moved
+			// downstream. Measured: with the queue in and the take unthrottled, the peer's 0x24
+			// still never reached the ROM and the cabinets still loaded different stages.
+			//
+			// One in, one out, per board frame - matching the rate the peer produces them.
+			uint16_t seq = 0;
+			memcpy(&seq, outgoing + OmgRva::PKT_SEQ, sizeof(seq));
+			static uint16_t s_lastSentSeq = 0;
+			const bool stampIsNew = (seq != s_lastSentSeq);
+			if (!stampIsNew && s_sentThisHostFrame)
+			{
+				return;
+			}
+			s_lastSentSeq = seq;
+			LinkSendMark();
+
 			// Nothing arrived: keep the packet we already have. Delivery is DeliverCommPayload's
 			// job, and it happens after the module's transfer rather than here - see there.
-			net::LinkSend(block + 0x2000 + front, OmgRva::COMM_PAYLOAD);
+			net::LinkSend(outgoing, OmgRva::COMM_PAYLOAD);
 			if (net::LinkTake(s_peerPacket, OmgRva::COMM_PAYLOAD) != OmgRva::COMM_PAYLOAD)
 			{
 				return;
@@ -1696,6 +1738,9 @@ namespace m2ftg
 		// dozen lines and the transition that matters is never lost between samples.
 		static void LogLinkState(int frame)
 		{
+			// The no-stamp heartbeat is once per HOST frame; this is where that frame turns over.
+			s_sentThisHostFrame = false;
+
 			// Age the peer timeout - see s_rpcnSinceRecv. HOST frames, because a host frame is one
 			// to sixteen module_main calls and a timeout counted down there would be of unknown,
 			// machine-dependent length.

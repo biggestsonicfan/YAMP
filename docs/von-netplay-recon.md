@@ -37,7 +37,7 @@ historical failures were invisible single-machine anyway.
 **A raw datagram channel on the existing P2P socket — `kPacketLink` (ABI 9).** It carries the ROM's
 0x700 comm-RAM window verbatim and touches nothing else: not the input rings, not the barrier, not
 the state-check machinery. Three entry points (`link_ready` / `link_send` / `link_take`), one
-newest-wins inbound slot, and no round, generation or frame numbering anywhere near it.
+receive QUEUE drained in order (see the stage handshake below - a newest-wins slot loses one-frame protocol events), and no round, generation or frame numbering anywhere near it.
 
 Three details that are not incidental:
 
@@ -150,34 +150,75 @@ disadvantaged there but the player who chose the settings.
 Safe here for exactly the reason it was unsafe under lockstep: there is no frame numbering to
 violate and no peer to stay bit-identical with.
 
-### THE NEXT PROBLEM: the payload fragments
+### INTERNET READINESS: the payload compresses, and losing a single datagram is a protocol failure
 
-`LinkPacket` is 1808 bytes on the wire against a 1500-byte path MTU, so every link datagram is IP-
-fragmented, and the exchange runs once per `module_main` call (~2 per frame) — roughly 200 KB/s
-each way. A LAN carries that without complaint, which is what the run above proves and all it
-proves. Fragmented UDP is dropped far more readily on the open internet, and a lost fragment loses
-the whole datagram. Two obvious levers before internet play is worth attempting: send only when
-the ROM has stamped a NEW packet (the `+2` counter makes that free to detect, and it roughly halves
-the rate), and delta-code the payload against the last one acknowledged.
+**The problem.** 0x700 bytes plus a header is ~1804 on the wire against a 1500-byte path MTU, so
+every link datagram IP-fragmented, and the exchange ran two or three times per board frame - about
+200 KB/s each way. Fragmented UDP is dropped far more readily on the open internet, and a lost
+fragment loses the whole datagram.
 
-## *** THE LINK CARRIES DATA. BOTH CABINETS LINK AND ACCEPT THE PEER'S PACKETS (2026-08-06) ***
+**Measured first, on a live two-machine match** (`[vonpay]`, behind the link-log setting):
 
-Two YAMP instances on one machine, loopback, 1200 frames each. VERIFIED IN `yampnet.log` on BOTH
-sides - not inferred from transport counters and not read off a screen:
+| | attract | in match |
+|---|---|---|
+| zero bytes | 1772 / 1792 | ~1600 / 1792 |
+| bytes changed per frame | 7 (max 18) | 5 (max 147) |
+| RLE size | ~50 | ~326 avg, 333 max |
 
-```
-f=240  link check has NOT completed | net=0 id=1 node=0/0 rx=FE | wire tx=320 rx=4
-f=261  checked - no packet accepted  | net=1 id=1 node=1/2 rx=FF | ... send1=155D/BB03*
-f=268  LINKED - accepting the peer's packets | net=1 id=1 node=1/2 rx=00 seq tx=6A80 rx=155D
-       | data0=155D/BB03* data1=155D/BB03* stage=155D/BB03*
-f=1080 LINKED ... rx=10 seq tx=F440 rx=9060 | wire tx=2000 rx=843 stamped=812
-```
+**So: stateless byte-RLE, not delta.** Only ~5 bytes change per frame, so a delta would win more -
+and it would need an acknowledged baseline, which destroys the property the whole architecture
+rests on: every packet is a complete snapshot, so loss, duplication and reordering are free. A
+compressed packet still stands alone. Encoder falls back to raw when coding would expand, which is
+why the format is a field on the wire rather than implied by the ABI version.
 
-`net=1` is "Network Check Success" - the ROM's own step 12. `rx=` is `cRecn+4`, which the ROM only
-ever writes by memcpy'ing a **validated** peer packet over it, so `rx=00`/`rx=10` (rather than 0xFE
-or 0xFF) is the ROM saying it accepted what came off the wire. `seq rx=` tracks the peer's `seq tx=`.
-Sustained from frame 268 to the end of the run on both cabinets.
+Measured after: **datagram avg ~120 B, max 241 B** - under the MTU with room to spare, nothing
+fragments, and roughly an order of magnitude less traffic.
 
+### THE STAGE HANDSHAKE NEEDS EVERY PACKET, IN ORDER — and why "newest-wins is fine" was wrong
+
+This took three wrong fixes before the ROM was read properly, so the mechanism is written out in full.
+
+**`WaitChallenger` (i960 0x196C0) is not a poll that waits for 0x24.** It reads the peer's state
+byte once per board frame and makes a ONE-SHOT decision, advancing `SubMode` in every branch but
+one:
+
+| peer state at `cRecn+4` | branch | what it does |
+|---|---|---|
+| `0x21` `SelectV` | 0x196D0 | **the only looping branch** — keep waiting |
+| `0x24` | 0x19744 | VersusMode=1, adopt `cRecn+8` → **the stage**, `SubMode++` |
+| `0x20` | 0x197A0 | VersusMode=1, adopt `cRecn+0xC` only — **no stage** — `SubMode++` |
+| anything else | 0x197EC | VersusMode=0, publish **my own** stage from `0x503A80`, `SubMode++` |
+
+And the roller publishes `0x24` for exactly ONE board frame: `InitWaitChallenger` (0x19660)
+replaces it with `0x20` on the very next entry.
+
+**So the adopter's first non-`0x21` observation decides the stage, permanently.** Skip the single
+`0x24` frame and it falls into the `0x20` branch, keeps its own `0x503A84`, and the two cabinets
+load different stages while `net=1`, the ring, the sequence stamps and every other symptom stay
+perfectly healthy. Measured on the failing runs: joiner `sel=3`, host `sel=0` with `stage rx=0003`
+sitting unread in its receive buffer — the data had arrived, in a LATER packet, because the peer
+keeps `+8` populated after `+4` has moved on.
+
+**Hence: every packet, in order, one per board frame.** Not an optimisation - a correctness
+requirement, and the thing three plausible-looking transport fixes each failed to provide:
+
+- the plugin queues received payloads (8 deep) and `link_take` pops the OLDEST, deduplicating the
+  redundancy copies by content;
+- `ExchangeCommPayload` takes exactly ONE per board frame, gated on the ROM's own `+2` stamp, so it
+  matches the rate the peer produces them. Taking one per `module_main` call instead overwrote the
+  resident packet two or three times between the ROM's reads and showed it only the last — the same
+  discard, moved downstream, and it still desynced.
+
+> **"The payload is a complete snapshot, so newest-wins ingest is correct" is HALF TRUE, and the
+> false half is what cost three attempts.** It holds for the STATE a packet carries and fails for
+> the EVENTS a protocol signals through that state. Virtual On's link signals several of its
+> handshake steps as one-frame values in the state byte, and a lossy or coalescing transport eats
+> them. Any linked-cabinet game — Motor Raid next — should be assumed to do the same until its
+> state machine has been read.
+
+The `+0x556` check really is packet-internal and imposes no ordering, which is what makes gaps
+*detectable* rather than fatal; that finding stands. What does not stand is the inference drawn
+from it, that gaps are therefore harmless.
 ### The packet, decoded - and the "sequence number" is NOT one
 
 This was the standing blocker, recorded as "the packet has a running sequence and we violate it".
