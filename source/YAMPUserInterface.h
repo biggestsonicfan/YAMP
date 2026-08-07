@@ -81,6 +81,14 @@ private:
 	size_t m_currentRefRateIndex = 0;
 	bool m_currentFullscreen = false;
 	bool m_enableFpsCap = true;
+	// Netplay mode for the NEXT launch; see YAMPSettings::m_netEnabled.
+	bool m_netEnabled = false;
+	// Which cabinet of the linked pair this machine is; see YAMPSettings::m_vonCabinetRole.
+	uint32_t m_vonCabinetRole = 0;
+	// See YAMPSettings::m_vonLinkLog.
+	bool m_vonLinkLog = false;
+	// See YAMPSettings::m_vonHoldLink.
+	bool m_vonHoldLink = false;
 
 	// Game settings
 	// TODO: Subclass once more games are added

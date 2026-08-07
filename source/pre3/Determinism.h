@@ -40,9 +40,15 @@ namespace pre3
 	// Measured: with the clock unpinned, two runs of the same build disagree on the board's state
 	// at the same point; with it pinned, every frame of the boot is reproducible across processes.
 	//
-	// The cost to a stand-alone session is a board that believes it is permanently 2000-01-01,
-	// which is exactly what the module's own linked-cabinet path does to it and which no Model 3
-	// game here exposes. The benefit is that the whole board becomes reproducible run to run.
+	// The cost to a stand-alone session is a board that believes it is permanently 2000-01-01. The
+	// benefit is that the whole board becomes reproducible run to run.
+	//
+	// THAT COST IS NOT FREE, and the original claim here - "which is exactly what the module's own
+	// linked-cabinet path does to it, and which no Model 3 game here exposes" - was wrong on both
+	// halves. The linked path returns a clock the board ADVANCES, not a frozen one; and Sega
+	// Racing Classic 2 never finishes booting with a clock that does not tick. So the pin is
+	// applied per game, by measurement - see ClockPinBootSafe in the .cpp, which is also where the
+	// prerequisite for ever pinning SRC2 is written down.
 	// The default epoch a pinned clock reports: the module's own reset value, so a pinned board
 	// sees exactly what a linked one would - 2000-01-01 00:00:00 UTC.
 	inline constexpr long long DETERMINISTIC_EPOCH = 0x386D4380;
@@ -215,7 +221,7 @@ namespace pre3
 
 	// Whether this game can currently sustain a netplay session.
 	//
-	// Fighting Vipers 2 only. Sega Rally Championship 2 is the other game this module can run and
+	// Fighting Vipers 2 only. Sega Racing Classic 2 is the other game this module can run and
 	// is excluded on two counts that are not guesses: it is the LINKED-CABINET game, so it wants
 	// the interface at params+0x1070 that YAMP deliberately passes as null (see
 	// docs/pre3-netplay.md), and it reads the analogue ADC ring for its wheel and pedals, which

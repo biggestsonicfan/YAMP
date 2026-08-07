@@ -44,7 +44,17 @@ extern "C" {
 // Bump on ANY change to the structs or the function table below. The loader refuses a plugin
 // whose version does not match exactly - a stale DLL is rejected at load rather than being
 // allowed to scribble through a shifted struct.
-#define YAMPNET_ABI_VERSION 7u
+//
+// ABI 8 changes no struct: it strengthens WHEN get_match_seed is promised to be valid (from
+// IN_ROOM, not SYNCING). It is a version bump anyway because YAMP now WAITS for that value before
+// preparing a round - against an ABI 7 plugin, which publishes nothing until a round begins, a
+// guest would sit at Start with no explanation. A rejected DLL says so; a silent wait does not.
+// ABI 9 adds the LINKED-CABINET channel (link_ready / link_send / link_take): a raw datagram path
+// for a game's own inter-cabinet link, carried over the same P2P socket the lockstep traffic uses
+// but touching none of it. Appended to the end of the table and adding no struct, so the bump is
+// only about the three new entries existing - but that is exactly what a stale plugin would not
+// have, and calling through a null tail pointer is not a failure mode worth allowing.
+#define YAMPNET_ABI_VERSION 9u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -304,8 +314,18 @@ typedef struct yampnet_api
     // --- Match ---
     // Which execute_info.pad[] index is this machine. -1 until IN_ROOM.
     int32_t (*get_local_player)(yampnet_session* s);
-    // The shared match seed. Valid once state is SYNCING or IN_MATCH. YAMP must feed this to the
-    // ROM `rand` HLE hook before the round or the peers diverge.
+    // The shared match seed. YAMP must feed this to the ROM `rand` HLE hook before the round or
+    // the peers diverge.
+    //
+    // ZERO MEANS "NOT KNOWN YET" and is never a legitimate seed - the host clamps its own away
+    // from 0 precisely so this test is unambiguous. A host has the value from room creation; a
+    // guest adopts it, and since ABI 8 the host publishes it on a heartbeat from IN_ROOM rather
+    // than only on the round announce, so a guest holds it before it can reach Start.
+    //
+    // Callers that need the seed BEFORE the barrier - m2ftg does, because its board reset makes
+    // the ROM re-run an initialisation that draws from the generator - must therefore wait for a
+    // non-zero value instead of using what they read. That wait cannot deadlock: the host's
+    // heartbeat depends on nothing the guest does.
     uint32_t (*get_match_seed)(yampnet_session* s);
 
     // Start barrier. Announces this peer for `generation` and resets per-round frame state once
@@ -368,6 +388,32 @@ typedef struct yampnet_api
     // Deliberately sourced from the room rather than remembered from create_room, so a host that
     // changes its own dip switches mid-session cannot drift away from the room it is hosting.
     uint32_t (*get_room_flags)(yampnet_session* s);
+
+    // ---- Linked-cabinet channel --------------------------------------------------------------
+    //
+    // A raw datagram path for a game whose HARDWARE has a link, rather than for YAMP's lockstep.
+    // Virtual On is the first: two Model 2 cabinets shuttle a 0x700-byte state snapshot over a
+    // serial ring every frame, and putting that on the wire is the entire netplay mechanism -
+    // the ROM's own protocol then does the synchronising, the waiting and the error handling.
+    // There is no lockstep, no barrier, no seed and no determinism requirement on this path.
+    //
+    // It shares the P2P socket with the lockstep traffic and touches nothing else: not the input
+    // rings, not the barrier, not the state-check machinery. Usable from IN_ROOM onwards, because
+    // cabinets link during their boot-time network check - long before anyone presses Start - and
+    // stay linked between matches.
+
+    // 1 once the peer's address is known and payloads can flow. This is what "is another cabinet
+    // out there" should be answered from; the round state is a different question entirely.
+    int32_t (*link_ready)(yampnet_session* s);
+
+    // Fire-and-forget. Returns the bytes sent, or 0 if there is nowhere to send yet. Loss is
+    // expected and harmless for a payload that is a complete snapshot every frame.
+    int32_t (*link_send)(yampnet_session* s, const void* data, uint32_t len);
+
+    // Takes the NEWEST payload received since the last call; returns its length, or 0 when
+    // nothing new has arrived. Newest-wins, deliberately: an older datagram carries nothing a
+    // newer one does not. 0 means "keep what you have" - never hand the hardware a gap.
+    int32_t (*link_take)(yampnet_session* s, void* out, uint32_t cap);
 } yampnet_api;
 
 // The single exported symbol. Returns NULL if the plugin cannot satisfy `requested_abi`.

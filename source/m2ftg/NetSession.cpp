@@ -193,8 +193,26 @@ void m2ftg::NetSession::Drive()
 	// starts with this peer's simulation un-reset and un-seeded. Because every peer gates its
 	// own announce, the barrier itself comes to mean "both boards are ready", which is what it
 	// was always supposed to mean.
+	// WAIT FOR THE SHARED SEED BEFORE PREPARING ANYTHING. Prep's first act is to reset the board,
+	// and the ROM's post-reset initialisation draws from the host RNG - so the seed has to be
+	// applied BEFORE that reset, which puts the read here, ahead of the barrier. A guest that
+	// prepared anyway read 0 and reset its board from a generator the host did not share; that was
+	// the divergence-before-frame-0 this whole mechanism exists to prevent.
+	//
+	// Waiting here is safe, and the reason is worth stating because an earlier attempt at this was
+	// abandoned as a deadlock: the seed does NOT arrive with the barrier. The host publishes it on
+	// a heartbeat from the moment the room exists (ABI 8), which depends on nothing this peer
+	// does. The host's own read is non-zero from room creation, so only a guest ever waits, and it
+	// waits for a packet that is already on its way rather than for the peer to act.
+	//
+	// The Start press is not consumed while we wait - ShouldStartRound stays true - so this is a
+	// delay of a few hundred milliseconds at worst, and only for whoever pressed first.
+	const uint32_t sharedSeed = api->get_match_seed(sess);
+	const bool haveSeed = sharedSeed != 0;
+
 	if (ns == YAMPNET_STATE_IN_ROOM && !m_roundRequested
-		&& netplayPossible && net::ShouldStartRound() && IsBoardBooted())
+		&& netplayPossible && net::ShouldStartRound() && IsBoardBooted()
+		&& (haveSeed || m_prep != Prep::Idle))
 	{
 		if (m_prep == Prep::Idle)
 		{
@@ -228,35 +246,16 @@ void m2ftg::NetSession::Drive()
 			// 0x10 stride) along with ~50 bytes of related init state. That is ROM
 			// initialisation, not gameplay, and it is exactly what the post-reset boot builds.
 			//
-			// Seeding here is safe: the match seed is known as soon as the room exists (the host
-			// generates it at creation, the guest adopts it on join), and the generators are
-			// constructed once per process (`if (holder == 0)`), so a board reset does not
-			// discard them.
-			const uint32_t preSeed = net::IsAvailable()
-				? net::Api()->get_match_seed(net::Session()) : 0;
-
-			// *** KNOWN BUG, DO NOT "FIX" BY WAITING HERE ***
+			// Seeding here is safe: the generators are constructed once per process
+			// (`if (holder == 0)`), so a board reset does not discard them.
 			//
-			// On a GUEST this reads 0. Measured on two machines 2026-08-03: the guest logged
-			// `RNG seeded 0x00000000, board reset` and only afterwards `barrier released; round 1
-			// seed 0x813AC110`, while the host seeded with the real value - so the two peers reset
-			// their boards drawing from differently seeded generators, which is a divergence before
-			// frame 0 and precisely what this seeding exists to prevent.
-			//
-			// It is not an accident of timing. YampNet.h states the contract outright: the match
-			// seed is "valid once state is SYNCING or IN_MATCH". Prep runs at IN_ROOM, BEFORE the
-			// barrier, so reading it here is reading a value the ABI does not promise yet. It
-			// happens to be populated on the host because the host generated it.
-			//
-			// Blocking prep until the seed is non-zero DEADLOCKS: prep would wait for the seed, the
-			// seed arrives with the barrier, and the barrier only opens once both peers finish prep
-			// and call begin_round. Tried 2026-08-03; the guest's Start Match silently did nothing.
-			//
-			// The real fix has to reconcile two requirements that currently conflict - seed BEFORE
-			// the reset (the ROM's re-init draws from the generator), but the seed is not knowable
-			// until after the barrier. Options: have the plugin publish the seed with the room so a
-			// guest has it at IN_ROOM (best - it is the host's from room creation either way), or
-			// run a second seed+reset+re-anchor cycle once the barrier releases.
+			// `sharedSeed` is non-zero by the gate above - prep does not begin until this peer
+			// holds the host's value. That gate is the fix for a real desync: a guest used to read
+			// 0 here and seed its generators with it, then reset its board, so the two peers ran
+			// the ROM's whole post-reset initialisation from different generators. Measured on two
+			// machines 2026-08-03: the guest logged `RNG seeded 0x00000000, board reset` while the
+			// host used 0x813AC110, and the round desynced at frame 1.
+			const uint32_t preSeed = sharedSeed;
 			const bool didSeed = SeedHostRng(preSeed);
 
 			// Then reset, and let the ROM come back up on its own - now drawing from a generator
@@ -327,6 +326,24 @@ void m2ftg::NetSession::Drive()
 				          "until the peer arrives", romFrame);
 			}
 		}
+	}
+	// SAY SO WHILE WAITING. A guest that pressed Start before the host now sits here for a few
+	// hundred milliseconds doing nothing visible, and a silent wait is indistinguishable from a
+	// Start press that was dropped - which is exactly how the previous attempt at this gate was
+	// misdiagnosed as a deadlock. Logged once per wait, not per frame.
+	else if (ns == YAMPNET_STATE_IN_ROOM && !m_roundRequested && netplayPossible
+		&& net::ShouldStartRound() && IsBoardBooted() && !haveSeed && m_prep == Prep::Idle)
+	{
+		if (!m_loggedSeedWait)
+		{
+			m_loggedSeedWait = true;
+			net::Logf("waiting for the host's match seed before resetting the board (the round "
+			          "cannot be prepared without it)");
+		}
+	}
+	else
+	{
+		m_loggedSeedWait = false;
 	}
 
 	// Announced but the barrier has not released: FREEZE the emulator. Without this the ROM

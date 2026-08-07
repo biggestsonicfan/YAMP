@@ -289,6 +289,22 @@ namespace
 		uintptr_t rvaRamBasePtr;    // -> host base of emulated RAM; guest G sits at +G
 		uint32_t stateHashBase;     // guest address
 		uint32_t stateHashLen;      // 0 = submit romFrameCounter instead
+		// ---- Linked-cabinet reset (Virtual On, and later Motor Raid) -----------------------
+		// Both 0 in a single-board game, and then ResetBoard behaves exactly as it always did.
+		//
+		// WHY THEY EXIST. rvaResetHandler is the DEBUG MENU's RESET, and its last act is to call
+		// the module's own board reset - which is already two-board aware: it wipes both work
+		// RAMs, resets board 0's CPU, and then resets board 1's ONLY IF the two-board gate is
+		// set. RESET zeroes that gate three instructions earlier, so board 1's CPU is never
+		// reset. It then resumes from a stale context the moment two-board mode comes back on:
+		// measured on both peers as a second-chance AV with the i960 IP at 0x500440, inside work
+		// RAM, i.e. board 1 executing its own data.
+		//
+		// So ResetBoard restores the gate to what it was and calls the module's reset a second
+		// time, which is the module's OWN mechanism for bringing both cabinets up - the same one
+		// boot phase 2 uses. Nothing here reimplements a reset.
+		uintptr_t rvaTwoBoardGate;    // the byte that reset reads to decide "is there a board 1?"
+		uintptr_t rvaBoardResetAll;   // void(): wipe both work RAMs and reset each board's CPU
 	};
 
 	// The host RNG streams, identical in all three games because it is one engine.
@@ -448,18 +464,11 @@ namespace
 		// (311 advances in 900 calls - an uncapped host loop against a ~59 Hz board), which is
 		// exactly what EndFrame already handles. Reads identically on BOTH boards.
 		0x5024E8,
-		// PROVISIONAL. Every field above is measured and verified live - the anchor read tracks
-		// GlobCntr exactly and the canary produces a changing work-RAM hash - but NO VON ROUND HAS
-		// BEEN PLAYED YET. Enabled so it can be tested; expect to turn it back off if the first
-		// loopback round misbehaves. Two known risks, both written down rather than discovered
-		// later:
-		//   * GlobCntr makes four non-unit jumps over 900 calls (~+11 total), almost certainly at
-		//     boot/state transitions. The anchor's whole job is to be reached at the SAME value on
-		//     both peers, so a jump straddling the anchor would start the round misaligned.
-		//   * ResetBoard clears the two-board gate, so round start drops to one cabinet unless the
-		//     host holds it - K2Host reasserts it every frame, which is why that is required.
-		// Also unverified: whether RESET re-inits BOTH boards or only the selected one.
-		true,
+		// NETPLAY STRIPPED 2026-08-04 after four failed two-machine attempts - the retrospective
+		// and the fresh-start design (one board per machine, the link over the wire) are in
+		// docs/von-netplay-recon.md. Everything else in this descriptor is measured, verified,
+		// and still used by the LOCAL tooling (reset, RNG seeding, the debug pages).
+		false,
 		0x7A7FB0, 3,   // config base (module_start's memcpy target, verified live reading kind=3)
 		// Canary: hash work RAM rather than the counter, for VF2's reason plus one of VON's own -
 		// a hash covers game state, and the counter has those four jumps. Same skip of the first
@@ -487,6 +496,10 @@ namespace
 		// against the other's slave. Both boards' chunk hashes are identical within a machine
 		// anyway, since they boot the same ROM deterministically.
 		0xC37000, 0x500100, 0xFF00,
+		// Two-board gate 0x6910DE (the byte K2Host also holds every frame), and the module's own
+		// board reset 0x69E80 - the routine BOTH the RESET item and boot phase 2 end with, and the
+		// only place in the module that resets a board's CPU.
+		0x6910DE, 0x69E80,
 	};
 
 	static const DwGame* CurrentDw()
@@ -1341,9 +1354,31 @@ bool m2ftg::ResetBoard()
 		return false;
 	}
 
+	// A LINKED-CABINET GAME LOSES ITS SECOND BOARD HERE unless we put it back. Sampled before the
+	// reset rather than forced afterwards, so this preserves how many cabinets were running
+	// instead of deciding it - `-von-1board` stays single-board, and a reset never silently
+	// changes the shape of the machine.
+	const uint8_t gateBefore = (game->rvaTwoBoardGate != 0)
+		? *(base + game->rvaTwoBoardGate) : 0;
+
 	// The DEBUG MENU's "RESET" item: writes run-state 0 and calls the DLL's real i960/board
 	// init. Unlike STEP/GO/REGS it is NOT a stub in either retail build.
 	InvokeDwAction(base + game->rvaResetHandler);
+
+	// RESET zeroes the two-board gate and then calls the module's board reset, which reads that
+	// gate to decide whether to reset the SECOND board - so board 1's CPU is left holding a stale
+	// context while board 0 restarts. Restore the gate and run that same reset again; the second
+	// pass takes the two-board path and brings both cabinets up exactly as boot does.
+	//
+	// Resetting board 0 twice is deliberate and harmless - a reset is idempotent, and doing it
+	// through the module's own routine is what keeps both boards in the state its code expects.
+	// The alternative, reaching in to reset board 1 by hand, would be YAMP inventing a bring-up
+	// sequence the module already has.
+	if (gateBefore != 0 && game->rvaBoardResetAll != 0)
+	{
+		*(base + game->rvaTwoBoardGate) = gateBefore;
+		InvokeDwAction(base + game->rvaBoardResetAll);
+	}
 	return true;
 }
 

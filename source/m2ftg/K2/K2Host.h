@@ -54,5 +54,26 @@ namespace m2ftg
 		HMODULE LoadDLL();
 		void PreInitialize();
 		void Run(RenderWindow& window);
+
+		// ---- Linked-cabinet status, for the netplay overlay --------------------------------
+		//
+		// A LINKED-CABINET SESSION HAS NO ROUND, and the overlay has to know that or it lies.
+		// Every other game reaches YAMPNET_STATE_IN_MATCH when its round starts, which is what
+		// tells the overlay to get out of the way; Virtual On never does, because it has no
+		// barrier to open - the ROM's own link check is what starts play. So the overlay sat
+		// there telling both players to "press Start match" through an entire match.
+		//
+		// Returns false when this is not a linked-cabinet session at all (a different game, or
+		// Virtual On with the cabinet role set to NOLINK), in which case the overlay's normal
+		// round-based reporting is the right thing.
+		struct LinkedCabinet
+		{
+			uint32_t role;      // 1 = MASTER, 2 = SLAVE
+			bool ringUp;        // is the partner cabinet exchanging with us right now?
+			uint8_t nodeId;     // as the ROM read it out of the ring
+			uint8_t nodes;
+			bool checkDone;     // the ROM's own Net_check completed (net_flag)
+		};
+		bool GetLinkedCabinet(LinkedCabinet& out);
 	}
 }

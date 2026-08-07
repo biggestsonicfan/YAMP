@@ -45,7 +45,7 @@ Worth stating because the module has a link interface and it is easy to reach fo
   **input lockstep on a single simulated board**: both peers run the whole board, each supplies
   one pad, and the two must agree frame for frame. Exactly the model the existing
   `YampNet` plugin ABI already describes (delay-based lockstep, no rollback, no state save).
-* **Sega Rally Championship 2** *did* use linked cabinets, and that is what the module's
+* **Sega Racing Classic 2** *did* use linked cabinets, and that is what the module's
   `params + 0x1070` interface is for. It is not the FV2 path and should not be pressed into
   service as one — see §6.
 

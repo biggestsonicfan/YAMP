@@ -366,7 +366,22 @@ namespace
 
 	struct GameHooks
 	{
+		// HOW A HOOK IS TURNED OFF. Two mechanisms, because the modules give us two.
+		//
+		// RomWord is the original: rewrite the i960 instruction in the ROM image, choosing between
+		// the installer's saved original and the trap word. It needs the installer's saved-word
+		// array and the ROM base, both reversed per module.
+		//
+		// HandlerTail is Virtual On's, and needs neither. Its table records are
+		// `{rom_offset, handler}` in writable .data, and 63 of its 121 hooks already point at the
+		// shared "execute original" tail - so pointing a handler there is not a trick, it is what
+		// the module's own inert hooks ARE. The trap still fires and the tail runs the instruction
+		// the ROM wrote.
+		enum class Disable { RomWord, HandlerTail };
+
 		const wchar_t* dllName;   // resolved with GetModuleHandleW; every module is ASLR'd
+		Disable disable;
+		uintptr_t rvaInertTail;   // HandlerTail only: the shared "execute original" handler
 		const Info* hooks;
 		size_t count;
 		const HookBuild* builds;
@@ -436,6 +451,7 @@ namespace
 
 	constexpr GameHooks GAME_STF = {
 		L"stf-pxd-w64-d3d12_retail.dll",
+		GameHooks::Disable::RomWord, 0,
 		STF_HOOKS, std::size(STF_HOOKS),
 		STF_BUILDS, std::size(STF_BUILDS),
 		{ (1ull << m2ftg::HleHooks::HOOK_STF_GAME_INT_TIME)
@@ -444,6 +460,7 @@ namespace
 	};
 	constexpr GameHooks GAME_FV = {
 		L"fv-pxd-w64-d3d12_retail.dll",
+		GameHooks::Disable::RomWord, 0,
 		FV_HOOKS, std::size(FV_HOOKS),
 		FV_BUILDS, std::size(FV_BUILDS),
 		{ 0, 0 },   // FV's GAME_INT hook is Inert - nothing to disable by default
@@ -452,12 +469,45 @@ namespace
 
 	constexpr GameHooks GAME_VF2 = {
 		L"vf2-pxd-w64-retail.dll",
+		GameHooks::Disable::RomWord, 0,
 		VF2_HOOKS, std::size(VF2_HOOKS),
 		VF2_BUILDS, std::size(VF2_BUILDS),
 		{ 0, 0 },   // nothing to disable by default
 		VF2_CONVENTION, std::size(VF2_CONVENTION),
 	};
 
+#include "VonHooks.inc"
+
+	// Virtual On needs only the table RVA and the boot state: HandlerTail disabling writes the
+	// table itself, so there is no saved-word array or ROM base to reverse. Boot state matches
+	// DwGame::rvaBootState for the same module.
+	//
+	// The table starts at 0x476520, NOT the 0x476510 this used to say. The installer's own loop
+	// settles it - `FUN_1800048e0` walks `&DAT_180476520 + i * 0x10` for i in 0..0x77, i.e. 120
+	// records beginning there, and the 16 bytes below that base are {0, &free_thunk}: a neighbour,
+	// not a hook. Reading the table one record low made every hook one index high AND invented a
+	// 121st whose "handler" was the CRT's free() - and because the disable path writes the handler
+	// column, ticking that phantom in the settings list stored 0x180070FB0 over a live data
+	// pointer with many readers. Both are fixed by the base; the hook table below is renumbered to
+	// match, so INDICES IN NOTES WRITTEN BEFORE 2026-08-05 ARE ONE HIGHER THAN THEY ARE NOW.
+	constexpr HookBuild VON_BUILDS[] = {
+		{ 0, 0x476520, 0, 0, 0x7ADCA8 },
+	};
+
+	constexpr GameHooks GAME_VON = {
+		L"omg-pxd-w64-gog_retail.dll",
+		GameHooks::Disable::HandlerTail, 0x070FB0,
+		VON_HOOKS, std::size(VON_HOOKS),
+		VON_BUILDS, std::size(VON_BUILDS),
+		// Hook 5 off by default: it pre-marks the ROM's warning screen as already seen, which is
+		// what makes Virtual On appear to boot straight to the SEGA screen. See the block on
+		// HOOK_VON_WARNING_SKIP in HleHooks.h - this is the arcade boot, and it is also the
+		// sequence a linked pair needs.
+		{ 1ull << m2ftg::HleHooks::HOOK_VON_WARNING_SKIP, 0 },
+		nullptr, 0, // no homebrew convention sites
+	};
+
+	static_assert(std::size(VON_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(STF_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(FV_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(VF2_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
@@ -469,6 +519,7 @@ namespace
 		case YAMPGeneral::GameId::StF: return &GAME_STF;
 		case YAMPGeneral::GameId::FV:  return &GAME_FV;
 		case YAMPGeneral::GameId::VF2: return &GAME_VF2;
+		case YAMPGeneral::GameId::VON_K2: return &GAME_VON;
 		default:                       return nullptr;
 		}
 	}
@@ -536,6 +587,7 @@ const char* m2ftg::HleHooks::KindName(Kind kind)
 	case Kind::Content: return "Content";
 	case Kind::Removed: return "Removed";
 	case Kind::Inert:   return "Inert";
+	case Kind::Unclassified: return "Unclassified";
 	}
 	return "?";
 }
@@ -549,6 +601,7 @@ const char* m2ftg::HleHooks::KindDescription(Kind kind)
 	case Kind::Content: return "Changes what the game does: hidden characters, Honey's art and animation, VS-mode rules, attract timings. Safe to disable.";
 	case Kind::Removed: return "The ROM instruction is deleted outright and nothing runs in its place. Safe to disable.";
 	case Kind::Inert:   return "The trap runs the original instruction unchanged - a debug probe whose body was compiled out of the retail build. Disabling changes nothing but removes the trap overhead.";
+	case Kind::Unclassified: return "Enumerated from the module's table and named from its ROM symbols, but the handler has not been read - it may be anything, including emulator plumbing. Toggle freely to find out; the setting is deliberately NOT saved, so a restart always recovers.";
 	}
 	return "";
 }
@@ -618,13 +671,7 @@ void m2ftg::HleHooks::Update()
 		return;
 	}
 
-	// Nothing to restore until the installer has run; it does so in board bring-up stage 2,
-	// which is also when the boot state reaches 2.
 	const HookBuild& rvas = CurrentBuildRvas(*game);
-	if (*reinterpret_cast<const uint32_t*>(base + rvas.rvaBootState) != 2)
-	{
-		return;
-	}
 
 	const YAMPSettings* settings = gGeneral.GetSettings();
 	if (settings == nullptr)
@@ -651,6 +698,83 @@ void m2ftg::HleHooks::Update()
 	const uint64_t* netplayMask = game->defaultDisable;
 	const bool netplayLocked = net::SessionInProgress();
 	const uint64_t* wanted = netplayLocked ? netplayMask : settings->m_stfHleDisableMask;
+
+	// HANDLER-TAIL GAMES (Virtual On) rewrite the table's own handler pointers instead of the
+	// emulated ROM. Same contract - enforced every frame, so it survives the installer re-running
+	// at a board reset and needs no record of what was applied when - and the same netplay rule,
+	// because a repointed handler changes the simulation exactly as a rewritten ROM word does.
+	//
+	// DELIBERATELY AHEAD OF THE BOOT-STATE GATE BELOW, which is what makes a disabled hook take
+	// effect during BOOT rather than one frame into it. The handler column is static .data that
+	// nothing in the module ever writes - the installer (`FUN_1800048e0`) reads only romOffset,
+	// stamps the trap word into the ROM image and saves the original instruction; it never touches
+	// a handler pointer. So this table is already meaningful the moment the DLL is mapped, long
+	// before bring-up reaches the state that sets the boot flag, and waiting for that flag only
+	// guaranteed that Virtual On's boot-path hooks (1-4, 18) had ALREADY FIRED by the time the
+	// mask was applied. Nothing here reads emulated RAM, so running it early is safe.
+	if (game->disable == GameHooks::Disable::HandlerTail)
+	{
+		// "-von-hleoff=3,7,21": disable these hook indices FROM BOOT. Kept now that the settings
+		// mask reaches the boot path too, because Core hooks are still session-only by design
+		// (SESSION_ONLY_KINDS) - and Virtual On's Core hooks are precisely the boot-path ones, so
+		// this flag stays the only way to experiment with them. It survives nothing and defaults
+		// to nothing, which is what preserves the restart-always-recovers guarantee.
+		static uint64_t s_cmdOff[2] = {};
+		static bool s_cmdParsed = false;
+		if (!s_cmdParsed)
+		{
+			s_cmdParsed = true;
+			if (const wchar_t* arg = wcsstr(GetCommandLineW(), L"-von-hleoff="))
+			{
+				const wchar_t* p = arg + wcslen(L"-von-hleoff=");
+				char listed[256] = "";
+				size_t n = 0;
+				while (*p >= L'0' && *p <= L'9')
+				{
+					const unsigned long idx = wcstoul(p, const_cast<wchar_t**>(&p), 10);
+					if (idx < game->count)
+					{
+						s_cmdOff[idx / 64] |= 1ull << (idx % 64);
+						n += snprintf(listed + n, sizeof(listed) - n, "%s%lu",
+							n != 0 ? "," : "", idx);
+					}
+					if (*p == L',') ++p;
+				}
+				net::Logf("-von-hleoff: hooks [%s] disabled from boot", listed);
+			}
+		}
+
+		struct Entry { uint64_t romOffset; uint64_t handler; };
+		auto* entries = reinterpret_cast<Entry*>(base + rvas.rvaTable);
+		const uint64_t inert = reinterpret_cast<uint64_t>(base + game->rvaInertTail);
+		static uint64_t s_original[MAX_COUNT] = {};
+		for (size_t i = 0; i < game->count; i++)
+		{
+			// Latch what the installer put there the first time it is seen as something other
+			// than the tail, so "off" is reversible without a saved-word array.
+			if (s_original[i] == 0 && entries[i].handler != inert)
+			{
+				s_original[i] = entries[i].handler;
+			}
+			const bool off = MaskTest(wanted, i) || MaskTest(s_cmdOff, i);
+			const uint64_t desired = (s_original[i] != 0 && off)
+				? inert : (s_original[i] != 0 ? s_original[i] : entries[i].handler);
+			if (entries[i].handler != desired)
+			{
+				entries[i].handler = desired;
+			}
+		}
+		return;
+	}
+
+	// ROM-WORD GAMES restore the emulated instruction out of the module's own save area, which the
+	// installer fills as it writes the traps - so unlike the handler table above, there is nothing
+	// to read until the installer has run. It does so in board bring-up stage 2, which is also when
+	// the boot state reaches 2.
+	if (*reinterpret_cast<const uint32_t*>(base + rvas.rvaBootState) != 2)
+	{
+		return;
+	}
 
 	const auto* table = reinterpret_cast<const HleTableEntry*>(base + rvas.rvaTable);
 	const auto* savedWords = reinterpret_cast<const uint64_t*>(base + rvas.rvaSavedWords);

@@ -135,7 +135,7 @@ namespace Launcher
 				L"-vf5fs-ylad", VF5FS_YLAD_CANDIDATES, std::size(VF5FS_YLAD_CANDIDATES) },
 			{ YAMPGeneral::GameId::FV2, "Fighting Vipers 2", "Like a Dragon Gaiden", L"-fv2",
 				PRE3_CANDIDATES, std::size(PRE3_CANDIDATES) },
-			{ YAMPGeneral::GameId::SRC2, "Sega Rally Championship 2", "Like a Dragon Gaiden", L"-src2",
+			{ YAMPGeneral::GameId::SRC2, "Sega Racing Classic 2", "Like a Dragon Gaiden", L"-src2",
 				PRE3_CANDIDATES, std::size(PRE3_CANDIDATES) },
 		};
 

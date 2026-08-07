@@ -35,7 +35,7 @@ namespace pre3
 	// spkfe as well (see Game in ../pre3.h) but no title YAMP knows about provides their
 	// archives, so offering them would only produce a load failure with no way to fix it.
 	inline constexpr GameDesc GAME_FV2 = { "Fighting Vipers 2", Game::Fv2, "image/fv2.par" };
-	inline constexpr GameDesc GAME_SRC2 = { "Sega Rally Championship 2", Game::Src2, "image/src2.par" };
+	inline constexpr GameDesc GAME_SRC2 = { "Sega Racing Classic 2", Game::Src2, "image/src2.par" };
 
 	inline const GameDesc& CurrentGame()
 	{

@@ -49,7 +49,7 @@ namespace pre3
 	//   2 getbass M3ERomBass    Get Bass / Sega Bass Fishing
 	//   3 spkfe   M3ERomSpkfe   Spikeout Final Edition
 	//   4 fv2     M3ERomFv2     Fighting Vipers 2
-	//   5 src2    M3ERomSrc2    Sega Rally Championship 2
+	//   5 src2    M3ERomSrc2    Sega Racing Classic 2
 	//
 	// Like a Dragon Gaiden only ships image/fv2.par and image/src2.par, so only those two are
 	// playable from a stock install; the other four are compiled in but have no data.

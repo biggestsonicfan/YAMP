@@ -22,11 +22,16 @@ namespace m2ftg
 	// step, which compounds into a visible AI desync.
 	//
 	// So frame 0 is anchored to the ROM's OWN progress instead of to a wall-clock moment:
-	//   Idle      -> reset the board, pin the texture budget
+	//   Idle      -> WAIT for the shared match seed, then seed the RNG, reset the board and pin
+	//                the texture budget. The seed must precede the reset because the ROM's
+	//                post-reset initialisation draws from the generator, so a peer that reset
+	//                without it has already diverged. Only a guest ever waits, and never on
+	//                anything the other peer has to do first - see get_match_seed in YampNet.h.
 	//   Resetting -> wait for frame_counter to restart (proving the reset landed)
 	//   Settling  -> wait for frame_counter to reach ANCHOR - the same value on both peers
 	//   Announced -> HOLD the emulator here and open the barrier
-	//   (barrier) -> seed the RNG (instantaneous, so it needs no settling) and run frame 0
+	//   (barrier) -> RE-seed from the same value (a safety net against the two boots having drawn
+	//                different NUMBERS of values) and run frame 0
 	// Both machines therefore enter frame 0 with their ROM at the same counter value, by
 	// construction rather than by luck.
 	//
@@ -112,6 +117,9 @@ namespace m2ftg
 		// EndFrame. Kept across the whole session (not just a round) so frame 0 has a baseline.
 		uint32_t m_lastCheck = 0;
 		bool m_haveLastCheck = false;
+		// Whether "waiting for the host's match seed" has already been said for this wait, so a
+		// guest that pressed Start first reports the wait once instead of every frame.
+		bool m_loggedSeedWait = false;
 	};
 
 	// The one instance. A session is a property of the process, not of a host loop, and the

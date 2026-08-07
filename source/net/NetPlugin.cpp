@@ -305,6 +305,24 @@ namespace net
     // s_cfg.enabled is set only by ParseCommandLine, so it doubles as "this session came from the
     // command line" - the UI path leaves it false and drives the flag instead.
     bool ShouldStartRound() { return s_cfg.enabled || s_startRequested; }
+
+    // See the header. Latched once, so a linked-cabinet game cannot change how many boards it is
+    // running part-way through - the answer has to be the same on the frame the module starts and
+    // on every frame after it.
+    //
+    // `-net-*` covers the two-machine harness. Everything else comes from a SETTING rather than
+    // from the plugin merely being present: yampnet.dll sits beside every development build, so
+    // keying off it would mean two boards always, which is the behaviour being replaced.
+    //
+    // The setting is why this is a "reboot into netplay" rather than a toggle. Turning it on tells
+    // the NEXT launch to bring the second cabinet up from boot; it cannot affect the running one.
+    bool WantsNetplayBoards()
+    {
+        const YAMPSettings* settings = gGeneral.GetSettings();
+        static const bool wanted = s_cfg.enabled
+            || (settings != nullptr && settings->m_netEnabled);
+        return wanted;
+    }
     void RequestStartRound() { s_startRequested = true; }
     void ClearStartRequest() { s_startRequested = false; }
 
@@ -739,6 +757,36 @@ namespace net
         s_cfg.host = false;
         s_cfg.room_id = 0;
         NetLog("ui: left the room");
+    }
+
+    // ---- Linked-cabinet link -----------------------------------------------------------------
+    //
+    // Passthroughs, each safe to call unconditionally. They deliberately do NOT test
+    // SessionInProgress: cabinets link during their boot-time network check, which happens as
+    // soon as both are in the room and long before a round exists, and they stay linked between
+    // matches. `link_ready` (the peer's address being known) is the right gate and the plugin
+    // applies it, so a caller can ask every frame from boot without special-casing anything.
+    bool LinkReady()
+    {
+        return IsAvailable() && s_api->link_ready != nullptr && s_api->link_ready(s_session) != 0;
+    }
+
+    void LinkSend(const void* data, unsigned int len)
+    {
+        if (IsAvailable() && s_api->link_send != nullptr)
+        {
+            s_api->link_send(s_session, data, len);
+        }
+    }
+
+    unsigned int LinkTake(void* out, unsigned int cap)
+    {
+        if (!IsAvailable() || s_api->link_take == nullptr)
+        {
+            return 0;
+        }
+        const int32_t got = s_api->link_take(s_session, out, cap);
+        return got > 0 ? static_cast<unsigned int>(got) : 0u;
     }
 
     bool IsAvailable() { return s_session != nullptr && s_api != nullptr; }

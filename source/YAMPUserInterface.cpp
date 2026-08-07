@@ -8,6 +8,7 @@
 #include "m2ftg/DebugWindows.h"
 #include "m2ftg/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
+#include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
 #include "pre3/HleHooks.h"
 #include "pre3/Determinism.h"
 
@@ -44,9 +45,17 @@ static bool IsLJm2ftgGame()
 // ...as do the Yakuza Kiwami 2 modules, which share the K2 host the same way. Kiwami 2 ships two
 // (Virtua Fighter 2 and Virtua On), so this is deliberately a per-PARENT-GAME test rather than a
 // per-game one — the second module needs nothing here beyond its GameId.
+// BOTH Kiwami 2 arcade modules, not just VF2. Virtual On was left out when it was added, and
+// because this predicate is what routes a game to the m2ftg settings panel, Virtual On fell all
+// the way through to the VF5FS one: it was offered "Language", "Confirmation button" and "Arcade
+// Machine Mode" - three settings that belong to a different engine and that its host never reads,
+// so none of them did anything - while the dip switches it DOES honour (region, difficulty, free
+// play, versus, render resolution) had no UI at all. K2Host has always applied
+// `params.config.country` from `m_m2Country`; nothing could set it.
 static bool IsKiwami2Game()
 {
-	return gGeneral.GetGameId() == YAMPGeneral::GameId::VF2_K2;
+	const auto id = gGeneral.GetGameId();
+	return id == YAMPGeneral::GameId::VF2_K2 || id == YAMPGeneral::GameId::VON_K2;
 }
 
 static bool IsM2ftgGame()
@@ -372,6 +381,10 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 
 	m_currentFullscreen = settings->m_fullscreen;
 	m_enableFpsCap = settings->m_enableFpsCap;
+	m_netEnabled = settings->m_netEnabled;
+	m_vonCabinetRole = settings->m_vonCabinetRole;
+	m_vonLinkLog = settings->m_vonLinkLog;
+	m_vonHoldLink = settings->m_vonHoldLink;
 
 	m_arcadeMode = settings->m_arcadeMode;
 	m_circleConfirm = settings->m_circleConfirm;
@@ -624,6 +637,20 @@ void YAMPUserInterface::DrawGamePre3()
 		}
 	}
 
+	// REGION IS NOT A SETTING VIRTUAL ON HAS, so do not offer a control that cannot do anything.
+	// Three independent checks agree: the `omg` module never reads `m2ftg_config_t.country`
+	// (config+5 has ZERO references, against one apiece for difficulty, free play and kind), the
+	// ROM contains no region string at all, and the cabinet's own GAME ASSIGNMENTS page has no
+	// region item - PLAY TIME, MATCH COUNT, NETWORK LINK ATTRIBUTE, WINNING BY DECISION, GAME
+	// DIFFICULTY, ADVERTIZE SOUND, CONTINUE, REPLAY AND POSING, RANKING, VERSUS ALWAYS FINISH,
+	// DISPLAY BRIGHTNESS, INITIALIZE, EXIT is the whole list.
+	//
+	// Difficulty, by contrast, IS wired and correct on this game, which is worth stating because
+	// the two were suspected together: the module reads config+4, adds one, and indexes a
+	// five-entry table (`{3,3,0,1,2}` at RVA 0x4500E0) to produce the ROM's backup byte
+	// 0x1D00021, whose encoding is 0=NORMAL 1=HARD 2=VERY HARD 3=EASY. So YAMP's 0..3 lands on
+	// EASY / NORMAL / HARD / VERY HARD in order - the four labels below, exactly.
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::VON_K2)
 	{
 		const char* labels[] = { "Japan", "USA", "Export" };
 		if (m_m2Country >= std::size(labels))
@@ -1792,9 +1819,13 @@ void YAMPUserInterface::DrawStfHleHooks()
 
 	ImGui::PushTextWrapPos();
 	ImGui::Text("At board start-up the game DLL overwrites %zu individual i960 instructions in the program ROM "
-		"with traps that run native code instead. Disabling a hook restores the ROM's original instruction, so the ROM's "
-		"own code runs there again - which is what a patched rom_code1.bin needs in order to take effect. Applied live.",
+		"with traps that run native code instead. Disabling a hook hands that address back to the ROM's own code - "
+		"which is what a patched rom_code1.bin needs in order to take effect. Applied live.",
 		hookCount);
+	ImGui::Spacing();
+	ImGui::TextUnformatted("How that is done depends on the module: most restore the original instruction into the ROM "
+		"image, while Virtual On instead repoints the hook at its own \"execute original\" handler - the one 63 of its "
+		"121 hooks already use. Same result, and neither touches anything the module did not already write.");
 	ImGui::Spacing();
 	ImGui::Text("A wholly different program ROM - homebrew rather than a patch - needs more than that: every "
 		"offset below is a %s address, so the installer corrupts %zu unrelated instructions before the "
@@ -2162,6 +2193,97 @@ void YAMPUserInterface::DrawNetplay()
 	// regression harness); letting the lobby half-steer it would only produce states neither path
 	// expects, so the controls go read-only instead.
 	const bool commandLineSession = net::Config().enabled;
+
+	// ---- Netplay mode (restart required) --------------------------------------------------
+	//
+	// Only Virtual On currently cares, but the setting is not game-specific: it says what this
+	// LAUNCH is for. A linked-cabinet game runs its second Model 2 board from boot when netplay is
+	// on, and does not otherwise - an idle second cabinet is a peer the ROM waits for, and the
+	// operator's menu deadlocks against it. Neither direction can be done to a running board, so
+	// this takes effect on the next launch rather than immediately.
+	{
+		if (ImGui::Checkbox("Enable netplay for this game (restart required)", &m_netEnabled))
+		{
+			m_pageModified = true;
+		}
+		ImGui::PushTextWrapPos();
+		ImGui::TextDisabled("Virtual On is a LINKED-CABINET game: with this off it runs a single "
+			"cabinet, which is what local play and the operator's Test menu need. Turning it on "
+			"brings the second board up from boot, which is required for a match and cannot be "
+			"done to a board that is already running.");
+		if (m_netEnabled != net::WantsNetplayBoards())
+		{
+			ImGui::TextColored(WARNING_COLOUR, "Restart YAMP for this to take effect - the board "
+				"count was decided when the game started.");
+		}
+		ImGui::PopTextWrapPos();
+
+		// ---- Cabinet role (Virtual On, restart required) ----------------------------------
+		//
+		// Deliberately NOT hidden when another game is running: it is a property of this MACHINE,
+		// not of the running session, and hiding it would mean it could only be set while Virtual
+		// On was already up - i.e. only after the boot that reads it.
+		{
+			static const char* const labels[] = { "No link (standalone)", "MASTER", "SLAVE" };
+			if (m_vonCabinetRole >= std::size(labels))
+			{
+				m_vonCabinetRole = 0;
+			}
+			if (ImGui::BeginCombo("Virtual On cabinet (restart required)", labels[m_vonCabinetRole]))
+			{
+				for (uint32_t index = 0; index < std::size(labels); index++)
+				{
+					const bool isSelected = index == m_vonCabinetRole;
+					if (ImGui::Selectable(labels[index], isSelected))
+					{
+						m_vonCabinetRole = index;
+						m_pageModified = true;
+					}
+					if (isSelected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::PushTextWrapPos();
+			ImGui::TextDisabled("On real hardware two cabinets are wired together and each is "
+				"strapped as the master or the slave site. Pick one here and the other on the "
+				"second machine; the ROM then runs its own link check at boot and prints THIS IS "
+				"MASTER SITE / SLAVE SITE instead of coming up standalone. \"No link\" is what the "
+				"module does on its own.");
+			ImGui::TextDisabled("This is the CABINET's identity, not the player's - it says which "
+				"end of the cable this machine is, and it is read once during boot.");
+			ImGui::PopTextWrapPos();
+
+			if (ImGui::Checkbox("Log linked-cabinet state", &m_vonLinkLog))
+			{
+				m_pageModified = true;
+			}
+			ImGui::PushTextWrapPos();
+			ImGui::TextDisabled("Writes both boards' link ID, network flag, mode and frame counter "
+				"to the log every 200 frames - which is how you tell whether the cabinet above "
+				"actually took and whether the two machines linked. A setting rather than a "
+				"command-line switch on purpose: the game launcher cannot pass switches, so a "
+				"launcher-started run could never turn this on.");
+			ImGui::PopTextWrapPos();
+
+			if (ImGui::Checkbox("Wait for the other cabinet at boot", &m_vonHoldLink))
+			{
+				m_pageModified = true;
+			}
+			ImGui::PushTextWrapPos();
+			ImGui::TextDisabled("The emulated comm board reports a healthy two-cabinet ring even "
+				"when nothing is connected, so the boot-time link check always succeeds. This "
+				"reports the truth instead, and the game does what a real cabinet does when its "
+				"partner is not switched on yet: it holds on \"Checking Network Now\" until the "
+				"other end answers.");
+			ImGui::TextColored(WARNING_COLOUR, "Nothing releases it yet, so the game will wait "
+				"there indefinitely. This is for testing the handshake.");
+			ImGui::PopTextWrapPos();
+		}
+		ImGui::Separator();
+	}
 
 	// ---- Account ------------------------------------------------------------------------------
 	ImGui::TextUnformatted("Account");
@@ -2540,11 +2662,27 @@ void YAMPUserInterface::DrawNetplay()
 		{
 			ImGui::TextUnformatted("Give this ID to the other player so they can join.");
 		}
-		// The room is not a presence channel: this machine finds out the other player exists only
-		// when their first packet arrives, and that does not happen until they start the match.
-		// So "waiting for them to join" is not something the lobby can honestly display.
-		ImGui::TextUnformatted("Both players press Start match. Nothing happens until both have - "
-			"the board is reset on both machines at that point so the round starts from the same state.");
+		// A LINKED-CABINET GAME HAS NO ROUND TO START. Virtual On's two cabinets find each other
+		// through the ROM's own boot-time network check and stay linked from then on; there is no
+		// barrier, nothing to reset and nothing for "Start match" to open. Telling the player to
+		// press it would be telling them to press a button that does nothing - which is exactly
+		// what the overlay used to do through an entire match.
+		m2ftg::K2::LinkedCabinet lobbyLink = {};
+		const bool linkedCabinet = m2ftg::K2::GetLinkedCabinet(lobbyLink);
+		if (linkedCabinet)
+		{
+			ImGui::TextUnformatted("This game links its two cabinets itself. Once the other player "
+				"is in the room the cabinets find each other, and you start a match by pressing "
+				"START on each cabinet exactly as you would on the hardware.");
+		}
+		else
+		{
+			// The room is not a presence channel: this machine finds out the other player exists
+			// only when their first packet arrives, and that does not happen until they start the
+			// match. So "waiting for them to join" is not something the lobby can honestly display.
+			ImGui::TextUnformatted("Both players press Start match. Nothing happens until both have - "
+				"the board is reset on both machines at that point so the round starts from the same state.");
+		}
 		if (IsPre3Game())
 		{
 			ImGui::TextUnformatted("This board restores its own versus start state rather than "
@@ -2553,11 +2691,14 @@ void YAMPUserInterface::DrawNetplay()
 		}
 		ImGui::PopTextWrapPos();
 
-		if (ImGui::Button("Start match"))
+		if (!linkedCabinet && ImGui::Button("Start match"))
 		{
 			net::RequestStartRound();
 		}
-		ImGui::SameLine();
+		if (!linkedCabinet)
+		{
+			ImGui::SameLine();
+		}
 		if (ImGui::Button("Leave room"))
 		{
 			net::LeaveRoom();
@@ -2619,9 +2760,33 @@ void YAMPUserInterface::DrawNetplayOverlay()
 		return;
 	}
 
+	// A LINKED-CABINET GAME REPORTS ITS LINK, NOT A ROUND - but it is still an ordinary session,
+	// so it keeps the ordinary overlay and only the round-specific wording is replaced.
+	//
+	// Virtual On has no barrier and no round: the ROM's own boot-time link check is what starts
+	// play, so the session sits at IN_ROOM for the whole match and never reaches IN_MATCH - the
+	// state this overlay uses to decide it should get out of the way. Left alone, that put a
+	// "Both players press Start match" splash over an entire linked match, telling both players to
+	// press a button that does nothing for this game.
+	//
+	// NOTE the ordering. `GetLinkedCabinet` answers yes as soon as a cabinet role is applied and
+	// the board has booted, which says nothing about whether a SESSION exists - so it must not be
+	// consulted before the checks below. Doing that swallowed the room id (still 0 while
+	// connecting), the error text and the board-booting line, and drew a permanent box in offline
+	// solo play for anyone whose cabinet role was not NOLINK.
+	m2ftg::K2::LinkedCabinet link = {};
+	const bool linkedCabinet = m2ftg::K2::GetLinkedCabinet(link);
+
 	// Nothing to say before a session is started, and nothing worth covering the game with once
 	// one is running normally.
 	if (!status.started || status.state == YAMPNET_STATE_IN_MATCH || status.state == YAMPNET_STATE_IDLE)
+	{
+		return;
+	}
+
+	// The linked-cabinet equivalent of reaching IN_MATCH: the ring is up and the ROM's own network
+	// check has passed, so the cabinets are talking and there is nothing left to tell anyone.
+	if (linkedCabinet && link.ringUp && link.checkDone)
 	{
 		return;
 	}
@@ -2630,7 +2795,20 @@ void YAMPUserInterface::DrawNetplayOverlay()
 	ImGui::Begin("Netplay", nullptr,
 		ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize
 		| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
-	ImGui::TextUnformatted(status.text);
+	// `status.text` for IN_ROOM asks both players to press Start match, which is the one thing a
+	// linked-cabinet game must not say. Every other state's text is accurate for it.
+	if (linkedCabinet && status.state == YAMPNET_STATE_IN_ROOM)
+	{
+		ImGui::Text("%s cabinet.", link.role == 1 ? "MASTER" : "SLAVE");
+		ImGui::TextUnformatted(link.ringUp
+			? "Ring up - the cabinet is running its network check."
+			: "Waiting for the other cabinet to join...");
+		ImGui::TextDisabled("The cabinets link themselves. Press START on each to play.");
+	}
+	else
+	{
+		ImGui::TextUnformatted(status.text);
+	}
 	// Shown for as long as there is a room, not just while IN_ROOM: a command-line host opens the
 	// barrier the same frame it gets the room, so it is SYNCING within a frame or two - and that
 	// is exactly when the other player still needs to be told which room to join.
@@ -2854,6 +3032,10 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_refreshRate != m_resolutions[m_currentResolutionIndex].refreshRates[m_currentRefRateIndex].refreshRate ||
 		settings->m_fullscreen != m_currentFullscreen ||
 		settings->m_enableFpsCap != m_enableFpsCap ||
+		settings->m_netEnabled != m_netEnabled ||
+		settings->m_vonCabinetRole != m_vonCabinetRole ||
+		settings->m_vonLinkLog != m_vonLinkLog ||
+		settings->m_vonHoldLink != m_vonHoldLink ||
 		settings->m_arcadeMode != m_arcadeMode ||
 		settings->m_circleConfirm != m_circleConfirm ||
 		settings->m_language != m_language ||
@@ -2874,6 +3056,10 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_refreshRate = m_resolutions[m_currentResolutionIndex].refreshRates[m_currentRefRateIndex].refreshRate;
 	settings->m_fullscreen = m_currentFullscreen;
 	settings->m_enableFpsCap = m_enableFpsCap;
+	settings->m_netEnabled = m_netEnabled;
+	settings->m_vonCabinetRole = m_vonCabinetRole;
+	settings->m_vonLinkLog = m_vonLinkLog;
+	settings->m_vonHoldLink = m_vonHoldLink;
 
 	settings->m_arcadeMode = m_arcadeMode;
 	settings->m_circleConfirm = m_circleConfirm;

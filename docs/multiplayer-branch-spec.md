@@ -600,6 +600,7 @@ Two modules built **one second apart** on 2019-09-30 — the same engine build, 
 |---|---|---|
 | DLL | `vf2-pxd-w64-gog_retail.dll` | `omg-pxd-w64-gog_retail.dll` |
 | `kind` | 0 | 3 |
+| netplay | lockstep (§14.3-14.9) | **linked-cabinet (§14.10)** — the ROM's own link on the wire |
 
 The ROM-name table `module_start` indexes with `config.kind` is at `0x18015DF9C..` and reads `{0:"vf2", 1:"vf", 2:"stf", 3:"omg", 4:"mr"}` — **a different order from the Lost Judgment table** (where 1=fv). Combined with `"%s/rom/%s..."` it picks `m2ftg/rom/<name>_rom.par`, which is what Kiwami 2 ships.
 
@@ -613,6 +614,27 @@ Host-relevant differences from LJ and YLAD, each found by **running and reading 
 - `p_ib_quad` / `p_ib_fan` at `gs+0x1418` / `gs+0x1420` — `primitive_initialize` is the host's job here too.
 - The archive rwspinlock pair (this generation predates YLAD's recursive one — hence `pxd::sl::p_sync_archive_condvar`).
 - Input: plain `csl_pad` at `execute_info+0x20`, stride `0x170`, assigns at `+0x15E0` — all read out of the module's own pad reader `FUN_18005E410`. Size gate verified both statically (`CMP RCX, 0x16E0` at the top of `module_main`) and live under x64dbg.
+
+**Which dip switches Virtual On actually honours.** The two modules share `m2ftg_config_t`, but they do not read the same fields out of it, and the settings panel had been assuming they did. Counting direct references into the module's config block at `0x7A7FB0`:
+
+| field | refs in `omg` | |
+|---|---|---|
+| `+0x00` kind | 1 | picks the ROM name |
+| `+0x04` difficulty | 1 | **honoured** — see below |
+| `+0x05` country / region | **0** | never read |
+| `+0x09` free play | 1 | honoured |
+| `+0x0B` sram | 1 | |
+
+**Difficulty is honoured, through a translation table rather than directly.** The module reads `config+4`, adds one, and indexes a five-entry table (`{3,3,0,1,2}` at RVA `0x4500E0`) to produce the value it injects into backup RAM `0x1D00021`, which the ROM's own operator menu decodes as `0=NORMAL 1=HARD 2=VERY HARD 3=EASY`. So YAMP's `m_m2Difficulty` 0..3 lands on EASY / NORMAL / HARD / VERY HARD in order — its four labels, exactly. Confirmed live: `Difficulty=1` shows NORMAL on the cabinet's GAME ASSIGNMENTS page.
+
+> Worth noting how nearly this was "fixed" into being wrong. Read statically, the table looks like it is indexed by the raw config value, which makes the mapping appear off by one; and the byte feeding it looks like a module private until the RIP-relative displacement resolves to `CONFIG_BASE + 4`. A screenshot of the cabinet's own menu is what settled it. **On a question like this the game's operator page is the oracle, not the disassembly.**
+
+**Region does not exist on this game at all**, which is why the combo is hidden for it (`YAMPUserInterface.cpp`). Six independent checks agree: the module never reads `config+5`; the ROM contains no region string; the operator menu has no region item (PLAY TIME, MATCH COUNT, NETWORK LINK ATTRIBUTE, WINNING BY DECISION, GAME DIFFICULTY, ADVERTIZE SOUND, CONTINUE, REPLAY AND POSING, RANKING, VERSUS ALWAYS FINISH, DISPLAY BRIGHTNESS, INITIALIZE, EXIT is the whole list); no byte of backup RAM `0x1D00000..0xA0` holds one; the Warning-notice handler has no region test; and the ROM signature `SEGA.AM#3.VRON.` carries no region code. The program ROM's text is already English (`THIS VERSION IS NOT A SIMULATORY SYSTEM.`, `BEAM RIFLE`, `GAME ASSIGNMENTS`) — SEGA shipped region as separate ROM *sets*, and this is the set Kiwami 2 bundles.
+
+> **The boot notice is not a region tell.** `0x5024D4` — the "notice already shown" flag — has exactly three accesses in the whole ROM: the Warning handler reads it (`0x3C6C`), the Warning handler sets it after its 564 frames (`0x3D44`), and `BlackOut` clears it (`0x1871C`). Nothing else writes it and nothing gates it. The only way it is ever pre-set is **HLE hook 5**, which replaces `BlackOut`'s clearing store with a write of 1 — a module hook, not a ROM behaviour, and disabled by default so the arcade boot runs.
+
+**Still unchecked:** Model 2 boards commonly carry a country jumper on the I/O board, read through the I/O port window rather than backup RAM or the config block. That would sit outside all six checks above. If a Japanese *graphic* ever needs explaining, that and the texture ROMs are where to look — not the program ROM.
+
 
 ---
 
@@ -840,9 +862,11 @@ YAMP.exe                                     yampnet.dll (optional)
     ▲ driven by LJ/LJHost.cpp (StF, FV) and YLAD/VF2.cpp (VF2)
 ```
 
+**Two mechanisms, not one.** Everything in §14.3-14.9 is the lockstep path, which is what StF, FV, VF2 and the Model 3 games use. **Virtual On uses none of it** — it is a *linked-cabinet* game whose hardware already has a link protocol, so YAMP carries that protocol's own bytes and lets the ROM do the synchronising. No barrier, no seed, no frame numbering, no determinism requirement. §14.10 is that path; the two share only the session, the room and the socket.
+
 **Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
 
-### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 6`)
+### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 9`)
 
 Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exported symbol**, `YampNet_GetApi(uint32_t requested_abi)`, returning a `yampnet_api` function table, so the loader does exactly one `GetProcAddress` and every later addition is a version bump rather than a new symbol.
 
@@ -855,6 +879,8 @@ Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exp
 **ABI evolution:**
 - ABI 2 added `get_room_id()` — the lobby needs it because there is no room browser on this transport, and before that the id existed only as a line in `yampnet.log`.
 - ABI 3 added **desync detection**: `submit_state_check(session, frame, value)` and `get_desync(session, &frame, &local, &remote)`. Lockstep guarantees identical *inputs*; it cannot guarantee the two emulators agree on what those inputs produced. The value YAMP submits is the ROM's own `frame_counter` at emulated `0x500020`, which advances exactly once per emulated frame and is therefore free of timing noise. The plugin carries the most recent one on every input packet. `get_desync` is **latched** — only the *first* disagreement is reported, because everything after it is a consequence rather than a cause.
+- ABI 7/8 concern the **match seed**: 8 strengthens *when* `get_match_seed` is promised valid (from `IN_ROOM`, not `SYNCING`) and adds the host's `kPacketSeed` heartbeat, because a guest that pressed Start before the host had published anything seeded its emulator with 0.
+- ABI 9 added the **linked-cabinet channel** — `link_ready` / `link_send` / `link_take` — see §14.10. Appended to the table and adding no struct, but a bump all the same: a stale plugin simply would not have the three entries, and calling through a null tail pointer is not a failure mode worth allowing.
 - ABI 6 added **room game flags**: `yampnet_room_config::game_flags` (in), `yampnet_room_info::game_flags` (out, per browser row) and `get_room_flags(session)`. These carry the **cabinet settings a match is played under**, which are properties of the *room*, not of a machine — see §14.9.
 
 > **Adding a flag BIT is not an ABI change.** The plugin carries `game_flags` verbatim between the
@@ -1155,6 +1181,49 @@ resolving to StF `0x1ED490` (site `0x6290F`) and FV `0x1EA590` (site `0x60F6F`) 
 
 ---
 
+### 14.10 The linked-cabinet path — Virtual On (ABI 9)
+
+**A different mechanism from everything above.** Virtual On's arcade cabinets are one Model 2 board each, joined by a serial ring, and the ROM already contains the whole protocol: a boot-time network check, a per-frame state exchange, a versus handshake, and its own failure paths. So YAMP does not synchronise anything — it carries the ROM's bytes and gets out of the way. **No lockstep, no barrier, no seed, no frame numbering, no determinism requirement.** Lockstep was attempted for this game and failed four two-machine runs in four different ways before the architecture was changed; the banner in `docs/von-netplay-recon.md` records why it is not to be re-litigated.
+
+**The payload.** The emulated comm board's window is 0x700 bytes per cabinet per frame. The ROM stages it itself: it memcpys `cSend` (i960 `0x5032F0`) into comm RAM, and comm RAM into `cRecn` (`0x5024F0`) via a validation buffer. **YAMP's entire job is the comm-RAM window in between** — it must never touch `cSend`/`cRecn`.
+
+The packet's own fields, all decoded from the ROM:
+
+| offset | meaning |
+|---|---|
+| `+0x002` | running counter, `1823 * (prev + 3)` |
+| `+0x004` | **the sender's current mode handler** — `0x10` `Advertize`, `0x20` `WaitChallenger`, `0x21` `SelectV`, `0x24` "I have the stage", `0x30`/`0x31` `InitGame`/`Game_01` |
+| `+0x008` | **the stage**, when `+4` is `0x24` |
+| `+0x556` | `counter ^ 0xAE5E` |
+
+> **The counter is NOT a sequence number.** The receiver's test is `packet[+0x556] == packet[+2] ^ 0xAE5E`, and *both operands come out of the datagram in hand* — `0x502236` is `staging + 0x556`, not a locally-tracked expectation. Scanned across the whole 2 MB image it is loaded exactly once and stored never. So it is a self-consistency stamp, loss/duplication/reordering are all legal, and **newest-wins ingest is correct**. This was the standing objection to the entire design and it is simply not true.
+
+**`kPacketLink` (`plugin/yampnet/Lockstep.h`, `Plugin.cpp`).** A raw datagram type on the same P2P socket the lockstep traffic uses, touching none of it — not the input rings, not the barrier, not the state-check machinery. One newest-wins inbound slot. Three entry points: `link_ready` (is a peer reachable), `link_send`, `link_take`. **Usable from `IN_ROOM` onwards**, not from a match: the cabinets link during their boot-time check, which is long before anyone presses Start, and they stay linked between matches.
+
+> Two traps worth keeping. The plugin's receive buffer was `uint8_t[512]` against an 1808-byte link packet — `recvfrom` does **not** truncate, it drops the remainder and reports `WSAEMSGSIZE`, so link packets would have vanished while every lockstep packet kept working. And `link_ready` means "the peer's address is known", which is the right gate for *sending* and the wrong answer for "is the ring up": a cabinet that has stopped sending still has an address, so K2Host ages its own 30-host-frame liveness timeout on top.
+
+**`K2Host` pumps the session itself** (`DriveNetSession`, once per host frame). Every other game reaches `poll()` through `m2ftg::NetSession::Drive`, which also runs the lockstep round flow — Virtual On calls none of that, which left the session's connect, RPCN signalling, transport update and socket drain with nothing driving them. Without this the room never forms, on the lobby path as well as the command-line one.
+
+**The comm-board firmware model** (`DriveCommFirmware`). The Kiwami 2 module fakes a healthy two-node ring with immediates and writes it *once*, at board release, from a latch — real firmware reports continuously, because a ring can go down. So YAMP owns byte 0 (ring up), byte 2 (node id, **from the cabinet role, not the board index** — the index is 0 on every one-board machine) and byte 3 (node count) in both banks, every `module_main` call.
+
+**Delivery position is load-bearing.** `DeliverCommPayload` runs from the link-transfer shim *immediately after* the module's own `g_origLinkTransfer()` and before either CPU steps. The module's transfer is a writer into the same window, and on a one-board cabinet it copies board 1's never-executed, all-zero send buffer straight over the peer's packet. Delivering before `module_main` produced valid packets sitting in comm RAM, `stage=0000/0000`, and `cRecn` never written once in a 1200-frame run. It writes **both banks** and touches the flag register not at all — the bank selector is the module's business and YAMP's attempts to drive bit 0 were simply overwritten each frame. The packet is held **resident** and re-laid after every transfer, which is what a DPRAM does between arrivals and what makes a dropped datagram cost nothing.
+
+**The room assigns the role.** `local_player` 0 = host = MASTER, 1 = guest = SLAVE, applied through `SoftResetIntoRole` (which pulses the cabinet's TEST switch — the ROM's own re-handshake path, chosen because `MainMode` is a request the mainloop only acts on between handlers, not a jump). While a room is up this overrides the `VonCabinetRole` setting entirely: two players who both picked MASTER would otherwise get no link and no explanation. A live room also implies `VonHoldLink`.
+
+**Game speed is a competitive advantage.** `VirtualClock::PaceToVirtualTime`'s policy — *"a host that cannot keep up runs slow rather than stuttering"* — is right for one player and backwards for a linked pair: a cabinet presenting at 32 Hz runs its **board** at 32 Hz, so its pilot moves and fires at half the rate of the one at 60. `VirtualClock::BoardFramesDue(linkLive)` is a fixed-timestep accumulator that steps the board more than once when a host frame overran its 1/60 s budget, capped at 4 (past which the debt is dropped rather than carried). **Solo play keeps the old policy.** Safe here for exactly the reason it was unsafe under lockstep: there is no frame numbering to violate and no peer to stay bit-identical with.
+
+> **This is not only about fairness — it broke the protocol.** The stage handshake works by one cabinet rolling `rand() & 7` (gated on `VersusMode != 0`) and publishing it at `+8` alongside state `0x24` at `+4`, and the other adopting both from `cRecn+8` on seeing `0x24`. **State `0x24` lives for a single board frame.** A cabinet at 32 Hz read its comm RAM half as often as YAMP replaced the resident packet at 60, so the one frame carrying the stage could be overwritten before its ROM ever saw it — and the two cabinets loaded different stages. It presented as an RPCN-vs-LAN difference and was nothing of the kind. **Carry this to Motor Raid and Sega Rally 2: a single-frame handshake state is only safe between boards running at the same rate.**
+
+**A game with no round needs its own overlay.** The netplay overlay hides itself on `YAMPNET_STATE_IN_MATCH`, which a linked-cabinet session never reaches — so "Both players press Start match" sat over an entire match, telling both players to press a button that does nothing for this game. `m2ftg::K2::GetLinkedCabinet` reports the ROM's own answers (ring up, node id/count, `net_flag`) and the overlay renders those instead; the lobby hides the Start-match button for the same reason.
+
+**Diagnostics.** `[von]` lines in `yampnet.log` behind the "Log linked-cabinet state" setting, emitted on change of the discrete state plus a 120-frame heartbeat. They carry the ROM's verdict in words, `net`/`id`/`node`/`main`, own and peer state (`tx=`/`rx=`), the stage fields, `vs=`/`sel=`/`field=`, and the packet's `seq/check` pair at every point along its path (`send0`/`send1` → `data0`/`data1` → `stg`) with `*` marking a pair that passes the ROM's test. That last row turned "it does not work" into two specific mistakes in a single run. **Read board rate from `xfer=` (the module's frame-driver tick), not `f=` — `f=` counts host frames, and with catch-up stepping those are no longer the same thing.**
+
+**Removed 2026-08-07: the loopback harness.** `VonLink` was a direct address:port transport compiled into YAMP so two instances on ONE machine could exercise the link, because RPCN cannot do loopback — it hardcodes 3658 in the address it hands a peer. It brought up the firmware model, the bank discipline, the delivery window and the whole probe, and it is gone, along with `VonLinkPeer`, `VonLinkPort`, YAMP's copy of `plugin/yampnet/Transport.{h,cpp}` and the `ws2_32` link on the YAMP project. RPCN is the protocol this ships on, and a second transport that nothing tests is a second set of behaviours to keep true. **Testing a link now requires two machines** (`-net-host` / `-net-join <roomId>`).
+
+**Status.** Verified on two machines over RPCN: both cabinets reach "Network Check Success", exchange the ROM's payload continuously, run the versus handshake, agree on a stage and play a match through. Untested: latency beyond a LAN — the 1808-byte payload IP-fragments and the exchange runs ~2× per frame, roughly 200 KB/s each way, so sending only when the ROM has stamped a new counter (free to detect) is the obvious first lever.
+
+---
+
 ## 15. Settings file reference
 
 `settings.ini` next to `YAMP.exe` (portable mode; `SetDataPath()` resolves from the module path, not the CWD). One file, per-game sections; save files carry the game tag, so one folder holds them all.
@@ -1201,6 +1270,9 @@ resolving to StF `0x1ED490` (site `0x6290F`) and FV `0x1EA590` (site `0x60F6F`) 
 | | `FrameDelay` | int | 3 | Higher hides more latency; too low stalls rather than desyncs |
 | | `TimerTrace` | 0/1 | 0 | **Diagnostic, no UI.** One line per emulated frame to `yampnet.log` carrying the i960's four timer channels and the instructions charged to them. The timers count INSTRUCTIONS, not wall clock, so the line is a direct readout of instructions-per-frame and two peers' logs diff line-for-line (§14.8d). Runs in and out of a round, so it can be validated on one machine. Costs a file open/append/close per frame — leave off for ordinary play |
 | | `ForceUnsupported` | 0/1 | 0 | **Diagnostic, no UI.** Lets a game whose `netplayReady` is false still open a round, so a game that is measured but not yet trusted can be observed at all — which is what §14.8d was found with. A round run under it is expected to be wrong |
+| | `VonCabinetRole` | 0/1/2 | 0 | Virtual On only: NOLINK / MASTER / SLAVE, applied before `module_start`. **A live room overrides it** (§14.10) |
+| | `VonHoldLink` | 0/1 | 0 | Virtual On only: hold the cabinet in its boot-time link check until a partner answers. Implied by a live room |
+| | `VonLinkLog` | 0/1 | 0 | Virtual On only: the `[von]` link probe into `yampnet.log` (§14.10) |
 
 ---
 
@@ -1221,6 +1293,13 @@ Everything else described in this document is committed.
 - **The stall test in §14.8d is conservative and not provably exact** — it misses ~14 stalls per 4,000 frames (ROM counter unmoved but the canary or a timer moved), counting them as real frames. That is the safe direction and no round has drifted because of it, but it is the first place to look if a long match ever does.
 - **Netplay credentials share `settings.ini`** with per-game settings, so resetting game settings destroys the account configuration. They belong in their own file.
 - **HLE hook hit-counters read 0 for VF2**, because the instruction-fetch hook that feeds them is LJ-only. Absent rather than wrong, but it looks broken in the settings panel.
+
+**Virtual On / linked-cabinet (§14.10), as of 2026-08-07:**
+
+- **Untested beyond a LAN.** The link payload is 1808 bytes on the wire against a 1500-byte path MTU, so every datagram IP-fragments, and the exchange runs roughly twice per frame — about 200 KB/s each way. A LAN carries it; fragmented UDP is dropped far more readily on the open internet and a lost fragment loses the whole datagram. Two levers before internet play is worth attempting: send only when the ROM has stamped a NEW counter (the `+2` field makes that free to detect, and it roughly halves the rate), and delta-code against the last payload sent.
+- **Input mapping for a linked match is unfinished** — the cabinets link and play, but which physical control reaches which pod has not been worked through.
+- **`SoftResetIntoRole` has never been driven from the settings UI at runtime**, only from a room join and from a direct call. Same code path, but the setting-change route is unexercised.
+- **The catch-up pacer is capped at 4 board frames** and drops the debt past that. A host that is persistently slower than 60 Hz therefore still runs slow, just less so; the cap exists because a long hitch repaid in one burst freezes the host.
 
 ## 17. Suggested reimplementation order
 

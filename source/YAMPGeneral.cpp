@@ -25,7 +25,7 @@ const char* YAMPGeneral::GetArcadeGameName() const
 	case GameId::VF2_K2: return "Virtua Fighter 2";
 	case GameId::VON_K2: return "Virtual On";
 	case GameId::FV2: return "Fighting Vipers 2";
-	case GameId::SRC2: return "Sega Rally Championship 2";
+	case GameId::SRC2: return "Sega Racing Classic 2";
 	case GameId::Launcher: return "Yakuza Arcade Machines Player";
 	default: return "Virtua Fighter 5: Final Showdown";
 	}

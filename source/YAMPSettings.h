@@ -166,6 +166,52 @@ public:
 	// VF2, which is held back precisely because it diverges - so this exists to make that
 	// divergence observable, and a match run under it is expected to be wrong.
 	bool m_netForceUnsupported = false;
+	// NETPLAY MODE FOR THIS LAUNCH. Read once at start-up, never mid-session.
+	//
+	// It exists because a LINKED-CABINET game cannot change its mind about how many Model 2 boards
+	// it is running. Virtual On brings up its second cabinet only when this is set, because an idle
+	// second board is not neutral - it is a peer the ROM waits for, and the operator's menu
+	// deadlocks against it. Bringing one up on a live board is the transition that has to be
+	// avoided, so the answer is fixed for the process and changing it means restarting the game.
+	//
+	// Off by default: the common case is one person at one cabinet.
+	bool m_netEnabled = false;
+
+	// WHICH CABINET OF THE LINKED PAIR THIS MACHINE IS. Virtual On only; read once at start-up.
+	//
+	//     0  NOLINK   the module's own answer - a standalone cabinet
+	//     1  MASTER
+	//     2  SLAVE
+	//
+	// These are YAMP's numbers, chosen to read in the obvious order; the module's backup-RAM byte
+	// uses a different encoding (see K2Host::ApplyCabinetRole) and the ROM a third one again
+	// (link_ID: 1 = master site, 2 = slave site, 3 = standalone). Do not assume any two agree.
+	//
+	// Why a setting and not a command-line flag: the role belongs to the MACHINE, so it is set once
+	// per install and wanted on every ordinary launch - including one started from the game
+	// launcher, which passes only the game's boot argument and so cannot carry a flag at all.
+	// Restart-scoped for the same reason as m_netEnabled above: the ROM reads the byte once, in
+	// InitNetwork, several hundred frames before anyone can open this page.
+	uint32_t m_vonCabinetRole = 0;
+
+	// Log the linked-cabinet state - both boards' link_ID, net_flag, MainMode, GlobCntr, comm
+	// flags and payload counts - every 200 frames. This is what says whether the cabinet role
+	// above actually took, and whether a link came up.
+	//
+	// A SETTING RATHER THAN THE `-von-2probe` FLAG IT REPLACES, because the game launcher passes
+	// only the game's boot argument: anything behind a command-line flag is invisible to a run
+	// started the normal way, which is how the first two-machine tests silently ran with no
+	// diagnostics at all on either peer (docs/von-netplay-recon.md records the cost). A
+	// diagnostic that cannot be turned on in the situation you need it is not a diagnostic.
+	bool m_vonLinkLog = false;
+
+	// Hold the comm board's "ring up" byte at 0, so the ROM's own link check waits instead of
+	// succeeding against the fake healthy ring the module leaves in the status bytes. The board
+	// sits in "Checking Network Now", yielding every frame, until something releases it - which
+	// is the state a pair of cabinets is in before the other one is switched on.
+	//
+	// Off by default: with nothing to release it, the game waits forever. See K2Host::HoldCommRing.
+	bool m_vonHoldLink = false;
 
 	// ---- Draw isolation (rendering bugs) ----------------------------------------------------
 	// Drop every module draw whose per-frame index is >= this; 0 draws everything. Sweeping it

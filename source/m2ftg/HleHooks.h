@@ -23,6 +23,13 @@ namespace m2ftg
 	//
 	//     Sonic the Fighters   76 hooks   table DLL+0x1E8870
 	//     Fighting Vipers      95 hooks   table DLL+0x1E5840
+	//     Virtual Fighter 2    (YLAD)     table DLL+0x185640
+	//     Virtual On          120 hooks   table DLL+0x476520
+	//
+	// Virtual On is the exception to "restore the original instruction": its traps are disabled by
+	// repointing the TABLE's handler column at the module's own execute-original tail instead
+	// (GameHooks::Disable::HandlerTail), because that column is static .data no part of the module
+	// ever writes. That is also why its mask reaches the boot path - see Update().
 	//
 	// Everything game-specific lives in the GameHooks table in the .cpp; the API below is
 	// game-agnostic and reads the current game's descriptor through Count()/Get().
@@ -48,6 +55,16 @@ namespace m2ftg
 			// runs exactly as the ROM wrote it. These are debug probe points whose bodies were
 			// compiled out of the retail build. Disabling one changes nothing observable.
 			Inert,
+			// Enumerated but not yet reversed: listed from a module's own table and named from its
+			// ROM symbol table, with nobody having read the handlers, so which of them are emulator
+			// plumbing is unknown. NO GAME USES THIS TODAY - Virtual On's 120 were classified on
+			// 2026-08-05 - but it is what a newly enumerated game's table should start as.
+			//
+			// Treated as SESSION-ONLY for that reason (see SESSION_ONLY_KINDS): a hook that turns
+			// out to be Core could otherwise be ticked, saved, and leave the game unbootable with
+			// the settings UI hung behind it. Live toggling is the point; persistence is what is
+			// unsafe while the kind is a guess.
+			Unclassified,
 		};
 
 		struct Info
@@ -65,7 +82,7 @@ namespace m2ftg
 		// the game that is running - iterate with that, size with this.
 		//
 		// It must stay <= 128, because the disable mask is a uint64_t[2].
-		inline constexpr size_t MAX_COUNT = 96;
+		inline constexpr size_t MAX_COUNT = 128;   // Virtual On has 120
 		static_assert(MAX_COUNT <= 128, "the disable mask is a uint64_t[2]");
 
 		// Hooks in the running game's table, or 0 if this game has no HLE hook table (which
@@ -93,14 +110,15 @@ namespace m2ftg
 		// that address from running, and nothing the emulator needs to keep running.
 		inline constexpr unsigned MODDING_KINDS = KindBit(Kind::Content) | KindBit(Kind::Removed);
 		// Every hook, including the ones the emulator depends on. Expect a hang.
-		inline constexpr unsigned ALL_KINDS = KindBit(Kind::Core) | KindBit(Kind::Host) | MODDING_KINDS | KindBit(Kind::Inert);
+		inline constexpr unsigned ALL_KINDS = KindBit(Kind::Core) | KindBit(Kind::Host) | MODDING_KINDS
+			| KindBit(Kind::Inert) | KindBit(Kind::Unclassified);
 
 		// Disabling a Core hook hangs the emulated board, and the hang takes the settings UI
 		// with it - so a Core bit that survived into settings.ini would make YAMP unbootable
 		// with no way back. Core bits are therefore session-only: they can be ticked and take
 		// effect live, but they are stripped when settings are saved and again when they are
 		// loaded, so a restart always recovers.
-		inline constexpr unsigned SESSION_ONLY_KINDS = KindBit(Kind::Core);
+		inline constexpr unsigned SESSION_ONLY_KINDS = KindBit(Kind::Core) | KindBit(Kind::Unclassified);
 
 		// ---- Hooks YAMP disables by default ------------------------------------------------
 		//
@@ -145,6 +163,36 @@ namespace m2ftg
 		// null - an unsupported game gets a zero mask.
 		inline constexpr size_t HOOK_STF_GAME_INT_TIME = 16;
 		inline constexpr size_t HOOK_STF_ATTRACT_TIMER = 17;
+
+		// VIRTUAL ON SKIPS ITS WARNING SCREEN, and hook 5 is the whole of why.
+		//
+		// `Warning` (i960 0x3C40) is MainMode 0 - literally the first entry of the mainloop's mode
+		// table at 0x18680, with Advertize (the SEGA screen) at [1]. It is guarded by an
+		// "already shown" flag at guest 0x5024D4:
+		//
+		//     3C6C  ld   0x5024D4, g4     ; the flag
+		//     3C74  lda  0x234, g2        ; 564 frames ~ 9.4 s
+		//     3C7C  st   g2, 0x503A04     ; the mode timer
+		//     3C84  bne  loc_3CFC         ; SET -> skip the text and MainMode++ immediately
+		//           ...print the notice, hold for the timer...
+		//     3D44  st   g2, 0x5024D4     ; ...then mark it shown and MainMode++
+		//
+		// The ROM clears that flag during BlackOut (`st g14, 0x5024D4` at 0x1871C). Hook 5 replaces
+		// that instruction with a write of ONE - pre-marking the notice as already seen - so mode 0
+		// falls straight through to mode 1 and the board appears to boot directly to the SEGA
+		// screen. Disabling it restores the arcade boot, which is both what the hardware did and
+		// what a linked pair needs: the boot sequence is where the cabinets find each other.
+		//
+		// MEASURED (MASTER, 1200 frames): enabled, MainMode is 1 by the first sample; disabled, it
+		// stays 0 for ~564 frames and then advances - the ROM's own 0x234, to the frame. Confirmed
+		// on screen by the user: the warning is displayed.
+		//
+		// Disabled by DEFAULT rather than forced, so it stays visible and re-enableable like every
+		// other hook. NOTE the same trap as StF's: a settings.ini written before this change
+		// carries an explicit `DisabledHleHooksLo.VON-K2=0`, and an explicit value always beats a
+		// default - such a profile keeps skipping the warning until "Restore defaults" is pressed
+		// (or the two DisabledHleHooks*.VON-K2 lines are deleted).
+		inline constexpr size_t HOOK_VON_WARNING_SKIP = 5;
 		const uint64_t* DefaultDisableMask();
 
 		// Restores or re-applies each hook to match the "Disable DLL HLE ROM hooks" setting.

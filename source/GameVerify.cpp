@@ -105,7 +105,7 @@ namespace Verify
 		};
 
 		// Like a Dragon Gaiden's Model 3 emulator, runtime/media/pre3/. ONE module for both
-		// Fighting Vipers 2 and Sega Rally Championship 2 (and four more games it has no data
+		// Fighting Vipers 2 and Sega Racing Classic 2 (and four more games it has no data
 		// for), so the two GameIds below share this table — which game runs is a config byte,
 		// not a different file. Built 2024-03-10, four months after the same title's m2ftg
 		// modules, but the same pxd generation as them.

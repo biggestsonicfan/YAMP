@@ -126,21 +126,53 @@ namespace m2ftg
 					// on a lookalike.
 					symbols.Add(S::BOARD_SELECT,
 						Memory::ReadCallFrom(boardTail.get(0).get<void>(14)));
+					// Board 1's I/O refresh, the next call along: 14 is the bank switch, 19 the
+					// refresh, 24 the CPU step. The cabinet switches have to reach this one too or
+					// the pair deadlocks - see I960_IO_REFRESH_CALL_B1 in the header.
+					symbols.Add(S::I960_IO_REFRESH_CALL_B1, boardTail.get(0).get<void>(19));
 				}
 			}
 
-			// The per-board init, from boot phase 2's `XOR ECX,ECX / CALL init / MOV ECX,1 / CALL
-			// init` pair - the only place in the image that initialises both boards back to back,
-			// and unique. Taking it from the call site rather than its own prologue means it cannot
-			// resolve to a lookalike.
+			// The frame driver's board-0 sequence: `XOR ECX,ECX / CALL bank_switch / CALL io_refresh
+			// / CALL cpu_step / CMP byte [two_board_gate],0`. The trailing CMP is what makes it
+			// unique - the same three-call shape appears in the board-1 tail, which is followed by
+			// the bank switch back to 0 instead.
 			{
-				hook::pattern bothBoards(dll, "33 C9 E8 ? ? ? ? B9 01 00 00 00 E8 ? ? ? ?");
-				if (bothBoards.size() == 1)
+				hook::pattern board0(dll, "33 C9 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 80 3D");
+				if (board0.size() == 1)
 				{
-					symbols.Add(S::PER_BOARD_INIT,
-						Memory::ReadCallFrom(bothBoards.get(0).get<void>(2)));
+					symbols.Add(S::I960_IO_REFRESH_CALL, board0.get(0).get<void>(7));
 				}
 			}
+
+			// The frame driver's link-transfer call: `INC dword [link_frame_counter] / CALL
+			// transfer / XOR ECX,ECX / CALL bank_switch`. The INC is what anchors it - the
+			// board-0 pattern above starts at that same XOR, so the two agree on the same site.
+			{
+				hook::pattern linkXfer(dll, "FF 05 ? ? ? ? E8 ? ? ? ? 33 C9 E8");
+				if (linkXfer.size() == 1)
+				{
+					symbols.Add(S::LINK_TRANSFER_CALL, linkXfer.get(0).get<void>(6));
+				}
+			}
+
+			// The QueryPerformanceCounter wrapper. Matched on its whole body rather than a prologue:
+			// it is a tiny leaf, and `zero a local / LEA it / CALL [IAT] / return the local` in this
+			// exact register allocation occurs once. The IAT displacement is wildcarded because it
+			// is the one part that moves between builds.
+			{
+				hook::pattern clock(dll,
+					"48 83 EC 28 48 8D 4C 24 30 48 C7 44 24 30 00 00 00 00 FF 15 ? ? ? ? "
+					"48 8B 44 24 30 48 83 C4 28 C3");
+				if (clock.size() == 1)
+				{
+					symbols.Add(S::WALL_CLOCK, clock.get(0).get<void>(0));
+				}
+			}
+
+			// (A PER_BOARD_INIT pattern lived here and has been removed - it matched boot phase 2's
+			// `XOR ECX,ECX / CALL / MOV ECX,1 / CALL` pair, which is the per-board VIDEO init, not
+			// the CPU one. See the note in ImportSymbols.h.)
 
 			return symbols;
 		}

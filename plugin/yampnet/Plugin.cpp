@@ -123,8 +123,23 @@ struct yampnet_session
     yampnet_match_config match = {};
     uint64_t wait_since_ms = 0;      // when the current stall began; 0 = not stalling
     uint64_t last_wait_report_ms = 0;
+    uint64_t last_seed_send_ms = 0;  // host's IN_ROOM seed heartbeat
     bool seeded_delay_frames = false;
     bool room_logged = false;
+
+    // ---- Linked-cabinet channel (kPacketLink) --------------------------------------------
+    //
+    // ONE slot, newest wins, and that is the correct policy rather than a simplification: the
+    // payload is a complete snapshot of the peer cabinet every frame, so an older datagram says
+    // nothing a newer one does not, and queueing them would feed the emulated hardware stale
+    // state one frame at a time. Deliberately independent of round state, generation and the
+    // input rings - two cabinets link during their boot-time network check and stay linked
+    // between matches, which is long before and long after any round exists.
+    uint8_t link_in[yampnet::kLinkPayloadMax] = {};
+    uint32_t link_in_len = 0;
+    bool link_have = false;
+    uint32_t link_rx = 0;    // counters, for the log only
+    uint32_t link_tx = 0;
 
     void Log(yampnet_log_level level, const char* fmt, ...)
     {
@@ -161,6 +176,27 @@ struct yampnet_session
         pkt.seed = IsHost() ? match_seed : 0;   // only the host's seed is authoritative
         transport.Send(0, &pkt, sizeof(pkt));
     }
+
+    // Publish the match seed without touching the barrier. Host only - a guest has nothing
+    // authoritative to say - and sent from IN_ROOM onwards so a guest holds the seed BEFORE it
+    // starts preparing a round, whichever player presses Start first.
+    //
+    // Same payload as an announce, different type, and that distinction is the whole point: the
+    // receiver feeds announces to Lockstep::OnPeerAnnounce, and a heartbeat that did the same
+    // could release a barrier for a round this peer has not prepared. Generation is stamped only
+    // so the packet is self-describing; nothing reads it.
+    void SendSeed()
+    {
+        if (!IsHost())
+            return;
+        yampnet::AnnouncePacket pkt = {};
+        pkt.header.type = yampnet::kPacketSeed;
+        pkt.header.player = static_cast<uint8_t>(local_player < 0 ? 0 : local_player);
+        pkt.header.generation = static_cast<uint8_t>(generation & 0x1F);
+        pkt.header.session = SessionId();
+        pkt.seed = match_seed;
+        transport.Send(0, &pkt, sizeof(pkt));
+    }
 };
 
 namespace
@@ -170,6 +206,10 @@ namespace
     // How often the barrier reports why it is still waiting. Often enough to be useful while a
     // player stares at the waiting screen, rare enough not to bury the log.
     constexpr uint64_t kWaitReportIntervalMs = 5000;
+
+    // How often the host republishes the match seed while idling in a room. Often enough that a
+    // guest holds it long before anyone reaches for Start, rare enough to be invisible.
+    constexpr uint64_t kSeedPublishIntervalMs = 250;
 
     // Pads live at validated offsets inside YAMP's execute_info - the layout handshake at create()
     // is what makes this pointer arithmetic safe.
@@ -250,7 +290,12 @@ namespace
 
     void DrainSocket(yampnet_session* s)
     {
-        uint8_t buf[512];
+        // Big enough for the LARGEST packet on this wire, which is now the linked-cabinet payload
+        // and not an input record. A short buffer is not a truncated read here - recvfrom drops
+        // the remainder and reports WSAEMSGSIZE - so an undersized one would make link packets
+        // vanish while every lockstep packet kept working, which is a nasty way to find out.
+        static_assert(sizeof(LinkPacket) >= sizeof(InputPacket), "size the buffer to the biggest");
+        alignas(4) uint8_t buf[sizeof(LinkPacket) + 64];
         uint32_t peer = 0;
         for (;;)
         {
@@ -310,6 +355,36 @@ namespace
                 // emulator RNG identically.
                 if (!s->IsHost() && hdr->player == 0)
                     s->match_seed = ann->seed;
+            }
+            else if (hdr->type == kPacketLink
+                     && got >= static_cast<int>(sizeof(PacketHeader) + sizeof(uint32_t)))
+            {
+                // Opaque cargo. Newest wins, no ordering, no round, no generation check - see
+                // kPacketLink. The only validation is that the declared length fits, because
+                // everything past this point is a memcpy into emulated hardware.
+                const auto* link = reinterpret_cast<const LinkPacket*>(buf);
+                const uint32_t len = link->len;
+                if (len != 0 && len <= kLinkPayloadMax
+                    && got >= static_cast<int>(sizeof(PacketHeader) + sizeof(uint32_t) + len))
+                {
+                    memcpy(s->link_in, link->payload, len);
+                    s->link_in_len = len;
+                    s->link_have = true;
+                    ++s->link_rx;
+                }
+            }
+            else if (hdr->type == kPacketSeed && got >= static_cast<int>(sizeof(AnnouncePacket)))
+            {
+                // Seed only. Pointedly does NOT call OnPeerAnnounce: this arrives while the host
+                // is merely sitting in the room, and treating it as an announcement would let the
+                // host release a barrier for a round the guest has not begun.
+                const auto* ann = reinterpret_cast<const AnnouncePacket*>(buf);
+                if (!s->IsHost() && hdr->player == 0 && ann->seed != 0
+                    && s->match_seed != ann->seed)
+                {
+                    s->match_seed = ann->seed;
+                    s->Log(YAMPNET_LOG_INFO, "adopted the host's match seed 0x%08X", ann->seed);
+                }
             }
         }
     }
@@ -400,6 +475,26 @@ namespace
         }
 
         DrainSocket(s);
+
+        // PUBLISH THE SEED FROM THE MOMENT THE ROOM EXISTS, not from the moment a round starts.
+        // Until this existed, the seed only ever travelled on an announce, and announces only
+        // begin when a peer calls begin_round - so a guest that pressed Start first prepared its
+        // round with a seed of 0 while the host used the real one, and the two boards were reset
+        // from differently seeded generators before frame 0. Order of pressing decided whether the
+        // match could work.
+        //
+        // Cheap and unconditional rather than clever: 12 bytes a few times a second, only while
+        // idling in a room, and repeated because it is a plain datagram that may be lost and
+        // because the peer's address is not known the instant the room appears.
+        if (s->state == YAMPNET_STATE_IN_ROOM && s->IsHost())
+        {
+            const uint64_t now = GetTickCount64();
+            if (now - s->last_seed_send_ms >= kSeedPublishIntervalMs)
+            {
+                s->last_seed_send_ms = now;
+                s->SendSeed();
+            }
+        }
 
         if (s->state == YAMPNET_STATE_SYNCING)
         {
@@ -512,6 +607,13 @@ namespace
             s->match_seed = cfg->forced_seed;
         else
             s->match_seed = static_cast<uint32_t>(GetTickCount64()) ^ 0x9E3779B9u;
+
+        // ZERO IS THE "not known yet" VALUE, so the host must never hold it. A guest reads 0 until
+        // the host's seed reaches it and waits on exactly that test; a host that happened to roll 0
+        // would publish a seed indistinguishable from silence and hang its guest at Start. One
+        // tick in 2^32, and it would look like a network fault.
+        if (s->match_seed == 0)
+            s->match_seed = 0x9E3779B9u;
 
         // Do NOT declare IN_ROOM here. The room does not exist until the server replies; poll()'s
         // stage mapping owns the state. Setting it optimistically (a leftover from the UDP backend)
@@ -703,6 +805,54 @@ namespace
 
     uint32_t ApiGetRoomFlags(yampnet_session* s) { return s ? s->transport.RoomFlags() : 0; }
 
+    // ---- Linked-cabinet channel ----------------------------------------------------------
+    //
+    // Deliberately usable from IN_ROOM onwards rather than only in a match: the cabinets link
+    // during their boot-time network check, which happens as soon as both are present and long
+    // before anyone reaches for Start. Gated on the peer's address being KNOWN, because before
+    // that there is nowhere to send and every call would be a silent no-op.
+    int32_t ApiLinkSend(yampnet_session* s, const void* data, uint32_t len)
+    {
+        if (!s || !data || len == 0 || len > kLinkPayloadMax || !s->transport.PeerKnown())
+            return 0;
+        LinkPacket pkt = {};
+        pkt.header.type = kPacketLink;
+        pkt.header.player = static_cast<uint8_t>(s->local_player < 0 ? 0 : s->local_player);
+        pkt.header.generation = static_cast<uint8_t>(s->generation & 0x1F);
+        pkt.header.session = s->SessionId();
+        pkt.len = len;
+        memcpy(pkt.payload, data, len);
+        // Only the live bytes go on the wire - the payload array is a maximum, not a size.
+        const uint32_t bytes = sizeof(PacketHeader) + sizeof(uint32_t) + len;
+        if (!s->transport.Send(0, &pkt, bytes))
+            return 0;
+        ++s->link_tx;
+        return static_cast<int32_t>(len);
+    }
+
+    // Drains first, so a caller running at emulator rate is never a frame behind the socket.
+    // Returns 0 when nothing new has arrived, which is how the caller knows to keep the payload
+    // it already has rather than hand the hardware a gap.
+    int32_t ApiLinkTake(yampnet_session* s, void* out, uint32_t cap)
+    {
+        if (!s || !out || cap == 0)
+            return 0;
+        DrainSocket(s);
+        if (!s->link_have || s->link_in_len == 0 || s->link_in_len > cap)
+            return 0;
+        const uint32_t len = s->link_in_len;
+        memcpy(out, s->link_in, len);
+        s->link_have = false;
+        return static_cast<int32_t>(len);
+    }
+
+    // "Is there a peer to link with right now?" - the one question the cabinet's firmware model
+    // asks, and the honest answer is the peer's address being known, not the round state.
+    int32_t ApiLinkReady(yampnet_session* s)
+    {
+        return (s && s->transport.PeerKnown()) ? 1 : 0;
+    }
+
     void ApiSubmitStateCheck(yampnet_session* s, uint32_t frame, uint32_t value)
     {
         if (!s || frame == kNoCheck)
@@ -750,6 +900,9 @@ namespace
         &ApiSubmitStateCheck,
         &ApiGetDesync,
         &ApiGetRoomFlags,
+        &ApiLinkReady,
+        &ApiLinkSend,
+        &ApiLinkTake,
     };
 }
 

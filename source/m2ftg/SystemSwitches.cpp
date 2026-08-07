@@ -31,6 +31,7 @@ namespace m2ftg
 	namespace SystemSwitches
 	{
 		constexpr size_t IO_SYSTEM_PORT = 9;
+		constexpr size_t IO_SYSTEM_PORT_BANK1 = 10;
 		constexpr uint8_t BIT_TEST = 0x04;
 		constexpr uint8_t BIT_SERVICE = 0x08;
 
@@ -38,6 +39,8 @@ namespace m2ftg
 		static uint8_t* const* ioState = nullptr;   // the DLL's own I/O board pointer
 		// Written by the host thread each frame, read by the module thread inside the hook.
 		static std::atomic<uint8_t> heldMask{ 0 };
+		// Whether guest 0x01C00002 is MULTIPLEXED between io[9] and io[10]. See below.
+		static bool bothBanks = false;
 
 		static void IoRefresh()
 		{
@@ -46,7 +49,22 @@ namespace m2ftg
 			if (io != nullptr)
 			{
 				// Active low: a closed switch is a CLEARED bit.
-				io[IO_SYSTEM_PORT] &= static_cast<uint8_t>(~heldMask.load(std::memory_order_relaxed));
+				const uint8_t clear = static_cast<uint8_t>(~heldMask.load(std::memory_order_relaxed));
+				io[IO_SYSTEM_PORT] &= clear;
+
+				// VIRTUAL ON SERVES THE SYSTEM PORT FROM WHICHEVER BANK io[8] SELECTS:
+				// `io[8] & 1 ? io[10] : io[9]`, and it runs with that bit SET, so a switch written
+				// only into io[9] is never read. Neither byte has a host source for TEST or SERVICE
+				// - the refresh forces io[9] bits 2 and 3 to 1 (`~(mask<<2) | 0xEF`) and leaves
+				// io[10] at 0xFF except for the coin one-shot in bit 0 - so driving both is safe:
+				// there is no value in either that this can be destroying.
+				//
+				// Not done for the Lost Judgment modules, where io[10] IS the DIP bank and bits 2
+				// and 3 are dip switches rather than a second copy of the panel.
+				if (bothBanks)
+				{
+					io[IO_SYSTEM_PORT_BANK1] &= clear;
+				}
 			}
 		}
 
@@ -95,6 +113,41 @@ namespace m2ftg
 		SystemSwitches::orgIoRefresh = refresh;
 		Trampoline* t = Trampoline::MakeTrampoline(dll);
 		Memory::InjectHook(callSite, t->Jump(&SystemSwitches::IoRefresh));
+	}
+
+	void InstallSystemSwitchesAt(void* dll, void* callSite, void* callSiteBoard1,
+		uint8_t* const* ioStateGlobal, bool multiplexedSystemPort)
+	{
+		if (callSite == nullptr || ioStateGlobal == nullptr)
+		{
+			DebugLog("[%s] No emulated I/O board - Test / Service switches unavailable.\n",
+				gGeneral.GetGameTag());
+			return;
+		}
+
+		void (*refresh)() = nullptr;
+		Memory::ReadCall(callSite, refresh);
+		if (refresh == nullptr)
+		{
+			return;
+		}
+
+		SystemSwitches::ioState = ioStateGlobal;
+		SystemSwitches::bothBanks = multiplexedSystemPort;
+		SystemSwitches::orgIoRefresh = refresh;
+		Trampoline* t = Trampoline::MakeTrampoline(dll);
+		// Both call sites reach the SAME refresh, so one trampoline serves both. The hook then runs
+		// once per board, with that board's I/O block already selected by the bank switch.
+		void* const jump = t->Jump(&SystemSwitches::IoRefresh);
+		Memory::InjectHook(callSite, jump);
+		if (callSiteBoard1 != nullptr)
+		{
+			Memory::InjectHook(callSiteBoard1, jump);
+		}
+		DebugLogFile("[%s] Test / Service switches installed on %d board(s) "
+			"(refresh %p, io state %p).\n",
+			gGeneral.GetGameTag(), callSiteBoard1 != nullptr ? 2 : 1,
+			reinterpret_cast<void*>(refresh), static_cast<const void*>(ioStateGlobal));
 	}
 
 	void SetSystemSwitches(bool test, bool service)

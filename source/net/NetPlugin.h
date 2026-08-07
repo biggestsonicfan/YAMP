@@ -73,6 +73,19 @@ namespace net
     // Clears the request when a round ends, so the next match needs a fresh Start press.
     void ClearStartRequest();
 
+    // WAS THIS PROCESS LAUNCHED FOR NETPLAY? Fixed for the lifetime of the process, deliberately.
+    //
+    // A linked-cabinet game (Virtual On, and later Motor Raid) runs its second Model 2 board only
+    // when the answer is yes: an idle second cabinet is not neutral, it is a peer the ROM waits
+    // for, and the operator menu deadlocks against it. Going the other way - bringing a board up
+    // mid-session - is the transition that was avoided by running two boards always, and it is
+    // still not something to do to a live board. So the answer never changes while the game runs;
+    // switching modes means restarting it.
+    //
+    // Answered from the launch state only (the -net-* harness flags, or netplay being enabled for
+    // this launch), NOT from whether a session happens to be up right now.
+    bool WantsNetplayBoards();
+
     // ---- Lobby (YAMP Settings -> Netplay) ----------------------------------------------------
     //
     // The command-line path above drives itself end to end; these are the same steps under
@@ -195,6 +208,25 @@ namespace net
     // unlike Disconnect() it deliberately applies to a command-line session as well, because by
     // then the match is over either way.
     void EndSession();
+
+    // ---- Linked-cabinet link (Virtual On, and later Motor Raid / Sega Rally 2) ----------------
+    //
+    // The game's OWN inter-cabinet link, carried over the RPCN session's P2P socket. Nothing on
+    // this path is lockstep: no barrier, no seed, no frame numbering and no determinism
+    // requirement. The payload is the emulated comm board's 0x700-byte window, and the ROM's own
+    // protocol does the synchronising - which is why it needs to flow from the moment a room
+    // exists, not from the moment a round starts. See yampnet_api::link_ready.
+    //
+    // These are thin passthroughs, and each answers false / 0 when there is no plugin, no session
+    // or no peer yet, so a caller can use them unconditionally.
+
+    // Is a peer reachable right now? The honest input to "is the ring up".
+    bool LinkReady();
+    // Ship this frame's outgoing payload. Fire-and-forget; loss is expected and harmless.
+    void LinkSend(const void* data, unsigned int len);
+    // Take the newest payload since the last call. Returns 0 when nothing new arrived, which
+    // means "keep the one you already have" rather than "there is a gap".
+    unsigned int LinkTake(void* out, unsigned int cap);
 
     // Appends one printf-style line to yampnet.log next to the CWD. Opened and CLOSED per line,
     // so it can be read live over a share while YAMP runs - unlike d3d12_debug.log, which

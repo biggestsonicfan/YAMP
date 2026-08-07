@@ -101,19 +101,75 @@ namespace m2ftg
 			// non-linked-cabinet modules, and then nothing pins anything.
 			BOARD_SELECT,
 
-			// The module's own per-board init, `void init(int board)` - what boot phase 2 calls for
-			// board 0 and then board 1 (0x18006A168).
+			// REMOVED 2026-08-04: PER_BOARD_INIT, once believed to be "the module's own per-board
+			// init, what boot phase 2 calls for board 0 and then board 1", and used to revive board
+			// 1 after a round-start reset. It was matched from boot phase 2's `XOR ECX,ECX / CALL /
+			// MOV ECX,1 / CALL` pair, which is a real for-both-boards call - just not that one.
+			// 0x18006BAF0 is the per-board VIDEO init: it walks the 2 MB framebuffer region at
+			// 0x1807DADC0 + board*0x20A080 building a 6-bit palette table, and touches nothing the
+			// i960 owns. Calling it returned cleanly and left board 1 exactly as broken, which is
+			// what made the bug so hard to see - the log line said the board had been re-initialised.
 			//
-			// Needed because the debug-menu RESET (rvaResetHandler) re-inits board 0 ONLY. Board 1
-			// is left with a stale i960 context, and the moment two-board mode comes back on its
-			// CPU resumes from a garbage IP. Caught in the act: a second-chance AV in the i960
-			// instruction FETCH (`mov r8,[rdi]; movzx eax,[r8+3]`, the opcode-class decode) with
-			// rdi = 0x7C2380 - which is 0x7C21D0 + 1*0x1B0, i.e. BOARD 1's context - and an i960 IP
-			// of 0x500440, inside work RAM. Board 1 was trying to execute its own data.
+			// The real routine is the module's board reset 0x180069E80, and it does not need a
+			// symbol here: it is already two-board aware and the debug-menu RESET ends with it. See
+			// DwGame::rvaBoardResetAll, which is where it is now driven from.
 			//
-			// Calling this after a reset is the native fix; the alternative was leaving the second
-			// cabinet out of every round.
-			PER_BOARD_INIT,
+			// The lesson worth keeping: a pattern that matches uniquely still only proves the SHAPE
+			// is unique, not that it is the shape you wanted. This one was never checked against the
+			// function's body.
+
+			// The frame driver's CALL to the I/O refresh, for BOARD 0 - the one that rebuilds the
+			// emulated I/O board's ports from the host's pads, immediately before that board's CPU
+			// step. Hooking it is how the cabinet TEST and SERVICE lines get pulled low, since the
+			// module protocol has no host source for them and the refresh rebuilds the port every
+			// frame (so a plain host write is simply overwritten).
+			//
+			// BOTH BOARDS, and the second one is not optional on a linked pair. Driving TEST into
+			// board 0 alone deadlocks the machine: board 0 enters the operator menu and stops
+			// servicing the inter-cabinet link, board 1 spins in `Net_check` waiting for it, and
+			// board 0 blocks forever in `synch` waiting for board 1. Caught live with x64dbg -
+			// board 0 frozen at `synch+0xC` across every sample, board 1 looping `Net_check+0x64`.
+			//
+			// Entering on both boards together is symmetric, so neither is waiting on the other.
+			// It is also what the always-linked stance requires: YAMP runs two boards from boot
+			// precisely so the topology never changes mid-session, and a switch that only reaches
+			// one of them reintroduces exactly that asymmetry.
+			//
+			// OPTIONAL: absent leaves the switches released, exactly as on Motor Raid.
+			I960_IO_REFRESH_CALL,
+			I960_IO_REFRESH_CALL_B1,
+
+			// The frame driver's CALL to the inter-cabinet LINK TRANSFER (omg 0x18006A310), the
+			// `E8` between `INC dword [link_frame_counter]` and the `XOR ECX,ECX` that selects
+			// board 0. YAMP wraps it to model the one piece of comm-board firmware the module
+			// lacks: RESET SEMANTICS.
+			//
+			// The ROM's own link check (`Net_check`, i960 0xC5870) drives the comm board through
+			// its two registers: it holds the board in reset (CommBoardReset = 0), releases it
+			// (= 1), and then polls CommFlagReg until bit7 - data ready - reads 0, which on the
+			// hardware is the firmware acknowledging its boot. The module's transfer sets bit7 on
+			// every frame REGARDLESS of the reset register, so that poll can never terminate once
+			// the link is running - and it is a tight i960 loop with no frame yield, so the CPU
+			// step never returns and the whole host spins. Cold boot escapes only by ordering (the
+			// link is not enabled until after the first check); the debug menu's exit re-runs the
+			// check with the link live and hangs the machine. Diagnosed live 2026-08-04: clearing
+			// bit7 by hand un-froze the board, the site screens printed, and the pair re-linked.
+			//
+			// OPTIONAL, and only installed where TWO_BOARD_GATE also resolved: the same engine
+			// ships in the vf2 module, which has no comm board for the registers to describe.
+			LINK_TRANSFER_CALL,
+
+			// The module's QueryPerformanceCounter wrapper (omg 0x1800856B0) - a leaf that zeroes a
+			// local, calls QPC through the IAT and returns it. 49 call sites: the task layer's frame
+			// pacing, the frame driver, and a great many `t1 - t0` profiling pairs.
+			//
+			// YAMP patches it so the module's whole timebase becomes a counter the host advances,
+			// because the board is paced by REAL TIME and therefore runs a host-dependent number of
+			// emulated frames per module_main call - which is not something netplay can be made to
+			// agree about. See VirtualClock.h for the full reasoning.
+			//
+			// OPTIONAL: absent means the module keeps real time and behaves exactly as before.
+			WALL_CLOCK,
 
 			// The DLL's own embedded gs context (0x202140) and the global that points at it.
 			// Both come from gs's self-init path, the same shape as the YLAD generation — this

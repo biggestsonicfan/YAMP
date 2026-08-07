@@ -54,6 +54,25 @@ namespace yampnet
     {
         kPacketInput = 0,
         kPacketAnnounce = 1,
+        // The host's match seed, published while merely IN A ROOM. Carries the same payload as an
+        // announce and is deliberately NOT the same packet: an announce feeds the barrier, and a
+        // seed heartbeat must never be able to release one. See AnnouncePacket.
+        kPacketSeed = 2,
+        // A LINKED-CABINET payload: the game's own inter-cabinet link, carried verbatim.
+        //
+        // Nothing else on this wire looks like it. The lockstep packets carry INPUTS and are
+        // interpreted here; this one is opaque bytes that only the emulated hardware understands,
+        // and the plugin's entire job is to move it. Virtual On is the first user: two Model 2
+        // cabinets exchange a 0x700-byte state snapshot every frame over a serial ring, and
+        // running that over the wire is what makes two machines one linked pair.
+        //
+        // Consequences that make it a separate type rather than a flag on an input packet:
+        //   * it flows OUTSIDE a round - the cabinets link during their boot-time network check,
+        //     long before anything presses Start, and they stay linked between matches;
+        //   * it must never touch the barrier, the input rings or the state-check machinery;
+        //   * it is lossy by design - the payload is a complete snapshot, so newest-wins ingest
+        //     loses nothing, and the game's own protocol does the synchronising.
+        kPacketLink = 3,
     };
 
     struct PacketHeader
@@ -87,10 +106,27 @@ namespace yampnet
     };
     static_assert(sizeof(PacketHeader) == 8, "PacketHeader must stay 8 bytes");
 
+    // The largest link payload the channel will carry. Sized for Virtual On's 0x700; a game with
+    // a bigger one needs this raised on BOTH peers, which is what the ABI version is for.
+    inline constexpr uint32_t kLinkPayloadMax = 0x700;
+
+    struct LinkPacket
+    {
+        PacketHeader header;
+        uint32_t len;                        // bytes of `payload` that are live
+        uint8_t payload[kLinkPayloadMax];
+    };
+
     // The round announcement doubles as seed distribution: the host's announce carries the
     // authoritative match seed and the guest adopts it. Both peers must re-seed the emulator's
     // `rand` from the same value or the simulations diverge - this is the PS3's shared-match-seed
     // mechanism, carried on the barrier packet rather than in room data.
+    //
+    // The barrier is NOT early enough on its own. A guest that presses Start before the host has
+    // no seed yet - announces only begin when a peer calls BeginRound - so it seeded its emulator
+    // with 0 and reset its board from a generator the host did not share. Whichever player pressed
+    // first decided whether the round could work. The host therefore also publishes the same
+    // payload as kPacketSeed from the moment the room exists, which makes the order irrelevant.
     struct AnnouncePacket
     {
         PacketHeader header;

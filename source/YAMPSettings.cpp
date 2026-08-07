@@ -231,6 +231,17 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_netTimerTrace = GetPrivateProfileIntW(L"Netplay", L"TimerTrace", 0, iniPath.c_str()) != 0;
 		m_netForceUnsupported =
 			GetPrivateProfileIntW(L"Netplay", L"ForceUnsupported", 0, iniPath.c_str()) != 0;
+		// Read at start-up and acted on when the module boots - see NetPlugin::WantsNetplayBoards.
+		m_netEnabled = GetPrivateProfileIntW(L"Netplay", L"Enabled", 0, iniPath.c_str()) != 0;
+		// Which cabinet of the linked pair this machine is; Virtual On only, read once at boot.
+		// Clamped rather than trusted: a hand-edited 7 would otherwise reach the byte patch.
+		m_vonCabinetRole = GetPrivateProfileIntW(L"Netplay", L"VonCabinetRole", 0, iniPath.c_str());
+		if (m_vonCabinetRole > 2)
+		{
+			m_vonCabinetRole = 0;
+		}
+		m_vonLinkLog = GetPrivateProfileIntW(L"Netplay", L"VonLinkLog", 0, iniPath.c_str()) != 0;
+		m_vonHoldLink = GetPrivateProfileIntW(L"Netplay", L"VonHoldLink", 0, iniPath.c_str()) != 0;
 		// Up to 96 bits, so it does not fit the profile API's integer reads - stored as hex
 		// text. The default is the game's own default mask, not 0: StF's hook 16 fights the
 		// backup-RAM TIME fix
@@ -383,6 +394,10 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		// Written back so a Save from the UI cannot silently drop a hand-edited diagnostic.
 		WritePrivateProfileIntW(L"Netplay", L"TimerTrace", m_netTimerTrace, iniPath.c_str());
 		WritePrivateProfileIntW(L"Netplay", L"ForceUnsupported", m_netForceUnsupported, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"Enabled", m_netEnabled, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"VonCabinetRole", m_vonCabinetRole, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"VonLinkLog", m_vonLinkLog, iniPath.c_str());
+		WritePrivateProfileIntW(L"Netplay", L"VonHoldLink", m_vonHoldLink, iniPath.c_str());
 		// Core hooks stay session-only, so a restart always gets back to a bootable state.
 		uint64_t persisted[2] = { m_stfHleDisableMask[0], m_stfHleDisableMask[1] };
 		m2ftg::HleHooks::MaskStripKinds(persisted, m2ftg::HleHooks::SESSION_ONLY_KINDS);

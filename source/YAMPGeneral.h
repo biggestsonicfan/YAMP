@@ -61,7 +61,7 @@ public:
 		VF5FS_YLAD, // ...and again from Yakuza: Like a Dragon (= Yakuza 7, DX11), a third build:
 		            // VF2's engine generation running the LJ module protocol (source/vf5fs/YLAD)
 		FV2,        // Fighting Vipers 2, and...
-		SRC2,       // ...Sega Rally Championship 2 — the two MODEL 3 games, hosted out of Like a
+		SRC2,       // ...Sega Racing Classic 2 — the two MODEL 3 games, hosted out of Like a
 		            // Dragon Gaiden's pre3 module (source/pre3). Unlike every entry above, these
 		            // two share ONE DLL: pre3 emulates six Model 3 games and picks between them
 		            // with a config byte, so the GameId is the only thing that differs.

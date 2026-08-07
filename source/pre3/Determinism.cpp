@@ -38,6 +38,35 @@ namespace pre3
 		}
 	}
 
+	// Is this game's BOOT survivable with the clock pinned? Measured, per game, not reasoned.
+	//
+	// The pinned clock returns a CONSTANT, and Sega Racing Classic 2's boot does not survive one:
+	// with the pin in from install it never leaves its start-up sequence. The board reaches its
+	// running phase and then sits there for as long as you care to wait - it creates none of the
+	// 496x384 Real3D targets, issues no draws, and never produces an output texture, so the host
+	// presents nothing and the game looks frozen on a loading screen. Bisected to the commit that
+	// introduced this pin, then narrowed to the pin itself by suppressing each of that commit's
+	// four unconditional pokes at the board in turn: only the clock changes anything.
+	//
+	// The module's own deterministic path does NOT freeze the clock. When the linked-cabinet
+	// interface at params+0x1070 is present, get_time returns *(rom+0x470) - a fixed epoch that
+	// slot 18 resets and THE BOARD THEN ADVANCES. A clock that ticks predictably and a clock that
+	// does not tick at all are both reproducible, and only the first is something arcade code
+	// expects; a game is perfectly entitled to wait for the second hand to move.
+	//
+	// So this is deliberately a whitelist rather than "everything except SRC2": a game earns the
+	// pin by having been run with it. Fighting Vipers 2 has (it boots, and it is the only game
+	// here with netplay). Anything else gets its real clock, which is what it had before the pin
+	// existed and what it boots with.
+	//
+	// FOR WHOEVER BRINGS UP SRC2 NETPLAY: do not simply add it here - it will stop booting again.
+	// The pin has to grow a clock that ADVANCES deterministically first (the module's own
+	// mechanism above is the shape to copy), and then both games can use it.
+	static bool ClockPinBootSafe()
+	{
+		return gGeneral.GetGameId() == YAMPGeneral::GameId::FV2;
+	}
+
 	void InstallDeterministicClock(void* const* vtables, size_t count)
 	{
 		void* original = nullptr;
@@ -51,6 +80,21 @@ namespace pre3
 		}
 
 		Determinism::orgGetTime = reinterpret_cast<Determinism::get_time_fn>(original);
+
+		// The redirect goes in for every game, because it costs nothing when it is not pinned -
+		// the hook tail-calls the module's own accessor - and because leaving it out would make
+		// "can this game be pinned at all" depend on start-up order rather than on the module.
+		//
+		// WHETHER TO PIN IT NOW is a different question, and the answer is per-game. See
+		// ClockPinBootSafe: a pinned clock does not tick, and one of the two games does not boot
+		// with a clock that does not tick.
+		if (!ClockPinBootSafe())
+		{
+			DebugLogFile("[%s] board clock redirect installed but NOT pinned - this game's boot "
+				"needs a ticking clock (%zu vtable entries, host clock %p)\n",
+				gGeneral.GetGameTag(), patched, original);
+			return;
+		}
 
 		// PINNED IMMEDIATELY, not left for a round to turn on. This install runs before
 		// module_start, and it has to, because the board reads the clock while it BOOTS - and the
@@ -408,8 +452,13 @@ namespace pre3
 
 	bool NetplaySupported()
 	{
+		// The clock has to be pinnable AND pinned. Availability alone is not enough: the redirect
+		// is installed for both games but only pinned for one, and an unpinned board boots
+		// differently on every machine - which is precisely the divergence a round cannot recover
+		// from. Stated as a condition rather than as a comment so that whitelisting another game
+		// for netplay without also making its clock pinnable fails closed.
 		return gGeneral.GetGameId() == YAMPGeneral::GameId::FV2
-			&& DeterministicClockAvailable();
+			&& DeterministicClockAvailable() && ClockPinBootSafe();
 	}
 
 	void LogBoardStateOnce()
