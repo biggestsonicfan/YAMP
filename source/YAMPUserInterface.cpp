@@ -11,6 +11,7 @@
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
 #include "pre3/HleHooks.h"
 #include "pre3/ArcadeSettings.h"
+#include "pre3/CommBoard.h"
 #include "pre3/Determinism.h"
 
 // Draw isolation, defined in pxd/LJ/HostCdevice.cpp next to the D3D12 draw hooks it drives. Free
@@ -219,6 +220,22 @@ void YAMPUserInterface::Draw()
 		desired.cabinetType = static_cast<uint8_t>(settings->m_pre3CabinetType);
 		desired.linkId = static_cast<uint8_t>(settings->m_pre3LinkId);
 		desired.carNumber = static_cast<uint8_t>(settings->m_pre3CarNumber);
+
+		// A LIVE LINK OWNS THE LINK ID ROW, on the same rule every other board-facing control
+		// follows during a session: switched off for the duration.
+		//
+		// A linked pair is one MASTER and one SLAVE, exactly as two real cabinets are wired, and
+		// the row has to track the comm board's node id because that is what decides which
+		// machine is which - it comes from the harness or from a room, and a setting cannot know
+		// what the other side ended up as. Leaving them independent lets a cabinet run as node 1
+		// while telling its own ROM it is the MASTER.
+		if (pre3::CommBoard::CurrentMode() != pre3::CommBoard::Mode::Off)
+		{
+			desired.linkId = static_cast<uint8_t>(pre3::CommBoard::NodeId() == 0
+				? pre3::ArcadeSettings::LinkId::Master
+				: pre3::ArcadeSettings::LinkId::Slave);
+		}
+
 		pre3::ArcadeSettings::SetDesired(desired);
 		pre3::ArcadeSettings::Update();
 	}

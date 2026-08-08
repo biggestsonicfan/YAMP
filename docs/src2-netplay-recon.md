@@ -354,8 +354,67 @@ node 1  f=1007 state=4 node=1/2 size=848 seq=840 rendezvous=0003000300030003 tx=
   different things to each other.
 
 What this does NOT yet show: a race. Both cabinets sit at the credit screen because nothing has
-coined them up, and there is no `-src2-autostart` equivalent of Virtual On's harness. Playing a
-linked race is the next step and it is an interactive one.
+coined them up, and there is no `-src2-autostart` equivalent of Virtual On's harness.
+
+## 5c. THE PAIR ONLY CONVERGES SOMETIMES — and what the hung board is waiting for
+
+**It is a start-up race, not a setting.** Three trials, changing only the delay between launching
+the two instances:
+
+| delay | node 0 | node 1 |
+|---|---|---|
+| 0 s | `tx=34` draws=0 | `tx=34` draws=0 |
+| 1 s | `tx=34` draws=0 | `tx=34` draws=0 |
+| **5 s** | **`tx=216` draws=333** | **`tx=40` draws=189** |
+
+`tx=34` is the *stand-alone* signature — the same packet a solo probe produces. Both boards reach
+comm state 4 with the sequence advancing and every rendezvous bit set, so the transport is not the
+problem in either case.
+
+### The hung board is spinning on a byte nothing writes
+
+`YAMP_PRE3_PC` puts **both** cabinets at guest `0x04C9A0/A8`, `lr=0x04C960`, with an unchanging
+register set from ~frame 480 onward. `YAMP_PRE3_DUMP` decodes that to a wait-for-flag:
+
+```
+04C990  lis r3,0x73 ; addi r3,r3,0x798E   ; r3 = 0x0073798E
+04C998  lbz r0,0(r3)                      ; sample
+04C9A0  cmpl r2,r0        <-- spin head
+04C9A4  lbz  r2,0(r3)                     ; re-read
+04C9A8  beq  0x04C9A0                     ; loop while UNCHANGED
+04C9AC  li r0,0 ; stb r0,0(r3)            ; consume it
+```
+
+Three sibling entry points (`0x04C948`, `0x04C978`, `0x04C984`) call the same waiter for the flags
+at `0x737987`, `0x73798E` and `0x7379A8`. It is the same shape as the spin hook 2 excises at
+`0x018B30` ([`src2-hle-hooks.md`](src2-hle-hooks.md)).
+
+`YAMP_PRE3_PEEK` says which flags move. Remembering that guest byte `A` is host byte `A ^ 3`:
+
+| guest byte | over 750 frames |
+|---|---|
+| `0x73798C` | `0x67 → 0xFD → 0x93 → 0x29 → 0xBF` — **a counter, +150 per 150 frames** |
+| **`0x73798E`** | **`0x00`, never once anything else** |
+
+So the VBlank interrupt is alive — the frame counter next door proves it — and **the byte the board
+is actually waiting on is never written by anybody.**
+
+### The strong candidate: pre3's comm board never interrupts the guest
+
+Real Model 3 network hardware raises an IRQ when a transfer completes. `CXComm` has no such call:
+its seven methods and `FUN_180035BA0` only touch its own registers, and the memory object's
+IRQ-raise (`CM3Mem` vtable `+0x98`, which the SCSI window at `0xC1` does use, with mask `0x100`) is
+never reached from the comm path.
+
+That also explains the race rather than contradicting it: a pair that converges is one where the
+timing led the ROM down a path that does not enter this wait, not one where the flag got set. Which
+is testable — the same PC probe on a converged pair should never show `0x04C9A0`.
+
+**The next step is to establish the network board's IRQ mask and raise it from the transfer**, and
+the mask is the part that needs reversing rather than guessing: `0x100` belongs to the SCSI, and
+MAME's `model3.cpp` IRQ bits are the reference to check it against.
+
+Playing a linked race is downstream of that.
 
 ## 5. What is NOT established, in the order it should be settled
 

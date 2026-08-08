@@ -288,9 +288,18 @@ namespace pre3
 		}
 
 		EnsureBuffers();
+		// Every mode named, because a ternary that only knew about Probe printed "LINK" for a
+		// Shared session and sent a diagnosis chasing the wrong transport for a whole run.
+		const char* modeName = "?";
+		switch (s_mode)
+		{
+		case Mode::Probe:  modeName = "PROBE (no peer)"; break;
+		case Mode::Shared: modeName = "SHARED (local section)"; break;
+		case Mode::Link:   modeName = "LINK (netplay)"; break;
+		default: break;
+		}
 		DebugLogFile("[%s link] mode=%s node=%u/%u (config +0x100C/+0x1010)\n",
-			gGeneral.GetGameTag(), s_mode == Mode::Probe ? "PROBE (no peer)" : "LINK",
-			s_nodeId, s_nodeCount);
+			gGeneral.GetGameTag(), modeName, s_nodeId, s_nodeCount);
 	}
 
 	CommBoard::Mode CommBoard::CurrentMode() { return s_mode; }
