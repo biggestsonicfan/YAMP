@@ -113,6 +113,21 @@ public:
 	// instruction restored in the ROM image, so the ROM's own code runs there instead, which
 	// is what makes a patched rom_code1.bin take effect. Enforced every frame; applied live.
 	uint64_t m_stfHleDisableMask[2] = { 0, 0 };
+	// [Debug] AllowBootCriticalHle - advanced, hand-authored, and deliberately not a checkbox, on
+	// the same footing as HleRetarget. Lets a pre3 boot-critical hook stay disabled in the ini
+	// instead of being stripped on the way in and out. The strip exists so the panel cannot brick
+	// the game; this is how someone with a debugger opts out of it, and it is the only way to do so
+	// under x64dbg, which cannot pass the YAMP_PRE3_ALLOW_CRITICAL environment variable through.
+	bool m_allowBootCriticalHle = false;
+
+	// Sega Racing Classic 2's GAME ASSIGNMENTS, for the rows the module's settings injector cannot
+	// reach. Values are the BOARD's own option indices, so the UI can offer its strings verbatim -
+	// see pre3/ArcadeSettings.h for where each list comes from. Defaults match what the board
+	// itself boots with (JAPAN / TWIN / SINGLE / car 1).
+	int m_pre3Country = 1;
+	int m_pre3CabinetType = 1;
+	int m_pre3LinkId = 0;
+	int m_pre3CarNumber = 0;
 	// Where each HLE hook should be installed, for program ROMs that are not Sonic the
 	// Fighters. Kept as the raw ini text because an entry may name an ELF symbol, which
 	// cannot be resolved until game.elf has been loaded - see HleHooks::ResolveRetarget for

@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
+#include <algorithm>
 #include <string_view>
 
 static constexpr std::string_view INI_FILE_NAME = "settings.ini";
@@ -262,6 +263,12 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		// Belt and braces with the strip on save: a hand-edited ini must not be able to make
 		// YAMP unbootable either, since a hung board also takes the settings UI down with it.
 		m2ftg::HleHooks::MaskStripKinds(m_stfHleDisableMask, m2ftg::HleHooks::SESSION_ONLY_KINDS);
+		m_allowBootCriticalHle = GetPrivateProfileIntW(SECTION_NAME, L"AllowBootCriticalHle", 0,
+			iniPath.c_str()) != 0;
+		if (!m_allowBootCriticalHle)
+		{
+			pre3::HleHooks::MaskStripBootCritical(m_stfHleDisableMask);
+		}
 	}
 
 	{
@@ -304,6 +311,17 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_m2CrtFilter = GetPrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str()) != 0;
 		m_m2Difficulty = GetPrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
 		m_m2Country = GetPrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
+		// Sega Racing Classic 2's extra GAME ASSIGNMENTS rows. Clamped to each row's real option
+		// count - taken from the board's own menu tables - so a hand-edited ini cannot leave the
+		// service menu on an index it has no string for.
+		m_pre3Country = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2Country", 1,
+			iniPath.c_str()), 0, 5);
+		m_pre3CabinetType = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2CabinetType", 1,
+			iniPath.c_str()), 0, 2);
+		m_pre3LinkId = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2LinkId", 0,
+			iniPath.c_str()), 0, 3);
+		m_pre3CarNumber = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2CarNumber", 0,
+			iniPath.c_str()), 0, 7);
 		m_m2Freeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str()) != 0;
 		m_m2VersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str()) != 0;
 		m_m2RealDamage = GetPrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str()) != 0;
@@ -401,6 +419,14 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		// Core hooks stay session-only, so a restart always gets back to a bootable state.
 		uint64_t persisted[2] = { m_stfHleDisableMask[0], m_stfHleDisableMask[1] };
 		m2ftg::HleHooks::MaskStripKinds(persisted, m2ftg::HleHooks::SESSION_ONLY_KINDS);
+		// The pre3 boards have the same hazard by a different name: SRC2 has three hooks it
+		// cannot boot without, and unlike m2ftg they are not identifiable by Kind - they were
+		// measured. Both calls are no-ops for a game the family does not describe, so this stays
+		// two unconditional lines rather than a branch.
+		if (!m_allowBootCriticalHle)
+		{
+			pre3::HleHooks::MaskStripBootCritical(persisted);
+		}
 		// Same per-game key as the load side - see HleKeyW.
 		WritePrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksLo").c_str(), persisted[0], iniPath.c_str());
 		WritePrivateProfileHex64W(SECTION_NAME, HleKeyW(L"DisabledHleHooksHi").c_str(), persisted[1], iniPath.c_str());
@@ -425,6 +451,10 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"CRTFilter", m_m2CrtFilter, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Difficulty", m_m2Difficulty, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Country", m_m2Country, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2Country", m_pre3Country, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2CabinetType", m_pre3CabinetType, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2LinkId", m_pre3LinkId, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2CarNumber", m_pre3CarNumber, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str());

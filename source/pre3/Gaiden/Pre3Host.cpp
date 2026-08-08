@@ -32,6 +32,7 @@ unsigned int ModuleDrawLimitNow();
 #include "../ImportSymbols.h"
 #include "../SystemSwitches.h"
 #include "../BoardVtables.h"
+#include "../SecurityBoard.h"
 #include "../Determinism.h"
 #include "../NetSession.h"
 
@@ -335,6 +336,10 @@ namespace pre3
 			const size_t count = FindBoardVtables(dll, readPort, vtables, MAX_BOARD_VTABLES);
 			InstallDeterministicClock(vtables, count);
 			InstallSystemSwitches(vtables, count);
+			// Third rider on the same list. Inert unless YAMP_PRE3_SECURITY asks for it, and
+			// even then it only matters once the game's own protection hooks are disabled -
+			// with them applied the guest never touches the security registers at all.
+			InstallSecurityBoard(vtables, count);
 		}
 		else
 		{
@@ -566,7 +571,41 @@ namespace pre3
 		const GameDesc& game = CurrentGame();
 
 		params.config.game = static_cast<uint8_t>(game.game);
-		params.config.difficulty = settings->m_m2Difficulty <= 3 ? static_cast<uint8_t>(settings->m_m2Difficulty) : 1;
+
+		// DIFFICULTY AND REGION ARE PRE-FOLDED, because the module folds them AGAIN on the way
+		// into the board and the two scales do not line up. Both mappings below were read out of
+		// the module's settings injector (DLL 0x18002C410) and then CONFIRMED against the board's
+		// own GAME ASSIGNMENTS screen, by reading the bytes it displays out of guest RAM.
+		//
+		// The board's settings live at guest 0x100180 (working copy) and 0x72629C (the NVRAM copy
+		// the injector writes); same layout, so +0x21 is DIFFICULTY and +0x18 is COUNTRY in both.
+		// The option lists come from the service menu's own tables at guest 0x0E5548.
+		//
+		// DIFFICULTY: the board has FOUR steps - EASY / NORMAL / HARD / HARDEST - exactly like
+		// YAMP's combo. But SRC2's injector maps 0 and 1 BOTH to EASY, then 2 -> NORMAL,
+		// 3 -> HARD, anything else -> HARDEST. Passing the UI index straight through therefore
+		// lost a step and shifted the rest: "Normal" displayed as EASY, and HARDEST could not be
+		// selected at all. Measured before the fix - config 1 -> board 0 (EASY), config 3 ->
+		// board 2 (HARD) - and after it, config 4 -> board 3 (HARDEST).
+		//
+		// PER-GAME, and it has to be. FV2 has its own injector (DLL 0x180028180) whose fold is
+		// the IDENTITY over 0..3 (0->0, 1->1, 2->2, 3->3, anything else -> 4), writing the byte
+		// at guest 0x12054D. Applying SRC2's correction there would shift every FV2 difficulty up
+		// by one - the exact bug being fixed, in the other direction.
+		{
+			const int index = settings->m_m2Difficulty >= 0 && settings->m_m2Difficulty <= 3
+				? settings->m_m2Difficulty : 1;
+			constexpr uint8_t SRC2_TO_BOARD[4] = { 0, 2, 3, 4 };
+			params.config.difficulty = game.game == Game::Src2
+				? SRC2_TO_BOARD[index]
+				: static_cast<uint8_t>(index);
+		}
+
+		// COUNTRY: the board knows six - INTERNATIONAL, JAPAN, USA, EXPORT, AUSTRALIA, KOREA -
+		// but the injector can only produce the first three, mapping config 0 -> JAPAN,
+		// 1 -> USA, 2 -> INTERNATIONAL and everything else -> JAPAN. So only those three are
+		// reachable through the config byte, and the UI offers exactly those three in board
+		// order; ArcadeSettings writes the remaining ones directly.
 		params.config.region = settings->m_m2Country <= 2 ? static_cast<uint8_t>(settings->m_m2Country) : 0;
 		params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
 		params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;

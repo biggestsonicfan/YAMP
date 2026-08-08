@@ -10,6 +10,7 @@
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
 #include "pre3/HleHooks.h"
+#include "pre3/ArcadeSettings.h"
 #include "pre3/Determinism.h"
 
 // Draw isolation, defined in pxd/LJ/HostCdevice.cpp next to the D3D12 draw hooks it drives. Free
@@ -47,8 +48,7 @@ static bool IsLJm2ftgGame()
 // per-game one — the second module needs nothing here beyond its GameId.
 // BOTH Kiwami 2 arcade modules, not just VF2. Virtual On was left out when it was added, and
 // because this predicate is what routes a game to the m2ftg settings panel, Virtual On fell all
-// the way through to the VF5FS one: it was offered "Language", "Confirmation button" and "Arcade
-// Machine Mode" - three settings that belong to a different engine and that its host never reads,
+// the way through to the VF5FS one: it was offered "Language", "Confirmation button" and "Arcade\n// Machine Mode" - three settings that belong to a different engine and that its host never reads,
 // so none of them did anything - while the dip switches it DOES honour (region, difficulty, free
 // play, versus, render resolution) had no UI at all. K2Host has always applied
 // `params.config.country` from `m_m2Country`; nothing could set it.
@@ -87,8 +87,7 @@ static bool IsPre3Game()
 //
 // Derived rather than listed, so this cannot drift from what NetSession will actually agree to
 // run. The ROM frame counter is the last per-game fact a new game needs (the rest of the
-// determinism set is already in its DwGame row), so "has a measured counter" is exactly "can
-// sustain a session" - and a game that gets one starts offering the page automatically.
+// determinism set is already in its DwGame row), so "has a measured counter" is exactly "can\n// sustain a session" - and a game that gets one starts offering the page automatically.
 static bool IsNetplayGame()
 {
 	return m2ftg::NetplaySupported() || pre3::NetplaySupported();
@@ -211,6 +210,19 @@ void YAMPUserInterface::Draw()
 	// setting nobody wants to vary mid-match anyway. Pinning it to one value both sides compute
 	// locally is the same answer for none of the cost, and it matches how every other board-facing
 	// control behaves while a session is up: switched off for the duration.
+	// The board's GAME ASSIGNMENTS rows the module cannot carry. Latches itself once applied, so
+	// the game's own service menu owns them afterwards.
+	{
+		pre3::ArcadeSettings::Desired desired;
+		const auto* settings = gGeneral.GetSettings();
+		desired.country = static_cast<uint8_t>(settings->m_pre3Country);
+		desired.cabinetType = static_cast<uint8_t>(settings->m_pre3CabinetType);
+		desired.linkId = static_cast<uint8_t>(settings->m_pre3LinkId);
+		desired.carNumber = static_cast<uint8_t>(settings->m_pre3CarNumber);
+		pre3::ArcadeSettings::SetDesired(desired);
+		pre3::ArcadeSettings::Update();
+	}
+
 	pre3::HleHooks::Update(net::SessionInProgress()
 		? pre3::HleHooks::DefaultDisableMask()
 		: gGeneral.GetSettings()->m_stfHleDisableMask);
@@ -397,6 +409,10 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_m2CrtFilter = settings->m_m2CrtFilter;
 	m_pre3RenderScale = settings->m_pre3RenderScale;
 	m_m2Difficulty = settings->m_m2Difficulty;
+	m_pre3Country = settings->m_pre3Country;
+	m_pre3CabinetType = settings->m_pre3CabinetType;
+	m_pre3LinkId = settings->m_pre3LinkId;
+	m_pre3CarNumber = settings->m_pre3CarNumber;
 	m_m2Country = settings->m_m2Country;
 	m_m2Freeplay = settings->m_m2Freeplay;
 	m_m2VersusMode = settings->m_m2VersusMode;
@@ -650,7 +666,12 @@ void YAMPUserInterface::DrawGamePre3()
 	// five-entry table (`{3,3,0,1,2}` at RVA 0x4500E0) to produce the ROM's backup byte
 	// 0x1D00021, whose encoding is 0=NORMAL 1=HARD 2=VERY HARD 3=EASY. So YAMP's 0..3 lands on
 	// EASY / NORMAL / HARD / VERY HARD in order - the four labels below, exactly.
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::VON_K2)
+	// Sega Racing Classic 2 gets the board's OWN country list instead of this three-entry one.
+	// The module's settings injector can only reach three of its six values, so the other three
+	// are written into the board directly (pre3::ArcadeSettings) - and once that is happening for
+	// COUNTRY anyway there is no reason to show the folded version beside it.
+	const bool isSrc2 = gGeneral.GetGameId() == YAMPGeneral::GameId::SRC2;
+	if (gGeneral.GetGameId() != YAMPGeneral::GameId::VON_K2 && !isSrc2)
 	{
 		const char* labels[] = { "Japan", "USA", "Export" };
 		if (m_m2Country >= std::size(labels))
@@ -677,6 +698,66 @@ void YAMPUserInterface::DrawGamePre3()
 		{
 			ImGui::SetTooltip("Region the arcade board boots as.\nRequires a restart.");
 		}
+	}
+
+	// ---- GAME ASSIGNMENTS, Sega Racing Classic 2 ----------------------------------------
+	//
+	// Every list here is the BOARD's own, read out of its service-menu table at guest 0x0E5548 -
+	// each row of that table carries both the strings and the address of the byte it edits - so
+	// what these combos offer is exactly what the cabinet's GAME ASSIGNMENTS screen offers, in
+	// the same order. See pre3/ArcadeSettings.h.
+	if (isSrc2)
+	{
+		auto boardCombo = [this](const char* label, int& value, const char* const* options,
+			int count, const char* tooltip)
+		{
+			value = value < 0 || value >= count ? 0 : value;
+			if (ImGui::BeginCombo(label, options[value]))
+			{
+				for (int index = 0; index < count; index++)
+				{
+					const bool isSelected = index == value;
+					if (ImGui::Selectable(options[index], isSelected))
+					{
+						m_pageModified = true;
+						value = index;
+					}
+					if (isSelected) ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+			if (tooltip != nullptr && ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", tooltip);
+			}
+		};
+
+		static const char* const COUNTRY[] = { "International", "Japan", "USA", "Export",
+			"Australia", "Korea" };
+		static const char* const CABINET[] = { "Deluxe", "Twin", "Special" };
+		static const char* const LINK_ID[] = { "Single", "Master", "Slave", "Live" };
+		static const char* const CAR[] = { "1", "2", "3", "4", "5", "6", "7", "8" };
+
+		boardCombo("Country", m_pre3Country, COUNTRY, static_cast<int>(std::size(COUNTRY)),
+			"COUNTRY on the board's GAME ASSIGNMENTS screen.\nRequires a restart.");
+		boardCombo("Cabinet Type", m_pre3CabinetType, CABINET, static_cast<int>(std::size(CABINET)),
+			"CABINET TYPE on the board's GAME ASSIGNMENTS screen.\nRequires a restart.");
+
+		// LINK ID and CAR NUMBER describe a LINKED cabinet, so netplay owns them once it can run
+		// this game - it has to, because the two cabinets must agree on who is master and which
+		// car each one is. They are editable now for single-cabinet experimentation and for
+		// reaching the board's own linked-cabinet screens; nothing negotiates them yet.
+		ImGui::Spacing();
+		ImGui::TextDisabled("Linked cabinet (netplay will drive these):");
+		boardCombo("Link ID", m_pre3LinkId, LINK_ID, static_cast<int>(std::size(LINK_ID)),
+			"LINK ID on the board's GAME ASSIGNMENTS screen.\n"
+			"Single is a standalone cabinet; Master/Slave are the two ends of a link.\n"
+			"Netplay is not available for this game yet - see docs/src2-hle-hooks.md.\n"
+			"Requires a restart.");
+		boardCombo("Car Number", m_pre3CarNumber, CAR, static_cast<int>(std::size(CAR)),
+			"CAR NUMBER on the board's GAME ASSIGNMENTS screen: which car this cabinet is.\n"
+			"Requires a restart.");
+		ImGui::Spacing();
 	}
 
 	if (ImGui::Checkbox("Free Play", &m_m2Freeplay))
@@ -1063,8 +1144,7 @@ void YAMPUserInterface::DrawControls()
 	// csl_pad::set_state (source/input/Pad.cpp), which reads nothing but the Input bindings.
 	// So the real, editable bindings are the correct page for all of them.
 	//
-	// This used to fall through to a hardcoded list ("P = K, K = L, G = J, Movement = Arrow Keys /
-	// WSAD", with a "TODO: Make these controls customizable"). That list predated the VF5FS hosts
+	// This used to fall through to a hardcoded list ("P = K, K = L, G = J, Movement = Arrow Keys /\n// WSAD", with a "TODO: Make these controls customizable"). That list predated the VF5FS hosts
 	// moving onto Input and had become actively wrong: it told the player to press keys that are
 	// not bound to anything, while the actual bindings were the shared ones (Punch = Z, Kick = X,
 	// Guard = C, Start = 1 by default). It looked exactly like input being broken.
@@ -1672,17 +1752,31 @@ void YAMPUserInterface::DrawPre3HleHooks()
 	ImGui::PopTextWrapPos();
 	ImGui::Spacing();
 
+	// Both of these are per-game, and neither can be phrased once: FV2 ships two hooks disabled
+	// (the start-up warning screen) and has twenty native routines, SRC2 ships none of either.
+	// Asking the table rather than the GameId keeps the next board honest for free.
+	const uint64_t* const hleDefault = Hle::DefaultDisableMask();
+	const bool shipsAnyDisabled = hleDefault[0] != 0 || hleDefault[1] != 0;
+	bool hasNativeRoutines = false;
+	for (size_t i = 0; i < hookCount && !hasNativeRoutines; i++)
+	{
+		hasNativeRoutines = Hle::Get(i).kind == Hle::Kind::Speed;
+	}
+
 	if (ImGui::Button("Restore defaults"))
 	{
-		m_stfHleDisableMask[0] = Hle::DefaultDisableMask()[0];
-		m_stfHleDisableMask[1] = Hle::DefaultDisableMask()[1];
+		m_stfHleDisableMask[0] = hleDefault[0];
+		m_stfHleDisableMask[1] = hleDefault[1];
 		m_pageModified = true;
 	}
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("Every hook on except hooks 7 and 10, which between them skip the board's start-up\n"
-			"warning screen. Like a Dragon Gaiden skips it because the emulator is a minigame there;\n"
-			"YAMP is the cabinet, so the screen the real board shows on power-up is what you get.");
+		ImGui::SetTooltip(shipsAnyDisabled
+			? "Every hook on except hooks 7 and 10, which between them skip the board's start-up\n"
+			  "warning screen. Like a Dragon Gaiden skips it because the emulator is a minigame there;\n"
+			  "YAMP is the cabinet, so the screen the real board shows on power-up is what you get."
+			: "Every hook on - this board ships with nothing disabled, so the default is exactly the\n"
+			  "module's own table.");
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Enable all"))
@@ -1693,19 +1787,27 @@ void YAMPUserInterface::DrawPre3HleHooks()
 	}
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("Every hook on, including the boot-screen skip - i.e. exactly what the module\n"
-			"does inside Like a Dragon Gaiden.");
+		ImGui::SetTooltip(shipsAnyDisabled
+			? "Every hook on, including the boot-screen skip - i.e. exactly what the module\n"
+			  "does inside Like a Dragon Gaiden."
+			: "Every hook on - i.e. exactly what the module does inside Like a Dragon Gaiden.\n"
+			  "For this board that is also the default.");
 	}
-	ImGui::SameLine();
-	if (ImGui::Button("Disable native routines"))
+	// Hidden rather than disabled when the game has no native routines: a greyed button invites
+	// the question "why not?", and the honest answer is that there is nothing for it to turn off.
+	if (hasNativeRoutines)
 	{
-		Hle::MaskForKinds(m_stfHleDisableMask, Hle::NATIVE_ROUTINE_KINDS);
-		m_pageModified = true;
-	}
-	if (ImGui::IsItemHovered())
-	{
-		ImGui::SetTooltip("Every whole-routine native reimplementation off, so the emulated PowerPC runs the\n"
-			"ROM's own code instead. Slower, and the way to find out whether one of them is wrong.");
+		ImGui::SameLine();
+		if (ImGui::Button("Disable native routines"))
+		{
+			Hle::MaskForKinds(m_stfHleDisableMask, Hle::NATIVE_ROUTINE_KINDS);
+			m_pageModified = true;
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Every whole-routine native reimplementation off, so the emulated PowerPC runs the\n"
+				"ROM's own code instead. Slower, and the way to find out whether one of them is wrong.");
+		}
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Disable all"))
@@ -1713,13 +1815,30 @@ void YAMPUserInterface::DrawPre3HleHooks()
 		Hle::MaskForKinds(m_stfHleDisableMask, Hle::ALL_KINDS);
 		m_pageModified = true;
 	}
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Everything off, including any row marked !. On this board that stops the\n"
+			"boot outright - which is the point of the button, but it is not a state you can\n"
+			"play in. The boot-critical rows are not saved, so a restart recovers on its own.");
+	}
 
 	size_t disabledCount = 0;
+	size_t criticalDisabled = 0;
 	for (size_t i = 0; i < hookCount; i++)
 	{
-		disabledCount += Hle::MaskTest(m_stfHleDisableMask, i) ? 1 : 0;
+		if (!Hle::MaskTest(m_stfHleDisableMask, i)) continue;
+		disabledCount++;
+		criticalDisabled += Hle::BootCritical(i) ? 1 : 0;
 	}
 	ImGui::Text("%zu of %zu hooks disabled", disabledCount, hookCount);
+	if (criticalDisabled != 0)
+	{
+		// Said here as well as in the row tooltip, because this is the state where the board
+		// stops and the reason is one scroll away.
+		ImGui::TextColored(WARNING_COLOUR,
+			"%zu of them are boot-critical (!) - the board will not start like this. Not saved, "
+			"so restarting clears it.", criticalDisabled);
+	}
 	if (!Hle::Live())
 	{
 		// Before the board is up there is no trace to patch, and after a table mismatch the
@@ -1762,11 +1881,31 @@ void YAMPUserInterface::DrawPre3HleHooks()
 				m_pageModified = true;
 			}
 
-			ImGui::TableNextColumn();
-			ImGui::Text("%zu", i);
+			const bool bootCritical = Hle::BootCritical(i);
 
 			ImGui::TableNextColumn();
-			if (info.kind == Hle::Kind::Core)
+			if (bootCritical)
+			{
+				// The marker goes on the INDEX rather than the Kind, because Kind is exactly what
+				// fails to predict this: SRC2's only Core hook is the safest in the table, and the
+				// three that stop the boot are two Removed and one Host.
+				ImGui::TextColored(WARNING_COLOUR, "%zu !", i);
+			}
+			else
+			{
+				ImGui::Text("%zu", i);
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(bootCritical
+					? "BOOT-CRITICAL, measured one hook at a time. Disable this and the board does\n"
+					  "not start. You can still turn it off to experiment - it applies immediately -\n"
+					  "but it is never written to settings.ini, so the next launch always boots."
+					: "Position in the module's own hook table.");
+			}
+
+			ImGui::TableNextColumn();
+			if (info.kind == Hle::Kind::Core || bootCritical)
 			{
 				ImGui::TextColored(WARNING_COLOUR, "%s", Hle::KindName(info.kind));
 			}
@@ -1853,8 +1992,7 @@ void YAMPUserInterface::DrawStfHleHooks()
 	}
 	if (ImGui::IsItemHovered())
 	{
-		// StF ships two hooks disabled; FV ships none, and saying "except the ones YAMP ships
-		// disabled" in front of an empty exception list reads as though something is hidden.
+		// StF ships two hooks disabled; FV ships none, and saying "except the ones YAMP ships\n// disabled" in front of an empty exception list reads as though something is hidden.
 		if (Hle::DefaultDisableMask()[0] != 0 || Hle::DefaultDisableMask()[1] != 0)
 		{
 			ImGui::SetTooltip("Every hook enabled except the ones YAMP ships disabled - currently hooks 16\n"
@@ -3042,6 +3180,10 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_m2RenderMode != m_m2RenderMode ||
 		settings->m_m2WindowMatchesRender != m_m2WindowMatchesRender ||
 		settings->m_m2Difficulty != m_m2Difficulty ||
+		settings->m_pre3Country != m_pre3Country ||
+		settings->m_pre3CabinetType != m_pre3CabinetType ||
+		settings->m_pre3LinkId != m_pre3LinkId ||
+		settings->m_pre3CarNumber != m_pre3CarNumber ||
 		settings->m_m2Country != m_m2Country ||
 		settings->m_m2Freeplay != m_m2Freeplay ||
 		settings->m_m2VersusMode != m_m2VersusMode ||
@@ -3072,6 +3214,10 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_pre3RenderScale = m_pre3RenderScale;
 	settings->m_m2CrtFilter = m_m2CrtFilter;
 	settings->m_m2Difficulty = m_m2Difficulty;
+	settings->m_pre3Country = m_pre3Country;
+	settings->m_pre3CabinetType = m_pre3CabinetType;
+	settings->m_pre3LinkId = m_pre3LinkId;
+	settings->m_pre3CarNumber = m_pre3CarNumber;
 	settings->m_m2Country = m_m2Country;
 	settings->m_m2Freeplay = m_m2Freeplay;
 	settings->m_m2VersusMode = m_m2VersusMode;

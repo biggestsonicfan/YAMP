@@ -105,6 +105,11 @@ private:
 	uint32_t m_pre3RenderScale = 0;
 	bool m_m2CrtFilter = false;
 	uint32_t m_m2Difficulty = 1;
+	// Sega Racing Classic 2's GAME ASSIGNMENTS rows, as the board's own option indices.
+	int m_pre3Country = 1;
+	int m_pre3CabinetType = 1;
+	int m_pre3LinkId = 0;
+	int m_pre3CarNumber = 0;
 	uint32_t m_m2Country = 0;
 	bool m_m2Freeplay = true;
 	bool m_m2VersusMode = false;

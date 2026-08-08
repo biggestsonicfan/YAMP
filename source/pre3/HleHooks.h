@@ -17,6 +17,9 @@ namespace pre3
 	//     DLL 0x1801084A0, indexed by a per-game constant the ROM object supplies through its
 	//     own vtable slot 35. Fighting Vipers 2 asks for index 3 - the table at DLL 0x180108FE0,
 	//     36 records of {u32 guestAddress, u32 pad, u64 handler}, terminated by a null handler.
+	//     Sega Racing Classic 2 asks for index 12, the table at DLL 0x180108A10, 26 records.
+	//     Both indices are read from the ROM object's own field (FV2 at +0x5A8, SRC2 at +0x20600)
+	//     rather than assumed; docs/src2-hle-hooks.md walks the whole chain.
 	//   * That same function copies each record's handler into the interpreter's dispatch table
 	//     at DLL 0x52AA90, at index `i | 0x800` - i.e. into the slots that PowerPC primary
 	//     opcode 1 would occupy. Opcode 1 is unassigned on PowerPC, so those slots are free.
@@ -42,10 +45,10 @@ namespace pre3
 	{
 		enum class Kind : uint8_t
 		{
-			// Emulator plumbing. The three idle-loop cut-outs: the handler notices the board is
-			// spinning, abandons the rest of the CPU's timeslice and then runs the original
-			// instruction anyway. Disabling one does not break the board, it makes it burn the
-			// whole slice spinning - the frame rate goes with it.
+			// Emulator plumbing. The idle-loop cut-outs (three in FV2, one in SRC2): the handler
+			// notices the board is spinning, abandons the rest of the CPU's timeslice and then
+			// runs the original instruction anyway. Disabling one does not break the board, it
+			// makes it burn the whole slice spinning - the frame rate goes with it.
 			Core,
 			// Host integration: arcade settings injected into the game's own RAM copy, a table
 			// clear, and the routine calls that reach the host through the board object.
@@ -56,6 +59,9 @@ namespace pre3
 			// FV2's are the matrix/vector maths and the block memory operations. Disabling one
 			// hands the work back to the interpreted PowerPC code, which is slower and otherwise
 			// identical - and is the way to check whether one of them is wrong.
+			//
+			// SRC2 HAS NONE - twenty of FV2's thirty-six hooks are this, and none of SRC2's
+			// twenty-six are. So the preset built on this kind hides itself for that board.
 			Speed,
 			// The handler rewrites the instruction word and then executes it, or pokes a register
 			// before letting the original run. Small, surgical changes to what the ROM does.
@@ -87,6 +93,16 @@ namespace pre3
 		const char* KindName(Kind kind);
 		const char* KindDescription(Kind kind);
 
+		// Hooks the board cannot start without, MEASURED one at a time rather than reasoned from
+		// Kind - which on SRC2 would give the wrong answer in both directions. Its only Core hook
+		// is the safest in the table (disabling it yields MORE draws, because the board keeps the
+		// timeslice it would have given back), while the three that actually stop the boot are
+		// two Removed and one Host.
+		//
+		// A game with no measured set returns false throughout, which is the honest answer for
+		// FV2: nobody has run the sweep on it.
+		bool BootCritical(size_t index);
+
 		// Bit i disables hook i, in the module's own table order - the order the settings list
 		// shows them in.
 		bool MaskTest(const uint64_t mask[2], size_t index);
@@ -101,9 +117,20 @@ namespace pre3
 		// replacement off, everything the board needs left alone.
 		inline constexpr unsigned NATIVE_ROUTINE_KINDS = KindBit(Kind::Speed);
 
-		// Unlike m2ftg's, none of pre3's hooks are load-bearing enough to hang the board when
-		// disabled - the Core ones only cost frame rate - so nothing here is session-only and the
-		// whole mask persists.
+		// Strips every BootCritical bit. Applied on the way to settings.ini, exactly as m2ftg
+		// strips its SESSION_ONLY_KINDS and for the same reason: a disabled boot-critical hook
+		// takes effect immediately, so it can still be experimented with, but it never survives
+		// a restart. Whatever the user does in the panel, the next launch boots.
+		//
+		// This exists because the original note here was WRONG. It claimed no pre3 hook is
+		// load-bearing enough to stop the board, on the grounds that the Core ones only cost
+		// frame rate - true of FV2, where it was derived, and false of SRC2. Measured
+		// 2026-08-07: with the default mask SRC2 issues 676 draws in 400 frames; with all 26
+		// disabled it issues ZERO. A per-hook sweep then found exactly three (1, 2 and 5), each
+		// confirmed over 2000 frames. Without this strip, "Disable all" left the game unbootable
+		// across restarts with "Restore defaults" the only way back.
+		bool MaskStripBootCritical(uint64_t mask[2]);
+
 		const uint64_t* DefaultDisableMask();
 
 		// Reconciles every hook with the mask. Call once per frame; no-op until the board's CPU
