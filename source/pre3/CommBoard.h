@@ -209,6 +209,12 @@ namespace pre3
 		// Gated on YAMP_PRE3_SYNCPROBE so it costs nothing when nobody is looking.
 		void SampleAtFrameBoundary();
 
+		// Write the collected samples out. Called once at teardown, because SampleAtFrameBoundary
+		// deliberately does NO I/O: logging per frame was expensive enough to change the outcome it
+		// was measuring - two runs with the log enabled converged where three without it hung - and
+		// a probe that flips the race it is observing is worse than no probe.
+		void DumpTrace();
+
 		// One line per change plus a heartbeat, into the debug log. This is the whole instrument
 		// for the first experiment, and it is what says which of "the ROM never drives the link"
 		// and "YAMP never delivers a packet" is happening — the two failures look identical from

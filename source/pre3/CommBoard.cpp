@@ -233,6 +233,25 @@ namespace pre3
 		// ENABLE is mem+0x34, which the GUEST programs through 0xF0100014 - so a raise the guest has
 		// not enabled sets the state bit and delivers nothing. mem+0x36 is the state word whose LOW
 		// BYTE the guest polls at 0xF0100018 and dispatches its ISRs from.
+		// The probe's storage. 8192 frames is over two minutes at 60 Hz, and it wraps rather than
+		// stopping so a long run keeps its most recent window.
+		struct Sample
+		{
+			uint32_t frame;
+			uint32_t nodes;
+			uint16_t irqState;
+			uint16_t sequence;
+			uint8_t irqEnable;
+			uint8_t vblank;
+			uint8_t irq08;
+			uint8_t irq04;
+			uint8_t netFlags;
+			uint8_t commState;
+		};
+		inline constexpr size_t TRACE_CAPACITY = 8192;
+		static Sample s_trace[TRACE_CAPACITY];
+		static size_t s_traceCount = 0;
+
 		inline constexpr size_t MEM_IRQ_ENABLE = 0x34;
 		inline constexpr size_t MEM_IRQ_STATE = 0x36;
 
@@ -592,29 +611,88 @@ namespace pre3
 		const uint8_t irq08 = static_cast<uint8_t>(w984);          // guest 0x737987
 		const uint8_t irq04 = static_cast<uint8_t>(w9A8 >> 24);    // guest 0x7379A8
 
-		// Its OWN frame counter, not CommBoard's. s_frame only advances inside Update(), which
-		// returns immediately when the mode is Off - so keying the heartbeat off it made this probe
-		// silent on exactly the stand-alone board it most needs to be compared against.
-		static uint32_t probeFrame = 0;
-		const uint32_t now = probeFrame++;
-
-		// Only on change, plus a heartbeat: a per-frame line drowns the log, and the question here
-		// is "does this counter EVER move", which a change filter answers exactly.
-		static uint8_t lastVblank = 0xFF;
-		static uint32_t lastLogged = 0;
-		if (vblank == lastVblank && now - lastLogged < 120) return;
-		lastVblank = vblank;
-		lastLogged = now;
-
+		// RECORDED, NOT LOGGED. A DebugLogFile call per frame was expensive enough to change the
+		// outcome it was measuring, so this writes one 20-byte struct and returns; DumpTrace() does
+		// the I/O once, at teardown.
 		BoardView view{};
 		ReadBoard(view);
-		DebugLogFile("[%s sync] f=%u irq=%02X/%04X vblank(73798E)=%02X irq08(737987)=%02X "
-			"irq04(7379A8)=%02X net(7379B9)=%02X%s%s nodes(100628)=%08X commstate=%u seq=%u\n",
-			gGeneral.GetGameTag(), now, irqEnable, irqState, vblank, irq08, irq04,
-			netFlags,
-			(netFlags & 0x20) == 0 ? " BOARD-NOT-PRESENT" : "",
-			(netFlags & 0x40) == 0 ? " BOARD-HAS-PROBLEM" : "",
-			w628, view.state, view.sequence);
+
+		Sample& out = s_trace[s_traceCount % TRACE_CAPACITY];
+		out.frame = static_cast<uint32_t>(s_traceCount);
+		out.irqEnable = irqEnable;
+		out.irqState = irqState;
+		out.vblank = vblank;
+		out.irq08 = irq08;
+		out.irq04 = irq04;
+		out.netFlags = netFlags;
+		out.nodes = w628;
+		out.commState = view.state;
+		out.sequence = view.sequence;
+		s_traceCount++;
+	}
+
+	void CommBoard::DumpTrace()
+	{
+		if (s_traceCount == 0) return;
+
+		const size_t total = s_traceCount;
+		const size_t have = (total < TRACE_CAPACITY) ? total : TRACE_CAPACITY;
+		const size_t first = total - have;
+
+		// Did the VBlank counter EVER move? That is the whole question the hung board poses, and
+		// it is one pass over the buffer rather than a judgement call over a log.
+		unsigned vblankMoves = 0;
+		for (size_t i = first + 1; i < total; ++i)
+		{
+			if (s_trace[i % TRACE_CAPACITY].vblank != s_trace[(i - 1) % TRACE_CAPACITY].vblank)
+			{
+				vblankMoves++;
+			}
+		}
+
+		const Sample& last = s_trace[(total - 1) % TRACE_CAPACITY];
+		DebugLogFile("[%s trace] %zu samples; VBlank counter moved %u times%s\n",
+			gGeneral.GetGameTag(), have, vblankMoves,
+			vblankMoves == 0 ? "  <== NEVER - the board is blocked on it" : "");
+
+		// The game's own verdict, decoded rather than left as hex. These four are the outcomes
+		// FUN_00093DB4 chooses between, and exactly one of them applies.
+		const char* verdict =
+			(last.netFlags & 0x20) == 0 ? "NETWORK BOARD NOT PRESENT" :
+			(last.netFlags & 0x40) == 0 ? "NETWORK BOARD HAS ANY PROBLEM" :
+			"gates OK (present, no problem)";
+		DebugLogFile("[%s trace] final: net(7379B9)=%02X -> %s | nodes(100628)=%08X "
+			"(id+1=%u count=%u) | irq=%02X/%04X vblank=%02X irq08=%02X irq04=%02X "
+			"commstate=%u seq=%u\n",
+			// FUN_00093DB4 writes `status & 0x1F` (node id + 1) and `(status >> 5) & 0x1F` (node
+			// count) into the two low bytes of the word at guest 0x100628. A host dword read of a
+			// guest word preserves the guest's value, so they come out as byte 0 and byte 1 - not
+			// as the >>8/>>16 an earlier version of this line used, which printed "id+1=2 count=0"
+			// for a word that plainly reads 0x201.
+			gGeneral.GetGameTag(), last.netFlags, verdict, last.nodes,
+			last.nodes & 0x1F, (last.nodes >> 8) & 0x1F,
+			last.irqEnable, last.irqState, last.vblank, last.irq08, last.irq04,
+			last.commState, last.sequence);
+
+		// A thinned timeline: every 60th sample plus every change of the fields that matter.
+		// Bounded so a wrapped 8192-sample buffer cannot produce thousands of lines.
+		unsigned printed = 0;
+		for (size_t i = first; i < total && printed < 40; ++i)
+		{
+			const Sample& c = s_trace[i % TRACE_CAPACITY];
+			const bool changed = (i == first) || [&]
+			{
+				const Sample& p = s_trace[(i - 1) % TRACE_CAPACITY];
+				return c.netFlags != p.netFlags || c.nodes != p.nodes
+					|| c.commState != p.commState || c.irqState != p.irqState;
+			}();
+			if (!changed && (i - first) % 60 != 0) continue;
+			printed++;
+			DebugLogFile("[%s trace]   f=%u irq=%02X/%04X vb=%02X i08=%02X i04=%02X net=%02X "
+				"nodes=%08X st=%u seq=%u\n",
+				gGeneral.GetGameTag(), c.frame, c.irqEnable, c.irqState, c.vblank, c.irq08,
+				c.irq04, c.netFlags, c.nodes, c.commState, c.sequence);
+		}
 	}
 
 	bool CommBoard::ReadBoard(BoardView& out)

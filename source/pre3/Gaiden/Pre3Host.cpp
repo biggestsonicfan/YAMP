@@ -701,6 +701,10 @@ namespace pre3
 				lastTime = currentTime;
 			}
 
+			// The link probe's collected samples, written out once now rather than per frame -
+			// see CommBoard::DumpTrace. No-op unless YAMP_PRE3_SYNCPROBE asked for them.
+			CommBoard::DumpTrace();
+
 			const int stopResult = module_stop(0, nullptr);
 			DebugLogFile("[%s::Run] module_stop -> 0x%X\n", gGeneral.GetGameTag(), stopResult);
 		}
