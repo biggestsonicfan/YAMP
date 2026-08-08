@@ -33,6 +33,7 @@ unsigned int ModuleDrawLimitNow();
 #include "../SystemSwitches.h"
 #include "../BoardVtables.h"
 #include "../SecurityBoard.h"
+#include "../Patch.h"
 #include "../CommBoard.h"
 #include "../Determinism.h"
 #include "../NetSession.h"
@@ -340,6 +341,11 @@ namespace pre3
 		// booting - it must only stop being silent about it, which SetBoardSymbols logs.
 		SetBoardSymbols(symbolMap.TryGetSymbol(ImportSymbol::MACHINE_OBJECT),
 			symbolMap.TryGetSymbol(ImportSymbol::CXCOMM_VTABLE));
+
+		// The module's 0xF1 window implements 32-bit access only, so every byte and halfword the
+		// board writes to tilemap RAM is discarded - which is every piece of text it draws. See
+		// pre3/Patch.h.
+		InstallTilemapAccess();
 
 		if (void* const readPort = symbolMap.TryGetSymbol(ImportSymbol::IO_READ_PORT))
 		{
@@ -704,6 +710,7 @@ namespace pre3
 			// The link probe's collected samples, written out once now rather than per frame -
 			// see CommBoard::DumpTrace. No-op unless YAMP_PRE3_SYNCPROBE asked for them.
 			CommBoard::DumpTrace();
+			LogTilemapAccess();
 
 			const int stopResult = module_stop(0, nullptr);
 			DebugLogFile("[%s::Run] module_stop -> 0x%X\n", gGeneral.GetGameTag(), stopResult);

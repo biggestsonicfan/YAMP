@@ -727,16 +727,52 @@ text this board draws, and it is a MODULE-LEVEL GAP rather than anything to do w
 also explains why every diagnosis so far had to be done by reading guest RAM: the screen was never
 going to say anything.
 
+### MEASURED, AND IT KILLS THE THEORY ABOVE
+
+`source/pre3/Patch.cpp` implements the four missing accessors and COUNTS them, because "the ROM
+uses narrow stores for text" was an inference. The counter is the acceptance test, and it failed:
+
+```
+SRC2:  narrow 0 reads / 0 writes
+FV2:   narrow 0 reads / 0 writes
+```
+
+Neither game touches this window narrowly. **The narrow accessors fix nothing** - they are correct,
+harmless and inert, and are kept only because discarding a write is not behaviour worth preserving
+and because the counters are the only visibility into this window.
+
+Counting the WIDE path is what found the answer:
+
+```
+SRC2:  wide 6083 reads / TILEMAP 232100 writes (first=F10F7000 last=F10FDBF8) / registers 6284
+```
+
+**The board writes tilemap RAM 232,100 times in 700 frames**, into `0xF10F7000-0xF10FDBF8` - the
+name-table region. So the text IS composed, it DOES reach tilemap RAM, and the 32-bit path that
+carries it works.
+
+(The first attempt at this counter recorded only a first/last pair for the whole window and got
+`F1180008`/`F118000C`, both video registers, which said nothing about tilemap RAM in between. The
+ranges are counted separately now.)
+
+### So the real gap: THE TILEMAP LAYER IS NEVER COMPOSITED
+
+Text reaches the tilemap and nothing draws it. The ~235 draws a frame are Real3D polygons; the 2D
+layer that carries `NETWORK CHECKING`, `WARNING`, the service menu and every other string on this
+board is written and then never presented.
+
+That is a RENDERING gap, not a memory-map one, and it is not specific to the link - it explains why
+every diagnosis in this document had to be done by reading guest RAM. It is also the highest-value
+thing left, because a board that can print its own status is worth more to the outstanding
+convergence race than any further host-side probe.
+
+Where to start: `module_render_begin` is documented as uploading the 0x120000 scroll buffer
+(`Pre3Host.cpp`), so the module has a path for this layer. Whether it draws it, and what the host
+owes it, is unread.
+
 ### What is NOT yet proven
 
-**That the ROM's text service actually uses narrow stores.** The window's asymmetry is measured; the
-store width on the other side of the syscall is inferred from "16-bit is the natural width for a
-tile entry", which is exactly the kind of reasoning this document has had to retract twice.
-
-The check is cheap and is the next thing to do: put a host-side counter in the `0xF1` write8/write16
-path - they are `ret` today, so a counted stub costs nothing - and see whether a booting SRC2 hits
-it. A non-zero count is the proof, and the same counter is the fix's acceptance test.
-
-If it is confirmed, implementing those four accessors against the same device is a small, contained
-change with a large payoff: the board would be able to TELL US what it thinks is wrong, which for
-the outstanding convergence race is worth more than any further host-side probe.
+~~That the ROM's text service uses narrow stores.~~ **Disproven above** - it uses word stores, and
+the accessors this section proposed turned out to be inert. The inference was "16-bit is the natural
+width for a tile entry", which is exactly the kind of reasoning this document has now had to retract
+three times; the counter is the only reason it took one run rather than a day.
