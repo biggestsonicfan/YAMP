@@ -343,8 +343,34 @@ namespace pre3
 			return;
 		}
 
-		if (!ParseEnvironment())
+		// THE ROOM DECIDES THE ROLE, and the default is a STAND-ALONE CABINET.
+		//
+		// A cabinet nobody has linked is SINGLE: no peer count, no node id, LINK ID left at the
+		// operator's setting. Hosting a room makes this machine the MASTER (node 0) and joining
+		// one makes it the SLAVE (node 1), which is the same rule Virtual On uses - `local_player`
+		// 0 = host, 1 = guest - and the same rule two real cabinets are wired under.
+		//
+		// TIMING, AND IT IS A REAL CONSTRAINT: this runs once, immediately before module_start,
+		// because the module latches the node id and count out of the config there and never looks
+		// again. So the room has to exist BEFORE the board boots. A room formed later cannot
+		// change this cabinet's role without restarting the module - there is no equivalent of
+		// Virtual On's SoftResetIntoRole here, which pulses the TEST switch on a running board.
+		//
+		// (There may be one to build: writing the module's own config globals and then driving the
+		// comm board's state machine back through state 1 - a guest write of 0 to 0xC0010180
+		// resets it - would re-latch both fields. Untried, and noted rather than assumed.)
+		const net::Status netStatus = net::GetStatus();
+		const bool inRoom = netStatus.local_player >= 0;
+
+		if (inRoom)
 		{
+			s_mode = Mode::Link;
+			s_nodeId = static_cast<uint8_t>(netStatus.local_player != 0 ? 1 : 0);
+			s_nodeCount = 2;
+		}
+		else if (!ParseEnvironment())
+		{
+			// No room and no harness override: a single cabinet, exactly as before any of this.
 			return;
 		}
 

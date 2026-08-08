@@ -123,12 +123,24 @@ namespace pre3
 		// cannot be changed on a running board here the way Virtual On's can: there is no
 		// equivalent of SoftResetIntoRole, and changing it means restarting the module.
 		//
+		// THE DEFAULT IS A STAND-ALONE CABINET. No room and no override means no peer count, no
+		// node id, and the operator's own LINK ID setting left alone - which is what every
+		// single-player session is and what the board boots as.
+		//
 		// Sources, in priority order:
-		//   1. YAMP_PRE3_LINK, the harness, matching the YAMP_PRE3_* family the diagnostics use:
+		//   1. A NETPLAY ROOM. Hosting makes this machine the MASTER (node 0), joining makes it
+		//      the SLAVE (node 1) - `local_player` 0 = host, 1 = guest, the same rule Virtual On
+		//      uses and the same way two real cabinets are wired. A live link also takes over the
+		//      board's LINK ID row (see YAMPUserInterface), because the service-menu row and the
+		//      module's node id describe one fact and must not disagree.
+		//   2. YAMP_PRE3_LINK, the harness, matching the YAMP_PRE3_* family the diagnostics use:
 		//        probe[:count]              one cabinet, an imaginary peer that never speaks
 		//        shared:<nodeId>[:count]    two processes on this machine, real shared memory
 		//        <nodeId>[:count]           a peer over the netplay plugin
-		//   2. a netplay room, once one is driving this path (local_player 0 = node 0 = MASTER).
+		//
+		// THE ROOM MUST EXIST BEFORE THE BOARD BOOTS. This is read once, immediately before
+		// module_start, because that is where the module latches both fields. A room formed later
+		// cannot change the role without restarting the module.
 		//
 		// Sega Racing Classic 2 only. Fighting Vipers 2 is not a linked-cabinet game and handing
 		// it a peer count would drag in behaviour it does not want — the NVRAM initialiser forces

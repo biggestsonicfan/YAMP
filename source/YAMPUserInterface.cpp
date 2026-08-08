@@ -234,6 +234,13 @@ void YAMPUserInterface::Draw()
 			desired.linkId = static_cast<uint8_t>(pre3::CommBoard::NodeId() == 0
 				? pre3::ArcadeSettings::LinkId::Master
 				: pre3::ArcadeSettings::LinkId::Slave);
+
+			// CAR NUMBER FOLLOWS JOIN ORDER, for the same reason the role does: it is a
+			// per-cabinet identity in a ring, and two cabinets that pick it independently can
+			// pick the same one. The node id already IS join order - the room hands out 0 to the
+			// host and 1 to the first guest - so car N belongs to node N, and the row's option
+			// index is 0-based over cars 1..8.
+			desired.carNumber = pre3::CommBoard::NodeId();
 		}
 
 		pre3::ArcadeSettings::SetDesired(desired);
