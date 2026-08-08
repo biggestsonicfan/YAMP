@@ -426,11 +426,82 @@ namespace pre3
 		workPointers[2] = &s_rendezvous;
 	}
 
+	namespace
+	{
+		// A DESYNC LOCATOR, and the reason it hashes blocks rather than a single value: "are the
+		// two boards in the same state" and "WHERE did they stop being in the same state" are the
+		// same question asked at different resolutions, and only the second one is actionable.
+		//
+		// Keyed on the GUEST's own frame counter (0x00737978, the master frame counter the module
+		// also mirrors to rom+0x205B8), never on the host frame - the two cabinets boot hundreds
+		// of host frames apart, so a host-frame comparison would report a desync on every run.
+		// Diff two logs by matching gframe.
+		//
+		// 32 blocks of 0x40000 over the 8 MB work RAM. Under SEH because the upper reaches have
+		// never been probed and a diagnostic must not be the thing that takes the board down.
+		constexpr uint32_t DIGEST_BLOCKS = 32;
+		constexpr uint32_t DIGEST_BLOCK_SIZE = 0x40000;
+		constexpr uint32_t DIGEST_INTERVAL = 120;
+		constexpr uint32_t ADDR_GUEST_FRAME = 0x737978;
+
+		static uint32_t HashBlock(const uint8_t* p, size_t bytes)
+		{
+			// FNV-1a over 32-bit words. Words rather than bytes purely for speed: 8 MB every two
+			// seconds is already the most expensive thing in this file.
+			uint32_t hash = 2166136261u;
+			const auto* words = reinterpret_cast<const uint32_t*>(p);
+			for (size_t i = 0; i < bytes / 4; ++i)
+			{
+				hash = (hash ^ words[i]) * 16777619u;
+			}
+			return hash;
+		}
+
+		void LogSyncDigest(uint32_t /*hostFrame*/, unsigned nodeId)
+		{
+			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
+			if (ram == nullptr) return;
+
+			char line[DIGEST_BLOCKS * 9 + 8];
+			int at = 0;
+			uint32_t guestFrame = 0;
+			__try
+			{
+				// SAMPLED ON THE GUEST'S CLOCK, NOT THE HOST'S, and this is the whole difference
+				// between a usable digest and a useless one. Triggering every 120 HOST frames put
+				// the two cabinets 29 guest frames apart, so every block holding anything live
+				// differed - twelve of thirty-two, identically, every sample - and that says
+				// nothing at all about whether the boards agree. Bucketing the guest counter makes
+				// both machines hash the same emulated instant, so a mismatch is a real one.
+				guestFrame = *reinterpret_cast<const uint32_t*>(ram + ADDR_GUEST_FRAME);
+				static uint32_t lastBucket = ~0u;
+				const uint32_t bucket = guestFrame / DIGEST_INTERVAL;
+				if (bucket == lastBucket) return;
+				lastBucket = bucket;
+
+				for (uint32_t block = 0; block < DIGEST_BLOCKS; ++block)
+				{
+					const uint32_t hash = HashBlock(
+						ram + static_cast<size_t>(block) * DIGEST_BLOCK_SIZE, DIGEST_BLOCK_SIZE);
+					at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "%08X ", hash);
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				return;
+			}
+
+			DebugLogFile("[%s sync] gframe=%u node=%u %s\n",
+				gGeneral.GetGameTag(), guestFrame, nodeId, line);
+		}
+	}
+
 	void CommBoard::Update()
 	{
 		if (s_mode == Mode::Off) return;
 		EnsureBuffers();
 		s_frame++;
+		LogSyncDigest(s_frame, s_nodeId);
 
 		BoardView view{};
 		const bool haveBoard = ReadBoard(view);
@@ -778,17 +849,45 @@ namespace pre3
 		// WHAT IS ACTUALLY IN THE TX SLOT, which is the difference between "the state machine
 		// ticks" and "there is a packet to send". A board that reaches state 4 against a silent
 		// peer looks identical either way from the state fields alone.
-		char slot[64] = "-";
+		// EVERY NODE'S SLOT, and how much of it MOVED since the last sample.
+		//
+		// One slot's byte count answers "is there a packet", which was the question while nothing
+		// linked. It cannot answer the one a running race poses: the CPU cars are simulated by one
+		// cabinet and carried to the other, so "the master is not sending car data" and "the slave
+		// is not applying it" look identical from the master's own slot alone. Churn is the
+		// discriminator - a slot that is large but static is a stale snapshot, a slot that is
+		// small and busy is carrying inputs only.
+		//
+		// The guest programs 848 bytes and boot filled 34 of them, so the interesting number is
+		// whether a race pushes that up into the hundreds.
+		char slot[256] = "-";
 		if (view.packetSize > 0 && static_cast<size_t>(view.packetSize) <= MAX_PACKET)
 		{
 			const uint8_t* base = (s_mode == Mode::Shared && s_ring != nullptr)
 				? s_ring->packets : s_tx.data();
-			const uint8_t* mine = base + static_cast<size_t>(s_nodeId) * view.packetSize;
-			size_t nonZero = 0;
-			for (size_t i = 0; i < view.packetSize; ++i) nonZero += (mine[i] != 0) ? 1 : 0;
-			sprintf_s(slot, "%zu/%u nz %02X%02X%02X%02X%02X%02X%02X%02X",
-				nonZero, view.packetSize, mine[0], mine[1], mine[2], mine[3],
-				mine[4], mine[5], mine[6], mine[7]);
+
+			static std::vector<uint8_t> previous;
+			const size_t span = static_cast<size_t>(view.nodeCount ? view.nodeCount : 1)
+				* view.packetSize;
+			const bool haveHistory = previous.size() == span;
+
+			int at = 0;
+			for (int node = 0; node < view.nodeCount && node < MAX_NODES; ++node)
+			{
+				const size_t offset = static_cast<size_t>(node) * view.packetSize;
+				const uint8_t* p = base + offset;
+				size_t nonZero = 0;
+				size_t changed = 0;
+				for (size_t i = 0; i < view.packetSize; ++i)
+				{
+					if (p[i] != 0) nonZero++;
+					if (haveHistory && p[i] != previous[offset + i]) changed++;
+				}
+				at += _snprintf_s(slot + at, sizeof(slot) - at, _TRUNCATE,
+					"%s[%d]%zu nz/%zu moved%s", at != 0 ? " " : "", node, nonZero, changed,
+					node == s_nodeId ? "*" : "");
+			}
+			previous.assign(base, base + span);
 		}
 
 		uint8_t irqEnable = 0;
