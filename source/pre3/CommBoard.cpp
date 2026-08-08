@@ -562,7 +562,7 @@ namespace pre3
 		LogState();
 	}
 
-	void CommBoard::SampleAtFrameBoundary()
+	bool CommBoard::TraceEnabled()
 	{
 		static const bool wanted = []
 		{
@@ -571,7 +571,12 @@ namespace pre3
 			return getenv_s(&length, value, sizeof(value), "YAMP_PRE3_SYNCPROBE") == 0
 				&& length != 0 && value[0] != '0';
 		}();
-		if (!wanted) return;
+		return wanted;
+	}
+
+	void CommBoard::SampleAtFrameBoundary()
+	{
+		if (!TraceEnabled()) return;
 
 		const auto* ram = static_cast<const uint8_t*>(BoardGuestRam());
 		if (ram == nullptr) return;

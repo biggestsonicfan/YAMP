@@ -995,7 +995,15 @@ namespace pre3
 			// wait for THIS frame rather than sampling whatever the worker happens to be doing. See
 			// Determinism.h's WaitForEmulatedFrame: the busy flags alone cannot tell "the frame
 			// finished" from "the frame has not started".
-			const unsigned long long boardMarker = BoardFrameMarker();
+			//
+			// ONLY WHEN THE PROBE IS ASKED FOR. Waiting on the emulator every frame is not free and
+			// not harmless: doing it unconditionally dropped a stand-alone board from ~395 draws a
+			// frame to 8 - no picture at all - because the host loop then runs in lockstep with the
+			// worker instead of overlapping it. That is a diagnostic tool changing the thing it
+			// measures for the third time in this file's history, and the third time it was caught by
+			// someone looking at the screen rather than at the log.
+			const bool wantBoardSample = CommBoard::TraceEnabled();
+			const unsigned long long boardMarker = wantBoardSample ? BoardFrameMarker() : 0;
 
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
@@ -1013,7 +1021,7 @@ namespace pre3
 			// just simulated is the one being sampled. Everything else in CommBoard reads across the
 			// running worker, which is fine for slow-moving fields and useless for an interrupt that
 			// is raised and acknowledged inside a single emulated frame.
-			if (WaitForEmulatedFrame(boardMarker))
+			if (wantBoardSample && WaitForEmulatedFrame(boardMarker))
 			{
 				CommBoard::SampleAtFrameBoundary();
 			}

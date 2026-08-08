@@ -207,6 +207,11 @@ namespace pre3
 		// Call this AFTER the module's update stage and AFTER WaitForEmulatedFrame, i.e. at a
 		// point where the worker is parked and the frame just simulated is the one being read.
 		// Gated on YAMP_PRE3_SYNCPROBE so it costs nothing when nobody is looking.
+		// Whether the frame-boundary probe was asked for. The host tests this BEFORE waiting on the
+		// emulator, because that wait is what costs: performing it unconditionally put the host loop
+		// in lockstep with the worker and took a stand-alone board from ~395 draws a frame to 8.
+		bool TraceEnabled();
+
 		void SampleAtFrameBoundary();
 
 		// Write the collected samples out. Called once at teardown, because SampleAtFrameBoundary
