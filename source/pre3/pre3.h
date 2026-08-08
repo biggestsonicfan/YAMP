@@ -126,13 +126,18 @@ namespace pre3
 		//          rather than hardcoding it. The default here is only the fallback.
 		int32_t render_height = 900;
 
-		//   +0x100C  read by the backup-RAM initialiser next to the link-cabinet check; it takes
-		//          the link path only when this is zero. Meaningless while YAMP passes no link
-		//          interface (params+0x1070), so it stays zero.
-		int32_t link_reserved = 0;
+		//   +0x100C  THIS CABINET'S NODE ID in the link ring — 0 is the master. Named
+		//          `link_reserved` until 2026-08-07, when the comm board was traced: the field has
+		//          no writer inside the module because it is simply a config byte module_start
+		//          copies, and the emulated network board latches it as its node id in state 1 of
+		//          its transfer machine (config global DLL 0x18018A050 + 0x100C = DAT_18018B05C,
+		//          read by FUN_180035BA0). The backup-RAM initialiser's "takes the link path only
+		//          when this is zero" is the same field being tested for master.
+		int32_t link_node_id = 0;
 
-		//   +0x1010  peer count. The same initialiser only engages the link interface when this
-		//          is greater than 1, which is what makes it read as "how many cabinets".
+		//   +0x1010  peer count — how many cabinets are in the ring. The backup-RAM initialiser
+		//          only engages the link interface when this is greater than 1, and the comm
+		//          board's transfer machine takes the stand-alone branch on the same test.
 		int32_t link_peer_count = 0;
 
 		std::byte tail[0x1028 - 0x1014]{};
@@ -187,8 +192,26 @@ namespace pre3
 
 		// +0x1660: the "work" block, at the same offset m2ftg puts its own. The first three
 		// qwords are NULLABLE POINTERS the module reads and null-checks (0x180035BA0), so they
-		// are host-provided rather than module-owned; YAMP leaves them null, which is the path
-		// the module already handles. +0x167C and +0x1680 are the two volume scalars the frame
+		// are host-provided rather than module-owned.
+		//
+		// THEY ARE THE LINKED-CABINET DATA PATH, and the function that null-checks them is the
+		// comm board's own transfer machine. Traced 2026-08-07; see CommBoard.h and
+		// docs/src2-netplay-recon.md:
+		//
+		//   [0]  TX ARRAY   the emulated network board copies its outgoing packet INTO it, at
+		//                   slot [config.link_node_id]
+		//   [1]  RX ARRAY   it copies every node's packet OUT of it, indexed by node id
+		//   [2]  points at a u64 RENDEZVOUS WORD shared by every cabinet: bits 0..n-1 are
+		//        "node i's packet is present" (the module only ever WAITS on these), bit
+		//        nodeId+0x20 is the guest's 0xF000 acknowledgement, bit nodeId+0x30 is
+		//        "node i has finished booting" and gates the machine's own boot barrier.
+		//
+		// Both arrays are `link_peer_count * packetSize`, where packetSize is a register the GUEST
+		// programs at 0xC0020808 — so a host that fills these in does not get to choose the
+		// length. YAMP leaves all three null unless CommBoard is running, which is the path the
+		// module already handles and is what every non-linked game gets.
+		//
+		// +0x167C and +0x1680 are the two volume scalars the frame
 		// callback multiplies sound_volume by when it sets the six audio channels (channel 5
 		// takes +0x167C, channels 0-4 take +0x1680), and +0x1694 is a byte the module writes.
 		void* p_work_ptr[3];

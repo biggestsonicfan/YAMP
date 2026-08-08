@@ -1,8 +1,8 @@
 # Sega Racing Classic 2 netplay — the linked-cabinet path
 
 Recon 2026-08-07 against `pre3-pxd-w64-d3d12_retail.dll` (the copy in
-`build/bin/Win64/Debug/pre3/`), read in Ghidra. Nothing here has been run yet: every claim below is
-static analysis, and the section that says which parts are *inference* says so explicitly.
+`build/bin/Win64/Debug/pre3/`), read in Ghidra, and then **RUN**: §5a is what a single machine
+measured, and it confirms §2 end to end. Anything still inferred says so where it stands.
 
 **The headline: pre3 already contains a complete emulated Model 3 comm board, and the wire format
 is not ours to invent — the module defines it.** SRC2 does not need YAMP to fake a link the way
@@ -160,20 +160,27 @@ comm->0x20026++;  *(u16*)(comm + (bank^1)*0x10000 + 0x0E) = comm->0x20026;  bank
 `nodeCount * packetSize` bytes, indexed by node.** That is the whole wire format, and the module
 chose it, not us.
 
-### 2.4 `p_work_ptr[2]` is a shared 64-bit rendezvous word
+### 2.4 `p_work_ptr[2]` is a shared 64-bit rendezvous word, and its groups are DIRECTIONAL
 
-Three disjoint bit ranges, all read/written through `*(u64*)execute_info->p_work_ptr[2]`:
+Four bit ranges, all read/written through `*(u64*)execute_info->p_work_ptr[2]`:
 
-| bits | meaning | set by | waited on by |
+| bits | direction | meaning | who |
 |---|---|---|---|
-| `0 .. n-1` | node *i* has a packet ready for this frame | (the host) | `FUN_180035BA0` state 3 |
-| `nodeId + 0x20` | node *i* answered the guest's `0xF000` command | `FUN_180035970` | the host |
-| `nodeId + 0x30` | node *i* has finished booting | `FUN_1800393D0` case 0xE | `FUN_1800393D0` case 0xF |
+| `0 .. n-1` | host → module | node *i*'s packet is present in the RX array | `FUN_180035BA0` state 3 waits |
+| `16 .. 16+n-1` | host → module | node *i* has finished booting | `FUN_1800393D0` case 0xF waits |
+| `nodeId + 0x20` | module → host | this node answered the guest's `0xF000` command | `FUN_180035970` sets |
+| `nodeId + 0x30` | module → host | this node has finished booting | `FUN_1800393D0` case 0xE sets |
 
-The boot barrier is the same shape as the frame barrier: the machine build **counts set bits and
-refuses to advance until the count equals the node count**. Both are spelled as an early `return`
-out of the frame, so a peer that never answers stalls the board — which is the ROM's own waiting,
-exactly the property that makes this path not need lockstep.
+**The 0x10 group is easy to miss and costs a whole run.** The module sets bit `nodeId + 0x30` in
+case 0xE and then, one case later, waits on `word & rol64(walkingOne, 16)` — bits 16 upward, not
+the 0x30 it just wrote. So the module never signals *itself* through this word: it REPORTS in the
+high groups and WAITS on the host in the low ones, and even a single cabinet's own boot answer has
+to pass through the host. A first implementation that set 0x30 instead of 0x10 produced a board
+that ran 800 frames without a single draw — see §5a.
+
+Both waits are spelled as an early `return` out of the frame, so a peer that never answers stalls
+the board — which is the ROM's own waiting, exactly the property that makes this path not need
+lockstep.
 
 **Like a Dragon Gaiden clearly implements this as literal shared memory between board instances in
 one process.** YAMP has to synthesize it: our own bits we set locally, the peer's bits arrive with
@@ -270,25 +277,81 @@ room never forms.**
 
 ---
 
+## 5a. WHAT THE FIRST PROBE MEASURED — §2 confirmed on one machine
+
+`source/pre3/CommBoard.{h,cpp}` with `YAMP_PRE3_LINK=probe:2`: node 0 of a two-cabinet ring, the
+three buffers attached, and the rendezvous bits held for an imaginary peer that never speaks.
+
+```
+f=149 state=3 node=0/2 size=848 seq=0   rendezvous=0001000100030003 tx=0/848
+f=150 state=4 node=0/2 size=848 seq=0   rendezvous=0001000100030003 tx=0/848
+f=270 state=4 node=0/2 size=848 seq=120 rendezvous=0001000100030003 tx=0/848
+f=510 state=4 node=0/2 size=848 seq=360 rendezvous=0001000100030003 tx=34/848
+f=870 state=4 node=0/2 size=848 seq=720 rendezvous=0001000100030003 tx=34/848
+```
+
+Every claim in §2 is in that trace:
+
+* the state machine walks **1 → 2 → 3 → 4** and stays there;
+* **`node=0/2`** — the board latched YAMP's `link_node_id` / `link_peer_count` out of the config,
+  which is §2.5;
+* **`size=848`** — the GUEST programmed the packet size through `0xC0020808`. This is the answer to
+  "is the ROM actually driving the link, or ignoring it": it is driving it;
+* **`seq` advances exactly one per emulated frame** (120 per 120), so the transfer is running at
+  the rate §2.3 predicts;
+* **`tx=34/848`** — 34 non-zero bytes in our own TX slot. The board is not merely ticking, it is
+  **writing a packet**, which is the whole data path proven on one machine;
+* `rendezvous=0001000100030003` decodes as bits 0,1 (ready, ours) + 16,17 (linked, ours) + **32**
+  (`0x20+0`, the module answering the guest's `0xF000`) + **48** (`0x30+0`, the module reporting
+  its own boot). Both module→host groups appeared on their own, exactly where §2.4 says.
+
+### Three things the probe taught that reading could not
+
+1. **The board's own `LINK ID` must not be SINGLE.** With the service-menu row at its default the
+   guest never writes the comm board's enable register and the state machine sits at 0 forever,
+   with `size` already programmed — a link that looks half-configured and never starts. Setting
+   `[StF] Src2LinkId=1` (MASTER) through `pre3::ArcadeSettings` is what produced the trace above.
+   **The board's LINK ID and the module's `link_node_id` are two different switches and both have
+   to agree.**
+2. **The enable register is `0xC0010180`**, bit 0 (`FUN_180035EA0`): writing 1 sets the state to 1
+   and starts the machine, writing 0 resets the state, node id and bank to zero.
+3. **The rendezvous groups are directional and the boot barrier reads 0x10, not 0x30** (§2.4).
+   Setting the wrong group stalls the machine before its running phase, which presents as a board
+   that runs hundreds of frames and never draws — with no other symptom.
+
+### What is NOT yet working: the master draws nothing against a silent slave
+
+With the link up, `draws` stays 0 and the module raises `execute_info.status` bit `0x100`. The
+control run isolates it: **`LINK ID = MASTER` on its own is fine** (392-405 draws/frame, status
+0x40, the normal attract screen), so it is the live link and not the cabinet setting.
+
+That is the expected behaviour of a master cabinet whose slave never answers — the RX slot holds
+848 zero bytes, which is not a cabinet — but "expected" is an inference, and the only thing that
+can settle it is a second instance. It is the next experiment, not a defect to chase on one
+machine.
+
 ## 5. What is NOT established, in the order it should be settled
 
-1. **Nobody has run SRC2's comm board.** Every fact above is static. The first experiment is a
-   single machine with `link_peer_count = 2`, `link_node_id = 0`, the three buffers allocated and a
-   log of `comm + 0x20028` (the state), `+0x20024` (the packet size) and `+0x20026` (the sequence)
-   per frame. If the state reaches 3 and parks there waiting for node 1's bit, everything in §2 is
-   confirmed at once.
-2. **Does the guest ever program a packet size?** The board can sit in state 3 forever and look
-   healthy. `+0x20024` reading non-zero is the proof that SRC2's ROM is actually driving the link.
+1. ~~**Nobody has run SRC2's comm board.**~~ **Done — see §5a**, and §2 is confirmed end to end.
+2. ~~**Does the guest ever program a packet size?**~~ **Yes: 848 bytes**, and it fills 34 of them.
 3. **What does the game DO with a second cabinet?** SRC2's own menus decide whether two nodes mean
    a two-player race or two independent seats. Unknown; the ROM has not been read for this.
 4. **The HLE table.** Three of SRC2's 26 hooks are boot-critical and two of them excise a security
-   overlay ([`src2-hle-hooks.md`](src2-hle-hooks.md)). None of the 26 looks link-related, but that
-   was read for determinism, not for the comm board — worth a second pass against the guest
-   addresses the link code lives at, once §5.1 says where that is.
-5. **Analogue inputs.** SRC2 reads the ADC ring that FV2 never touches. On this path they never
+   overlay ([`src2-hle-hooks.md`](src2-hle-hooks.md)). None of the 26 looks link-related, and §5a
+   removes the strongest reason to suspect them: the guest reaches the comm board, programs it and
+   feeds it a packet with the shipped mask in place. So a hook bisect is no longer the first thing
+   to try if two cabinets fail to agree — the RX side is.
+5. **Is mirroring our own packet into our own RX slot correct?** The board's ingest loop walks
+   backwards from `nodeId - 1` and wraps, so it covers every slot including its own, and a real
+   token ring does hand a cabinet its packet back after a lap. `CommBoard::Update` mirrors on that
+   reading. If it is wrong the game sees itself twice, which is visible on screen.
+6. **The ready-bit policy is YAMP's invention.** Nothing in the module ever CLEARS a ready bit, so
+   holding them all set free-runs the board and clearing them per frame makes it lockstep. The
+   staleness window in `CommBoard.cpp` is a middle that has never been tested against a peer.
+7. **Analogue inputs.** SRC2 reads the ADC ring that FV2 never touches. On this path they never
    cross the wire — each cabinet drives its own — so this is a local input feature, not a netplay
    one, but it has to exist before a race is playable at all.
-6. **The 16 link-interface slots.** Deliberately last. Nothing in the data path needs them, and
+8. **The 16 link-interface slots.** Deliberately last. Nothing in the data path needs them, and
    defining them before the board has been seen to link would be guessing at an interface whose
    only consumer is code we cannot run yet.
 

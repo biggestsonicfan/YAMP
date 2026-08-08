@@ -33,6 +33,7 @@ unsigned int ModuleDrawLimitNow();
 #include "../SystemSwitches.h"
 #include "../BoardVtables.h"
 #include "../SecurityBoard.h"
+#include "../CommBoard.h"
 #include "../Determinism.h"
 #include "../NetSession.h"
 
@@ -609,6 +610,17 @@ namespace pre3
 		params.config.region = settings->m_m2Country <= 2 ? static_cast<uint8_t>(settings->m_m2Country) : 0;
 		params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
 		params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
+
+		// THE LINKED-CABINET RING, and it has to be settled HERE rather than when a session
+		// starts: module_start is where the module latches both fields, and nothing reads them
+		// again. So unlike Virtual On - which pulses the TEST switch to change role on a running
+		// board - a role change here means restarting the module.
+		//
+		// Zero/zero unless CommBoard has been asked for a link, which is the value YAMP has always
+		// passed and the state the module treats as a single cabinet.
+		CommBoard::Configure();
+		params.config.link_node_id = CommBoard::ConfigNodeId();
+		params.config.link_peer_count = CommBoard::ConfigNodeCount();
 		// The module derives the width from this at a fixed 496/384, so it is the whole
 		// resolution story — there is no display-mode table here of the kind m2ftg's ModuleArgs
 		// drives, and no default either: leaving it zero is what produced the 0x0 render target
@@ -951,6 +963,19 @@ namespace pre3
 				s_drawLimitSeeded = true;
 				if (settings->m_drawLimit != 0) SetModuleDrawLimitNow(settings->m_drawLimit);
 			}
+
+			// The linked cabinet's host half, and it runs BEFORE the update stage on purpose.
+			// The emulated comm board fills its TX slot inside the module's frame, so the
+			// freshest packet available to send is always the PREVIOUS frame's - taking it
+			// here is what makes "one packet per board frame" true and keeps the read off a
+			// buffer the module is writing underneath it. Virtual On learned that ordering the
+			// expensive way; see docs/von-handoff.md.
+			//
+			// Attach re-points the three work pointers every frame rather than once: they live
+			// in a persistent execute_info, and a "set it up once" rule is a trap for whoever
+			// next adds a path that rebuilds the block. Both calls are no-ops without a link.
+			CommBoard::Attach(execute_info.p_work_ptr);
+			CommBoard::Update();
 
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
