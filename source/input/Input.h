@@ -166,6 +166,19 @@ namespace Input
 	{
 		uint64_t buttons = 0; // bitmask of (1ull << PadButton)
 		float x = 0.0f, y = 0.0f; // left stick, deadzone applied, y+ = down (sl convention)
+
+		// DRIVING AXES, kept as magnitudes rather than folded into buttons. Every other consumer
+		// in YAMP wants a digital answer, so the stick and triggers are thresholded above and the
+		// magnitude thrown away - but a Model 3 driving board reads an 8-bit ADC and a wheel that
+		// can only be hard-left or hard-right is not usable. See Input::DrivingAxes.
+		//
+		// `steer` is the left stick's X with its OWN deadzone, not `x`: that one is radial, so
+		// pushing straight left with any vertical drift at all still passes, while a small pure-X
+		// nudge is swallowed together with Y. For a wheel axis only X matters.
+		float steer = 0.0f;    // -1 (full left) .. +1 (full right)
+		float throttle = 0.0f; // 0 .. 1
+		float brake = 0.0f;    // 0 .. 1
+
 		bool connected = false;
 	};
 
@@ -204,4 +217,23 @@ namespace Input
 	// True while any input bound to the action (on the player's controller per the current
 	// settings, or the keyboard) is held.
 	bool ActionDown(unsigned int player, uint32_t action);
+
+	// THE DRIVING AXES FOR ONE CABINET, merged across the player's pad and the keyboard.
+	//
+	// Not part of the Action/binding system on purpose. An Action is a switch - the wizard binds
+	// it, ActionDown answers yes or no - and an axis is not one. Routing steering through
+	// Pad_Axis1Minus/Plus would hand the board a wheel that is only ever at full lock, which is
+	// exactly the thing this exists to avoid.
+	//
+	// Sources, strongest wins per axis:
+	//   pad       left stick X steers, right trigger throttles, left trigger brakes (XInput)
+	//   keyboard  A / D steer, W throttle, S brake
+	//
+	// KEYBOARD STEERING IS RAMPED, not switched: held, it winds toward full lock over ~0.35 s and
+	// self-centres about twice as fast when released, which is the closest a key gets to a wheel.
+	// The ramp advances inside PollPads, so it is per-frame by construction rather than by a rule
+	// this function's callers have to remember.
+	//
+	// Outputs are clamped: steer -1..+1, throttle and brake 0..1.
+	void DrivingAxes(unsigned int player, float& steer, float& throttle, float& brake);
 }

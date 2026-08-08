@@ -25,4 +25,19 @@ namespace pre3
 	// no symptom but a silently missing feature.
 	void InstallSystemSwitches(void* const* vtables, size_t count);
 	void SetSystemSwitches(bool test, bool service);
+
+	// THE CABINET'S WHEEL AND PEDALS, per frame, and the reason Sega Racing Classic 2 has never
+	// been drivable: the board's 8-channel ADC ring is read through the same accessor and NOTHING
+	// has ever filled it, so every channel returns zero - which on a steering axis is full lock,
+	// not centre. See the ADC block in the .cpp for the decoded contract and for the one thing in
+	// it that is still convention rather than measurement (which channel is which).
+	//
+	// steer -1..+1 (0 = straight ahead), throttle and brake 0..1. Values outside that are clamped.
+	// Rides the same install as the switches, so it is inert on a board with no accessor and needs
+	// no separate feature gate.
+	//
+	// LOCAL INPUT, NOT NETPLAY. Each cabinet reads its own converter and only the resulting car
+	// state crosses the link, so this never touches the wire - see docs/src2-netplay-recon.md's
+	// analogue note.
+	void SetDrivingAxes(float steer, float throttle, float brake);
 }

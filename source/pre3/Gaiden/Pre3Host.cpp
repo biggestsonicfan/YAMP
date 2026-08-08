@@ -889,6 +889,22 @@ namespace pre3
 			SetSystemSwitches(test, service);
 		}
 
+		// THE WHEEL AND PEDALS, from this cabinet's own player 1. Not suppressed during a netplay
+		// session the way Test / Service are: the switches are operator controls that would desync
+		// two boards, whereas the driving axes never cross the wire at all - each cabinet reads its
+		// own converter and only the car state it produces is transmitted. Zeroed while paused, so
+		// a car does not coast on the last throttle reading behind the menu.
+		{
+			float steer = 0.0f;
+			float throttle = 0.0f;
+			float brake = 0.0f;
+			if (!s_pauseMenuOpen)
+			{
+				Input::DrivingAxes(0, steer, throttle, brake);
+			}
+			SetDrivingAxes(steer, throttle, brake);
+		}
+
 		// The arcade coin/start protocol, same shape as m2ftg's: while the module reports the
 		// start screen (status bit6), a START press becomes a coin insert and START is then
 		// injected on alternating frames until the module leaves that screen. Only meaningful

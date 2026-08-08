@@ -59,14 +59,71 @@ namespace pre3
 		constexpr uint8_t BIT_TEST = 0x04;     // test switch, cabinet A
 		constexpr uint8_t BIT_SERVICE = 0x08;  // service button, cabinet A
 
+		// ---- The ADC, and why it is served here rather than written into the board ----------
+		//
+		// The same accessor's fourth branch, read straight off DLL 0x180033A30:
+		//
+		//     port 0x3C:  b = *(u8 *)(this + 0x2B + this[0x33]);
+		//                 this[0x33] = (this[0x33] + 1) & 7;
+		//                 return b;                       // RAW - not inverted, unlike 4/8/0xC
+		//
+		// So it is an EIGHT-channel ring at +0x2B..+0x32 with a self-advancing index at +0x33.
+		// Nothing resets that index: the per-frame input build (DLL 0x18003B0A0) clears +0x28,
+		// +0x29 and +0x2A and calls the game's mapper, and never touches +0x2B..+0x33 at all.
+		// Neither does the constructor. **The ring is therefore all zeroes for the life of the
+		// board**, which for a steering channel is not "centred", it is full lock - and it is why
+		// Sega Racing Classic 2 has never been drivable.
+		//
+		// SERVING THE READ rather than filling the ring keeps this hook the only writer of
+		// nothing: the index still advances in the module's own code, so if a future build changes
+		// how it moves this follows automatically. It is also closer to the hardware, where the
+		// converter is sampled at read time - the same argument the TEST/SERVICE path above makes.
+		//
+		// CHANNEL ASSIGNMENT IS THE MODEL 3 DRIVING CONVENTION AND IS NOT YET CONFIRMED. The
+		// accessor names nothing, and the meaning lives in the game ROM rather than the module.
+		// 0 steering / 1 accelerator / 2 brake is what the Model 3 driving games conventionally
+		// use and what MAME's daytona2 ports assume; the remaining five read zero. If a car brakes
+		// when it should steer, this is the table to swap - it is the only place the order exists.
+		constexpr uint8_t PORT_ADC = 0x3C;
+		constexpr size_t OFF_ADC_CHANNEL = 0x33;
+		constexpr uint8_t ADC_STEER = 0;
+		constexpr uint8_t ADC_THROTTLE = 1;
+		constexpr uint8_t ADC_BRAKE = 2;
+
+		// Steering rests CENTRED. A pedal rests at zero, but an 8-bit wheel axis is a full swing
+		// and its neutral is the middle of it - which is the whole difference between a board that
+		// drives straight and one that is welded left.
+		constexpr uint8_t ADC_CENTRE = 0x80;
+
 		using read_port_fn = uint8_t (*)(void* self, uint8_t port);
 
 		static read_port_fn orgReadPort = nullptr;
 		// Written by the host thread each frame, read by the module thread inside the hook.
 		static std::atomic<uint8_t> heldMask{ 0 };
+		// One word so a frame's three axes are picked up together: the module samples these from
+		// its own thread and a torn read would be a wheel and pedals from different frames.
+		// Packed steer | throttle << 8 | brake << 16.
+		static std::atomic<uint32_t> axes{ static_cast<uint32_t>(ADC_CENTRE) };
 
 		static uint8_t ReadPort(void* self, uint8_t port)
 		{
+			if (port == PORT_ADC)
+			{
+				// Sampled BEFORE the call, because the call is what advances it.
+				const uint8_t channel = static_cast<uint8_t>(
+					*(static_cast<const uint8_t*>(self) + OFF_ADC_CHANNEL) & 7);
+				orgReadPort(self, port);
+
+				const uint32_t packed = axes.load(std::memory_order_relaxed);
+				switch (channel)
+				{
+				case ADC_STEER:    return static_cast<uint8_t>(packed & 0xFF);
+				case ADC_THROTTLE: return static_cast<uint8_t>((packed >> 8) & 0xFF);
+				case ADC_BRAKE:    return static_cast<uint8_t>((packed >> 16) & 0xFF);
+				default:           return 0;
+				}
+			}
+
 			const uint8_t value = orgReadPort(self, port);
 			if (port != PORT_SYSTEM)
 			{
@@ -98,6 +155,23 @@ namespace pre3
 		SystemSwitches::orgReadPort = reinterpret_cast<SystemSwitches::read_port_fn>(original);
 		DebugLogFile("[%s] Test / Service switches installed (%zu vtable entries)\n",
 			gGeneral.GetGameTag(), patched);
+	}
+
+	void SetDrivingAxes(float steer, float throttle, float brake)
+	{
+		// -1..+1 about the centre, so full lock either way reaches 0x00 / 0xFF and neutral is
+		// exactly 0x80. 127.0f rather than 128.0f keeps +1 inside the byte without a clamp.
+		const auto toByte = [](float value, float centre, float scale)
+		{
+			const float raw = centre + value * scale;
+			const int rounded = static_cast<int>(raw + 0.5f);
+			return static_cast<uint32_t>(rounded < 0 ? 0 : (rounded > 255 ? 255 : rounded));
+		};
+
+		const uint32_t packed = toByte(steer, static_cast<float>(SystemSwitches::ADC_CENTRE), 127.0f)
+			| toByte(throttle, 0.0f, 255.0f) << 8
+			| toByte(brake, 0.0f, 255.0f) << 16;
+		SystemSwitches::axes.store(packed, std::memory_order_relaxed);
 	}
 
 	void SetSystemSwitches(bool test, bool service)

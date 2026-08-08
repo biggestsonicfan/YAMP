@@ -118,6 +118,21 @@ namespace Input
 					pad.x = x;
 					pad.y = y;
 				}
+
+				// The driving axes, and note steer does NOT reuse pad.x - see PadState. A separate
+				// one-dimensional deadzone, rescaled so the usable travel still reaches full lock
+				// rather than stopping short by the deadzone width.
+				constexpr float STEER_DEADZONE = 0.12f;
+				const float sign = (x < 0.0f) ? -1.0f : 1.0f;
+				const float magnitude = (x < 0.0f) ? -x : x;
+				pad.steer = (magnitude <= STEER_DEADZONE)
+					? 0.0f
+					: sign * ((magnitude - STEER_DEADZONE) / (1.0f - STEER_DEADZONE));
+
+				// Triggers are already 0..255 with a flat rest, so they only need scaling. The
+				// digital Pad_LT / Pad_RT bits above keep their own threshold and are unaffected.
+				pad.throttle = state.Gamepad.bRightTrigger / 255.0f;
+				pad.brake = state.Gamepad.bLeftTrigger / 255.0f;
 			}
 		}
 	}
@@ -271,9 +286,48 @@ namespace Input
 		s_rescanRequested.store(true, std::memory_order_relaxed);
 	}
 
+	namespace
+	{
+		// The keyboard's driving axes, advanced once per PollPads. Steering is the only one that
+		// needs history: throttle and brake on a key are honestly binary (a real pedal is not, but
+		// nothing is gained by pretending a key is analogue), while steering that snaps to full
+		// lock cannot hold a line.
+		//
+		// ~0.35 s to full lock, self-centring twice as fast. Frame-rate dependent by design: this
+		// runs off the same poll as everything else, and threading a delta through would make the
+		// wheel behave differently on a stalled frame than the buttons beside it do.
+		constexpr float STEER_RATE = 1.0f / 21.0f;
+		constexpr float STEER_RETURN = STEER_RATE * 2.0f;
+		float s_keySteer = 0.0f;
+
+		void PollKeyboardAxes()
+		{
+			const auto& keys = gGeneral.GetPressedKeys();
+			const bool left = keys['A'];
+			const bool right = keys['D'];
+
+			if (left == right)
+			{
+				// Both or neither: wind back to centre and stop there rather than overshooting.
+				if (s_keySteer > STEER_RETURN) s_keySteer -= STEER_RETURN;
+				else if (s_keySteer < -STEER_RETURN) s_keySteer += STEER_RETURN;
+				else s_keySteer = 0.0f;
+			}
+			else if (right)
+			{
+				s_keySteer = (s_keySteer + STEER_RATE > 1.0f) ? 1.0f : s_keySteer + STEER_RATE;
+			}
+			else
+			{
+				s_keySteer = (s_keySteer - STEER_RATE < -1.0f) ? -1.0f : s_keySteer - STEER_RATE;
+			}
+		}
+	}
+
 	void PollPads()
 	{
 		PollXInput();
+		PollKeyboardAxes();
 
 		// Rebuilt only when the list can actually have changed: first poll, an XInput pad
 		// appearing or vanishing (free - the poll above already told us), or an explicit
@@ -356,5 +410,42 @@ namespace Input
 			}
 		}
 		return false;
+	}
+
+	void DrivingAxes(unsigned int player, float& steer, float& throttle, float& brake)
+	{
+		steer = 0.0f;
+		throttle = 0.0f;
+		brake = 0.0f;
+		if (player >= 2) return;
+
+		const YAMPSettings* settings = gGeneral.GetSettings();
+		const PadState& pad = GetPadState(settings->m_m2PadId[player]);
+		if (pad.connected)
+		{
+			steer = pad.steer;
+			throttle = pad.throttle;
+			brake = pad.brake;
+		}
+
+		// KEYBOARD IS PLAYER 1's ONLY, matching how the coin and service keys already work: there
+		// is one keyboard on the cabinet. Whichever source is pushed FURTHER wins per axis, so a
+		// connected pad resting at zero does not veto the keyboard and vice versa.
+		if (player == 0)
+		{
+			const auto& keys = gGeneral.GetPressedKeys();
+			const float keySteerMagnitude = (s_keySteer < 0.0f) ? -s_keySteer : s_keySteer;
+			const float padSteerMagnitude = (steer < 0.0f) ? -steer : steer;
+			if (keySteerMagnitude > padSteerMagnitude) steer = s_keySteer;
+			if (keys['W'] && throttle < 1.0f) throttle = 1.0f;
+			if (keys['S'] && brake < 1.0f) brake = 1.0f;
+		}
+
+		if (steer < -1.0f) steer = -1.0f;
+		if (steer > 1.0f) steer = 1.0f;
+		if (throttle < 0.0f) throttle = 0.0f;
+		if (throttle > 1.0f) throttle = 1.0f;
+		if (brake < 0.0f) brake = 0.0f;
+		if (brake > 1.0f) brake = 1.0f;
 	}
 }
