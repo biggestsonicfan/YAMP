@@ -679,3 +679,64 @@ Playing a linked race is downstream of that.
 | `source/pre3/Gaiden/Pre3Host.cpp` | fill the work pointers and the two config fields; pump the session |
 | `source/pre3/NetSession.{h,cpp}` | a non-lockstep path, or a sibling driver, for linked cabinets |
 | `plugin/yampnet/` | nothing — `kPacketLink` carries this as-is |
+
+
+---
+
+## 6. WHY NO NETWORK STATUS IS EVER SHOWN
+
+Chased to the end 2026-08-07, because "we never see the link screen" had been an unexamined
+assumption behind several wrong turns.
+
+### The text path is a SYSCALL, and it works
+
+`FUN_0009212C` draws `NETWORK CHECKING` through `FUN_0000A7CC` (locate) and `FUN_0000A738`
+(print). Both funnel into `FUN_0000624C`, which is a single PowerPC **`sc`** - a BIOS service call,
+commands `0x20` = locate and `0x22` = print - and the guest's exception vectors are populated:
+
+```
+0x500  b 0x19B0     external interrupt
+0x900  b 0x1BB0     decrementer
+0xC00  b 0x2FD0     SYSCALL
+```
+
+`0x2FD0` is a real handler: saves SRR0/SRR1 and SPRG0-3, dispatches on `r3 <= 0x2FF`, escapes to
+`0xFFF00C00` above that. **And it runs** - guest `0x70A004`, where it stores the interrupted stack
+pointer, reads back `0x0073EF80`. The PC probe independently shows the board vectoring
+(`next=0x900`) and executing boot ROM at `0xFFF03338`. So traps work and the text is being emitted.
+
+### The loss is the TILEMAP WINDOW: pre3 implements it for 32-BIT ACCESS ONLY
+
+`CM3Mem` window entry 13, top byte `0xF1` - Model 3 tilemap RAM plus the video registers:
+
+| access | handler | behaviour |
+|---|---|---|
+| read8 | `0x1800127C0` | `mov al, 0xFF; ret` — stub |
+| **write8** | `_guard_check_icall` | **`ret` — DISCARDED** |
+| read16 | `0x1800127D0` | `mov eax, 0xFFFF; ret` — stub |
+| **write16** | `_guard_check_icall` | **`ret` — DISCARDED** |
+| read32 | `0x180013A50` | real; forwards to the device at `mem+0x370` below `0xF1100000` |
+| write32 | `0x180013B00` | real; same, with `bswap` |
+
+The tilemap device itself is present and installed (`CM3Mem::init`'s seventh argument lands at
+`mem+0x370`). Only the narrow accessors are missing. **So any text the board composes with byte or
+halfword stores is silently thrown away** - and a halfword is the natural width for a tile entry.
+
+That is sufficient to explain no network status, no `WARNING` / `TROUBLE OCCURRED`, and any other
+text this board draws, and it is a MODULE-LEVEL GAP rather than anything to do with the link. It
+also explains why every diagnosis so far had to be done by reading guest RAM: the screen was never
+going to say anything.
+
+### What is NOT yet proven
+
+**That the ROM's text service actually uses narrow stores.** The window's asymmetry is measured; the
+store width on the other side of the syscall is inferred from "16-bit is the natural width for a
+tile entry", which is exactly the kind of reasoning this document has had to retract twice.
+
+The check is cheap and is the next thing to do: put a host-side counter in the `0xF1` write8/write16
+path - they are `ret` today, so a counted stub costs nothing - and see whether a booting SRC2 hits
+it. A non-zero count is the proof, and the same counter is the fix's acceptance test.
+
+If it is confirmed, implementing those four accessors against the same device is a small, contained
+change with a large payoff: the board would be able to TELL US what it thinks is wrong, which for
+the outstanding convergence race is worth more than any further host-side probe.
