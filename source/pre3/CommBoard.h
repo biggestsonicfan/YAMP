@@ -192,6 +192,23 @@ namespace pre3
 		};
 		bool ReadBoard(BoardView& out);
 
+		// THE COHERENT PROBE, and the reason it is a separate entry point from LogState.
+		//
+		// Everything else in this file samples the board from the HOST thread while `m3e_ctrl` is
+		// inside its own frame - the data race docs/pre3-netplay.md §3.8 documents, and the one
+		// that cost a netplay round once already. For most of what LogState prints that is
+		// tolerable: the comm state machine and the packet size change slowly.
+		//
+		// It is NOT tolerable for interrupts. The frame step raises VBlank and the guest's ISR
+		// acknowledges it WITHIN one emulated frame, so a racing sample can miss the entire life
+		// of the bit and report "VBlank never fires" about a board where it fires every frame.
+		// That is exactly the contradiction the recon is stuck on.
+		//
+		// Call this AFTER the module's update stage and AFTER WaitForEmulatedFrame, i.e. at a
+		// point where the worker is parked and the frame just simulated is the one being read.
+		// Gated on YAMP_PRE3_SYNCPROBE so it costs nothing when nobody is looking.
+		void SampleAtFrameBoundary();
+
 		// One line per change plus a heartbeat, into the debug log. This is the whole instrument
 		// for the first experiment, and it is what says which of "the ROM never drives the link"
 		// and "YAMP never delivers a packet" is happening — the two failures look identical from

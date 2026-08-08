@@ -987,6 +987,12 @@ namespace pre3
 			CommBoard::Attach(execute_info.p_work_ptr);
 			CommBoard::Update();
 
+			// Marker BEFORE the update stage releases the emulator's worker, so the probe below can
+			// wait for THIS frame rather than sampling whatever the worker happens to be doing. See
+			// Determinism.h's WaitForEmulatedFrame: the busy flags alone cannot tell "the frame
+			// finished" from "the frame has not started".
+			const unsigned long long boardMarker = BoardFrameMarker();
+
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
 			if (funcResult == 0 && entries.render_begin != nullptr)
@@ -998,6 +1004,15 @@ namespace pre3
 				funcResult = entries.render_end(sizeof(execute_info), &execute_info);
 			}
 			SetModuleRenderActiveNow(false);
+
+			// The one place board state can be read coherently: the worker is parked and the frame
+			// just simulated is the one being sampled. Everything else in CommBoard reads across the
+			// running worker, which is fine for slow-moving fields and useless for an interrupt that
+			// is raised and acknowledged inside a single emulated frame.
+			if (WaitForEmulatedFrame(boardMarker))
+			{
+				CommBoard::SampleAtFrameBoundary();
+			}
 
 			if (execute_info.output_texid != 0)
 			{

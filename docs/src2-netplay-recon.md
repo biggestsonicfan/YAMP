@@ -503,7 +503,66 @@ acking) and it fits `0x737987` ticking (bit `0x08` raised in the `9` and acked).
 `0x73798E` sitting at zero while bit `0x02` is absent from the state: that combination needs bit 2
 to be both cleared and never handled, and only the guest can clear it.
 
-### THE MEASUREMENTS ARE RACED, and that has to be fixed before more are believed
+### The probes were reading the WRONG GUEST RAM - the same mistake, twice
+
+A coherent probe was added (`YAMP_PRE3_SYNCPROBE`, sampled after `WaitForEmulatedFrame`) and its
+first run reported all three ISR counters at zero — including the one a racing peek had clearly
+shown ticking. The probe was wrong, not the board: it took guest RAM from the canary's bank
+descriptor instead of the base the module's own handlers use (`DAT_18062AA98`).
+
+**This is verbatim the failure already written up in [`src2-hle-hooks.md`](src2-hle-hooks.md)**,
+where `CM3Mem+0x18` produced "a whole run of confident, wrong readings", and the rule recorded there
+— *validate a memory probe against a known-fixed value before believing anything it says* — was not
+followed. `BoardGuestRam()` now refuses any base where guest `0x0189EC` does not read `0x4806302D`.
+
+With that fixed, on a HEALTHY stand-alone board all three counters advance one per frame:
+
+```
+f=543 irq=6E/000D vblank(73798E)=30 irq08(737987)=88 irq04(7379A8)=89
+f=544 irq=6E/000D vblank(73798E)=31 irq08(737987)=89 irq04(7379A8)=8A
+```
+
+**So the entire "VBlank never reaches the guest" line of investigation was an artifact of a bad RAM
+base.** VBlank is raised, enabled, delivered and serviced. That question is closed.
+
+### The convergence is a RACE and nothing yet explains it
+
+What is left is the original symptom with no explanation attached. Convergence rate, all at
+`YAMP_PRE3_LINK=shared`, counting a run as converged when both cabinets draw and the TX slots go
+asymmetric (216/40 rather than 34/34):
+
+| condition | converged |
+|---|---|
+| default hook mask, 0 s launch delay | 0 / 6 |
+| default hook mask, 5 s launch delay | 1 / 1 |
+| default hook mask + the sync probe running | 1 / 1 |
+| HLE hooks 16-21 disabled, 0 s | **1 / 4** |
+| hooks 16,17 only / hooks 18-21 only, 0 s | 0 / 1 each |
+
+**No condition is established as causal.** Anything that perturbs timing — a launch delay, an extra
+per-frame probe, a different hook mask — converges *sometimes*. A single success was briefly taken
+as confirmation that the `0x091xxx` hooks block a "waiting for link" screen; three repeats at the
+same mask gave 1/3, which is the same rate as everything else and therefore evidence of nothing.
+
+The hooks remain a REASONABLE suspect on the code, and that much is worth keeping. The region they
+patch is a timed on-screen display gated on a counter at `r15+6` against `0x55`/`0x11D`:
+
+```
+0917E0..0918DC   hook 17 forces `blt 0x91840` taken, skipping the whole draw loop over the
+                 table at 0xE34DC (lfs/fmuls, then bl 0xF574)
+09185C/0918A4/0918D0   hooks 18/19/20 delete three `bl 0xF574` calls (ids 0x6D6, a table
+                 lookup, 0x6D7)
+091660           hook 16 skips `bl 0xA7CC` / `bl 0xBF3C` once the counter passes 0x55
+```
+
+That is consistent with a countdown screen whose rendering has been excised — but "consistent with"
+is not a measurement, and the run counts above are what a measurement would have to beat.
+
+**What the next experiment has to be: many trials per condition, not one.** Everything above is 1-6
+runs deep, which cannot separate a 25% race from a fix. A scripted N=20 sweep across {hook mask} x
+{launch delay} is the only thing that will, and it should come before any further code change.
+
+### THE MEASUREMENTS WERE RACED, and the probe that fixes it is now in place
 
 Every sample above — the peeks, the PC probe, `irq=ENABLE/STATE` — is taken **from the host thread
 while `m3e_ctrl` is inside its own frame**. That is precisely the data race

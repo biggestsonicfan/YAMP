@@ -543,6 +543,60 @@ namespace pre3
 		LogState();
 	}
 
+	void CommBoard::SampleAtFrameBoundary()
+	{
+		static const bool wanted = []
+		{
+			char value[8];
+			size_t length = 0;
+			return getenv_s(&length, value, sizeof(value), "YAMP_PRE3_SYNCPROBE") == 0
+				&& length != 0 && value[0] != '0';
+		}();
+		if (!wanted) return;
+
+		const auto* ram = static_cast<const uint8_t*>(BoardGuestRam());
+		if (ram == nullptr) return;
+
+		uint8_t irqEnable = 0;
+		uint16_t irqState = 0;
+		if (!ReadIrq(irqEnable, irqState)) return;
+
+		// The three ISR counters, so "which interrupts are being SERVICED" is answered directly
+		// rather than inferred from the state word. A guest WORD at A is the host dword at ram+A
+		// and the byte at the lowest guest address is that dword's TOP byte:
+		//
+		//     0x73798E  VBlank      (FUN_00001D80, IRQ bit 0x02)   <- what the linked board waits on
+		//     0x737987  IRQ 0x08    (FUN_00001E10)
+		//     0x7379A8  IRQ 0x04    (FUN_00001E78)
+		const uint32_t w98C = *reinterpret_cast<const uint32_t*>(ram + 0x73798C);
+		const uint32_t w984 = *reinterpret_cast<const uint32_t*>(ram + 0x737984);
+		const uint32_t w9A8 = *reinterpret_cast<const uint32_t*>(ram + 0x7379A8);
+		const uint8_t vblank = static_cast<uint8_t>(w98C >> 8);    // guest 0x73798E
+		const uint8_t irq08 = static_cast<uint8_t>(w984);          // guest 0x737987
+		const uint8_t irq04 = static_cast<uint8_t>(w9A8 >> 24);    // guest 0x7379A8
+
+		// Its OWN frame counter, not CommBoard's. s_frame only advances inside Update(), which
+		// returns immediately when the mode is Off - so keying the heartbeat off it made this probe
+		// silent on exactly the stand-alone board it most needs to be compared against.
+		static uint32_t probeFrame = 0;
+		const uint32_t now = probeFrame++;
+
+		// Only on change, plus a heartbeat: a per-frame line drowns the log, and the question here
+		// is "does this counter EVER move", which a change filter answers exactly.
+		static uint8_t lastVblank = 0xFF;
+		static uint32_t lastLogged = 0;
+		if (vblank == lastVblank && now - lastLogged < 120) return;
+		lastVblank = vblank;
+		lastLogged = now;
+
+		BoardView view{};
+		ReadBoard(view);
+		DebugLogFile("[%s sync] f=%u irq=%02X/%04X vblank(73798E)=%02X irq08(737987)=%02X "
+			"irq04(7379A8)=%02X commstate=%u seq=%u\n",
+			gGeneral.GetGameTag(), now, irqEnable, irqState, vblank, irq08, irq04,
+			view.state, view.sequence);
+	}
+
 	bool CommBoard::ReadBoard(BoardView& out)
 	{
 		const uint8_t* comm = Board::Comm();

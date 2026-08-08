@@ -180,6 +180,12 @@ namespace pre3
 		// 0xF0100018 and dispatches its ISRs from.
 		inline constexpr size_t MEM_DECODE = 0xA0;
 		inline constexpr size_t IRQ_RAISE_SLOT = 0x98 / 8;
+		// THE guest RAM base - the module's own DAT_18062AA98, the one its memory handlers use.
+		// Same constant HleHooks.cpp calls RAM_PTR, and it carries the same warning: a different
+		// plausible base reads zeroes at addresses that provably hold code. BoardGuestRam validates
+		// whatever it gets against a known-fixed instruction before returning it.
+		inline constexpr uintptr_t RVA_RAM_PTR = 0x62AA98;
+
 		inline constexpr size_t MEM_BANK0_DESC = 0x60;
 		inline constexpr size_t RAM_SIZE = 0xC00000;
 
@@ -291,6 +297,54 @@ namespace pre3
 			DebugLogFile("[%s] board symbols resolved: TaskM3E %p, CXComm vftable %p\n",
 				gGeneral.GetGameTag(), machineObject, cxcommVtable);
 		}
+	}
+
+	const void* BoardGuestRam()
+	{
+		// VALIDATED AGAINST A KNOWN-FIXED VALUE BEFORE IT IS RETURNED, which is not optional here.
+		// The identical mistake is already written up in docs/src2-hle-hooks.md: a plausible-looking
+		// base (CM3Mem+0x18 that time, the canary's bank descriptor this time) reads ZEROES
+		// everywhere, including at addresses that provably hold code, and a probe on it reports
+		// "this counter never moves" about counters that move every frame. It cost a run there and
+		// it cost one here.
+		//
+		// Guest 0x0189EC must decode to 0x4806302D - SRC2's `bl 0x07BA18`, the instruction HLE hook
+		// 1 deletes. Any base that does not satisfy that is refused rather than returned.
+		constexpr uintptr_t KNOWN_ADDR = 0x0189EC;
+		constexpr uint32_t KNOWN_WORD = 0x4806302D;
+
+		const auto validated = [](const uint8_t* base) -> const uint8_t*
+		{
+			if (base == nullptr) return nullptr;
+			__try
+			{
+				return (*reinterpret_cast<const uint32_t*>(base + KNOWN_ADDR) == KNOWN_WORD)
+					? base : nullptr;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				return nullptr;
+			}
+		};
+
+		// The base the module's OWN memory handlers use - its DAT_18062AA98. This is the one that
+		// is right; the bank descriptor below is kept only as a fallback because the canary already
+		// reaches RAM that way and a future build could move the global.
+		if (const uint8_t* base = Machine::ModuleBase())
+		{
+			if (const auto* ram = *reinterpret_cast<const uint8_t* const*>(base + Machine::RVA_RAM_PTR))
+			{
+				if (const uint8_t* ok = validated(ram)) return ok;
+			}
+		}
+
+		const uint8_t* machine = Machine::Running();
+		if (machine == nullptr) return nullptr;
+		const auto* mem = *reinterpret_cast<uint8_t* const*>(machine + Machine::MEM_OBJECT);
+		if (mem == nullptr) return nullptr;
+		const auto* desc = *reinterpret_cast<uint8_t* const* const*>(mem + Machine::MEM_BANK0_DESC);
+		if (desc == nullptr) return nullptr;
+		return validated(*reinterpret_cast<const uint8_t* const*>(desc));
 	}
 
 	const void* BoardCommVtable()

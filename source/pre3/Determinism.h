@@ -103,6 +103,17 @@ namespace pre3
 	// and one owner was the point of the last cleanup.
 	const void* BoardCommVtable();
 
+	// The board's MAIN RAM, or null before it is up: mem+0x60 -> bank descriptor -> the 0xC00000
+	// bank, which is the chain the canary already walks. Published so a probe does not have to
+	// re-derive it, and because the alternative route (HleHooks' RAM_PTR global) is the one whose
+	// mis-derivation is already written up as having produced a run of confident, wrong readings.
+	//
+	// A guest WORD at address A is the host dword at base + A. Byte access is swizzled - the
+	// module's own handlers use `A ^ 3` - so the top byte of a host dword read is the byte at the
+	// LOWEST guest address. Cross-checked at runtime: guest 0x737984 reads 0x6E and the emulated
+	// IRQ enable at mem+0x34 is 0x6E, independently.
+	const void* BoardGuestRam();
+
 	// The CM3Mem object (machine+0xA0), or null until the machine is up. It owns the guest's
 	// address decode and, at +0x36, the Model 3 INTERRUPT STATE byte the guest polls at
 	// 0xF0100018 - so this is what a host has to reach to assert an interrupt the module does not.
