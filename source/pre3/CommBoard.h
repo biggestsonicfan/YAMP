@@ -98,10 +98,24 @@ namespace pre3
 			// reaching 4, a non-zero packet size (which is the proof the ROM is actually driving
 			// the link rather than ignoring it), and the sequence counter advancing.
 			Probe = 1,
+			// TWO PROCESSES ON ONE MACHINE SHARING THE REAL THING - a named shared-memory section
+			// holding the rendezvous word and the packet array, mapped by both instances.
+			//
+			// This is not a simulation of the link, it IS the link: Like a Dragon Gaiden runs its
+			// cabinets in one process against shared memory, and this hands the module exactly
+			// that. p_work_ptr[0] and [1] point at the SAME array, so a board writes its own slot
+			// and reads every slot including its own, with no copy and no protocol anywhere.
+			//
+			// Worth having as its own mode rather than testing over loopback, for two reasons.
+			// RPCN cannot loopback at all (it hardcodes port 3658 in the address it hands a peer),
+			// which is why Virtual On needed a direct-UDP harness. And more importantly this
+			// separates the two questions that a network test would confound: "does SRC2 play
+			// linked" and "is YAMP's wire protocol right". Only the first is worth answering first.
+			Shared = 2,
 			// A real peer over the netplay plugin's linked-cabinet channel (kPacketLink, the one
 			// Virtual On already uses). Our TX slot goes on the wire, the peer's packet lands in
 			// its RX slot, and the rendezvous bits follow the packets.
-			Link = 2,
+			Link = 3,
 		};
 
 		// Read once, before module_start, because the module latches the node id and count out of
@@ -110,8 +124,10 @@ namespace pre3
 		// equivalent of SoftResetIntoRole, and changing it means restarting the module.
 		//
 		// Sources, in priority order:
-		//   1. YAMP_PRE3_LINK=probe[:count] | <nodeId>[:<count>]   — the harness, and the only way
-		//      to run the probe. Matches the YAMP_PRE3_* family already used by the diagnostics.
+		//   1. YAMP_PRE3_LINK, the harness, matching the YAMP_PRE3_* family the diagnostics use:
+		//        probe[:count]              one cabinet, an imaginary peer that never speaks
+		//        shared:<nodeId>[:count]    two processes on this machine, real shared memory
+		//        <nodeId>[:count]           a peer over the netplay plugin
 		//   2. a netplay room, once one is driving this path (local_player 0 = node 0 = MASTER).
 		//
 		// Sega Racing Classic 2 only. Fighting Vipers 2 is not a linked-cabinet game and handing

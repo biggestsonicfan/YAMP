@@ -110,6 +110,11 @@ namespace pre3
 		inline constexpr unsigned BIT_ACK = 0x20;      // module->host: the guest's 0xF000 answer
 		inline constexpr unsigned BIT_BOOTED = 0x30;   // module->host: this node has booted
 
+		// The word the module actually reads: the shared section's when there is one, this
+		// process's own otherwise. Everything below writes through here so the bit bookkeeping is
+		// written once rather than once per transport.
+		static uint64_t& Rendezvous();
+
 		static uint64_t NodeMask(unsigned group, uint8_t node)
 		{
 			return 1ull << ((group + node) & 63);
@@ -161,6 +166,48 @@ namespace pre3
 
 		static std::vector<uint8_t> s_wire;
 
+		// ---- the shared section (Mode::Shared) --------------------------------------------
+		//
+		// One named mapping holding the rendezvous word and the packet array, mapped by every
+		// instance on this machine. The module gets the SAME pointer for TX and RX, which is what
+		// makes this the real link rather than a model of it: a board writes its own slot and reads
+		// every slot including its own, exactly as Gaiden's single-process cabinets do.
+		//
+		// It also answers, for free, the question CommBoard could not settle by reading - whether a
+		// cabinet is supposed to see its own packet come back. With one array it necessarily does.
+		struct SharedRing
+		{
+			uint64_t rendezvous;
+			uint8_t packets[static_cast<size_t>(MAX_NODES) * MAX_PACKET];
+		};
+
+		static HANDLE s_section = nullptr;
+		static SharedRing* s_ring = nullptr;
+
+		// Local\ rather than Global\: the session namespace needs no privilege, and two instances
+		// under one login is the whole use case.
+		static bool MapSharedRing()
+		{
+			if (s_ring != nullptr) return true;
+
+			s_section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+				static_cast<DWORD>(sizeof(SharedRing) >> 32),
+				static_cast<DWORD>(sizeof(SharedRing) & 0xFFFFFFFF),
+				L"Local\YAMP_PRE3_COMM");
+			if (s_section == nullptr) return false;
+
+			// A fresh section is zero-filled by the kernel, so the first instance needs no init and
+			// the second must NOT clear what the first has already published.
+			s_ring = static_cast<SharedRing*>(
+				MapViewOfFile(s_section, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedRing)));
+			return s_ring != nullptr;
+		}
+
+		static uint64_t& Rendezvous()
+		{
+			return (s_mode == Mode::Shared && s_ring != nullptr) ? s_ring->rendezvous : s_rendezvous;
+		}
+
 		// ---- configuration ----------------------------------------------------------------
 
 		// YAMP_PRE3_LINK=probe[:count] | <nodeId>[:<count>]
@@ -186,6 +233,20 @@ namespace pre3
 			{
 				s_mode = Mode::Probe;
 				s_nodeId = 0;
+				return true;
+			}
+
+			// shared:<nodeId>[:count] - note the node id is the FIRST colon field here, so the count
+			// moves to the second and the plain forms keep theirs where they were.
+			if (value[0] == 's' || value[0] == 'S')
+			{
+				s_mode = Mode::Shared;
+				s_nodeId = (colon != nullptr) ? static_cast<uint8_t>(atoi(colon + 1)) : 0;
+				const char* second = (colon != nullptr) ? strchr(colon + 1, ':') : nullptr;
+				const int sharedCount = (second != nullptr) ? atoi(second + 1) : 2;
+				s_nodeCount = static_cast<uint8_t>(
+					(sharedCount >= 2 && sharedCount <= MAX_NODES) ? sharedCount : 2);
+				if (s_nodeId >= s_nodeCount) s_nodeId = 0;
 				return true;
 			}
 
@@ -251,6 +312,18 @@ namespace pre3
 	void CommBoard::Attach(void* workPointers[3])
 	{
 		if (s_mode == Mode::Off) return;
+
+		if (s_mode == Mode::Shared)
+		{
+			if (!MapSharedRing()) return;
+			// THE SAME ARRAY FOR BOTH DIRECTIONS. See SharedRing - this is what makes the mode the
+			// real link rather than a model of one.
+			workPointers[0] = s_ring->packets;
+			workPointers[1] = s_ring->packets;
+			workPointers[2] = &s_ring->rendezvous;
+			return;
+		}
+
 		EnsureBuffers();
 		workPointers[0] = s_tx.data();
 		workPointers[1] = s_rx.data();
@@ -270,15 +343,15 @@ namespace pre3
 		// Our own ready bit is unconditional: the board fills its TX slot inside its own frame, so
 		// from the host's point of view this node always has a packet to offer. What the peers see
 		// is a different question and is answered by the wire below.
-		s_rendezvous |= NodeMask(BIT_READY, s_nodeId);
+		Rendezvous() |= NodeMask(BIT_READY, s_nodeId);
 
 		// Promote our own boot REPORT into the group the module reads back. This is the one place
 		// the two directions meet for a single cabinet, and it is why the groups are separate at
 		// all: the module says "I am up" in 0x30 and asks "is everyone up?" of 0x10, so even the
 		// local node's answer passes through the host.
-		if ((s_rendezvous & NodeMask(BIT_BOOTED, s_nodeId)) != 0)
+		if ((Rendezvous() & NodeMask(BIT_BOOTED, s_nodeId)) != 0)
 		{
-			s_rendezvous |= NodeMask(BIT_LINKED, s_nodeId);
+			Rendezvous() |= NodeMask(BIT_LINKED, s_nodeId);
 		}
 
 		if (s_mode == Mode::Probe)
@@ -292,9 +365,18 @@ namespace pre3
 			// board that ran 800 frames without a single draw.
 			for (uint8_t node = 0; node < s_nodeCount; ++node)
 			{
-				s_rendezvous |= NodeMask(BIT_READY, node) | NodeMask(BIT_LINKED, node);
+				Rendezvous() |= NodeMask(BIT_READY, node) | NodeMask(BIT_LINKED, node);
 			}
 			LogState();
+			return;
+		}
+
+		if (s_mode == Mode::Shared)
+		{
+			// Nothing to send and nothing to ingest: the other instance writes into the same array
+			// and the same word. All this cabinet owes the ring is its own two bits, and the peer's
+			// appear because they ARE the peer's - no staleness window, no framing, no policy.
+			if (s_ring != nullptr) LogState();
 			return;
 		}
 
@@ -337,8 +419,8 @@ namespace pre3
 			header->reserved = 0;
 			header->size = static_cast<uint16_t>(payload);
 			header->flags = static_cast<uint8_t>(FLAG_READY
-				| ((s_rendezvous & NodeMask(BIT_ACK, s_nodeId)) != 0 ? FLAG_ACK : 0)
-				| ((s_rendezvous & NodeMask(BIT_BOOTED, s_nodeId)) != 0 ? FLAG_BOOTED : 0));
+				| ((Rendezvous() & NodeMask(BIT_ACK, s_nodeId)) != 0 ? FLAG_ACK : 0)
+				| ((Rendezvous() & NodeMask(BIT_BOOTED, s_nodeId)) != 0 ? FLAG_BOOTED : 0));
 			if (payload > 0)
 			{
 				memcpy(s_wire.data() + sizeof(WireHeader),
@@ -379,8 +461,8 @@ namespace pre3
 			// module makes only about the board it is running.
 			const uint64_t mask = NodeMask(BIT_READY, header->node)
 				| NodeMask(BIT_LINKED, header->node);
-			s_rendezvous &= ~mask;
-			s_rendezvous |= ((header->flags & FLAG_READY) != 0 ? NodeMask(BIT_READY, header->node) : 0)
+			Rendezvous() &= ~mask;
+			Rendezvous() |= ((header->flags & FLAG_READY) != 0 ? NodeMask(BIT_READY, header->node) : 0)
 				| ((header->flags & FLAG_BOOTED) != 0 ? NodeMask(BIT_LINKED, header->node) : 0);
 		}
 
@@ -403,7 +485,7 @@ namespace pre3
 			if (node == s_nodeId) continue;
 			if (s_everRx[node] && s_frame - s_lastRx[node] > STALE_FRAMES)
 			{
-				s_rendezvous &= ~NodeMask(BIT_READY, node);
+				Rendezvous() &= ~NodeMask(BIT_READY, node);
 			}
 		}
 
@@ -445,7 +527,7 @@ namespace pre3
 					phase == Board::MACHINE_RUNNING
 						? " (RUNNING, so it is the rom+0x588 self-check that failed)"
 						: " (still in bring-up - a stall here is the boot barrier)",
-					static_cast<unsigned long long>(s_rendezvous));
+					static_cast<unsigned long long>(Rendezvous()));
 			}
 			return;
 		}
@@ -465,7 +547,9 @@ namespace pre3
 		char slot[64] = "-";
 		if (view.packetSize > 0 && static_cast<size_t>(view.packetSize) <= MAX_PACKET)
 		{
-			const uint8_t* mine = s_tx.data() + static_cast<size_t>(s_nodeId) * view.packetSize;
+			const uint8_t* base = (s_mode == Mode::Shared && s_ring != nullptr)
+				? s_ring->packets : s_tx.data();
+			const uint8_t* mine = base + static_cast<size_t>(s_nodeId) * view.packetSize;
 			size_t nonZero = 0;
 			for (size_t i = 0; i < view.packetSize; ++i) nonZero += (mine[i] != 0) ? 1 : 0;
 			sprintf_s(slot, "%zu/%u nz %02X%02X%02X%02X%02X%02X%02X%02X",
@@ -477,6 +561,6 @@ namespace pre3
 			"status=%04X rendezvous=%016llX tx=%s\n",
 			gGeneral.GetGameTag(), s_frame, view.state, view.nodeId, view.nodeCount,
 			view.packetSize, view.sequence, view.bank, view.command, view.status,
-			static_cast<unsigned long long>(s_rendezvous), slot);
+			static_cast<unsigned long long>(Rendezvous()), slot);
 	}
 }

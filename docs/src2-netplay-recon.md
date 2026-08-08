@@ -319,32 +319,59 @@ Every claim in §2 is in that trace:
    Setting the wrong group stalls the machine before its running phase, which presents as a board
    that runs hundreds of frames and never draws — with no other symptom.
 
-### What is NOT yet working: the master draws nothing against a silent slave
+### The master draws nothing against a SILENT slave — and that turned out to be correct
 
-With the link up, `draws` stays 0 and the module raises `execute_info.status` bit `0x100`. The
-control run isolates it: **`LINK ID = MASTER` on its own is fine** (392-405 draws/frame, status
-0x40, the normal attract screen), so it is the live link and not the cabinet setting.
+With the probe's imaginary peer, `draws` stays 0 and the module raises `execute_info.status` bit
+`0x100`. The control isolates it — `LINK ID = MASTER` on its own renders normally at 392-405
+draws — so it is the live link, and the reading was "a master whose slave never answers, because
+the RX slot holds 848 zero bytes, which is not a cabinet".
 
-That is the expected behaviour of a master cabinet whose slave never answers — the RX slot holds
-848 zero bytes, which is not a cabinet — but "expected" is an inference, and the only thing that
-can settle it is a second instance. It is the next experiment, not a defect to chase on one
-machine.
+**Two instances confirmed it.** See §5b.
+
+## 5b. TWO CABINETS, ONE MACHINE — the link works
+
+`Mode::Shared` (`YAMP_PRE3_LINK=shared:<nodeId>:2`) maps a named section holding the rendezvous
+word and the packet array, and hands the module **the same pointer for TX and RX**. That is not a
+model of the link, it *is* the link: Gaiden runs its cabinets in one process against shared memory,
+so a board writes its own slot and reads every slot including its own, with no copy and no protocol
+anywhere. It also settles the open question about whether a cabinet sees its own packet come back —
+with one array it necessarily does.
+
+Two YAMP processes, `build/bin/Win64/Debug` and `Debug2`, node 0 and node 1:
+
+```
+node 0  f=1088 state=4 node=0/2 size=848 seq=840 rendezvous=0003000300030003 tx=217/848
+node 1  f=1007 state=4 node=1/2 size=848 seq=840 rendezvous=0003000300030003 tx= 41/848
+```
+
+* `rendezvous=0003000300030003` is **bits 0,1 + 16,17 + 32,33 + 48,49** — both nodes present in
+  all four groups. The peer's bits are there because the word is genuinely shared, so this is the
+  first time the module→host groups have been seen for a node that is not us.
+* **Both cabinets render**: `status=0x40`, the attract/credit screen, draws climbing in step
+  (229 → 232 → 235 on both). The blank master is gone the moment a real slave answers.
+* The TX slots are **asymmetric and both live** — 217 non-zero bytes from the master against 41
+  from the slave, sharing a common tail. The two boards are not merely running, they are saying
+  different things to each other.
+
+What this does NOT yet show: a race. Both cabinets sit at the credit screen because nothing has
+coined them up, and there is no `-src2-autostart` equivalent of Virtual On's harness. Playing a
+linked race is the next step and it is an interactive one.
 
 ## 5. What is NOT established, in the order it should be settled
 
 1. ~~**Nobody has run SRC2's comm board.**~~ **Done — see §5a**, and §2 is confirmed end to end.
 2. ~~**Does the guest ever program a packet size?**~~ **Yes: 848 bytes**, and it fills 34 of them.
-3. **What does the game DO with a second cabinet?** SRC2's own menus decide whether two nodes mean
-   a two-player race or two independent seats. Unknown; the ROM has not been read for this.
+3. **What does the game DO with a second cabinet?** Both reach the credit screen together (§5b),
+   which is as far as an uncoined pair can get. Whether two nodes mean one race or two independent
+   seats is decided by SRC2's own menus and needs a race played; the ROM has not been read for it.
 4. **The HLE table.** Three of SRC2's 26 hooks are boot-critical and two of them excise a security
    overlay ([`src2-hle-hooks.md`](src2-hle-hooks.md)). None of the 26 looks link-related, and §5a
    removes the strongest reason to suspect them: the guest reaches the comm board, programs it and
    feeds it a packet with the shipped mask in place. So a hook bisect is no longer the first thing
    to try if two cabinets fail to agree — the RX side is.
-5. **Is mirroring our own packet into our own RX slot correct?** The board's ingest loop walks
-   backwards from `nodeId - 1` and wraps, so it covers every slot including its own, and a real
-   token ring does hand a cabinet its packet back after a lap. `CommBoard::Update` mirrors on that
-   reading. If it is wrong the game sees itself twice, which is visible on screen.
+5. ~~**Is mirroring our own packet into our own RX slot correct?**~~ **Yes** — `Mode::Shared`
+   gives the module one array for both directions, both cabinets run on it, so a board does see
+   its own slot. `Mode::Link` mirrors deliberately to match.
 6. **The ready-bit policy is YAMP's invention.** Nothing in the module ever CLEARS a ready bit, so
    holding them all set free-runs the board and clearing them per frame makes it lockstep. The
    staleness window in `CommBoard.cpp` is a middle that has never been tested against a peer.
