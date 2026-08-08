@@ -478,11 +478,45 @@ irq=6E/0005      enable 0x6E (VBlank bit 0x02 IS set), state word 0x0005
 which also matches the guest's own soft copy at `0x737984`. So the board is **not** missing VBlank
 because it is masked, and **not** because the module fails to raise it.
 
-**What is left is narrow and specific:** VBlank is raised, VBlank is enabled, and the ISR that would
-increment `0x73798E` still does not run on a linked board. The next thing to check is therefore the
-delivery path rather than the source — whether `cpu->assert_line(1)` is reached (the `mem+0x358`
-branch above), and whether the guest is spinning with `MSR[EE]` clear, which would make this a wait
-for an interrupt the board itself has disabled.
+### The frame step's whole interrupt schedule
+
+The memory object's four IRQ slots, all now read out of the module:
+
+| slot | body | meaning |
+|---|---|---|
+| `+0x90` | `state \|= mask` | **raise** |
+| `+0x98` | `state &= ~mask` | **clear** |
+| `+0xA0` | `return (enable & mask) != 0` | is this interrupt enabled |
+| `+0xA8` | `mem+0x33 ^= 1` | field-parity flip |
+
+and one emulated frame (`FUN_18003B0A0`) is:
+
+```
+parity flip -> run CPU -> RAISE 2 (VBlank) -> run CPU
+            -> if (rom+0x482 & 0x20) up to 0x80x { raise 0x40; run 200; clear 0x40; run }
+            -> RAISE 9  (= 0x01|0x08) -> run CPU -> RAISE 4
+```
+
+**Nothing in the module ever clears 1, 2, 4 or 8** — only the guest's own ISR acknowledgements do.
+That fits the measured `state=0x05` (bits `0x01` and `0x04` still pending, their handlers not
+acking) and it fits `0x737987` ticking (bit `0x08` raised in the `9` and acked). It does **not** fit
+`0x73798E` sitting at zero while bit `0x02` is absent from the state: that combination needs bit 2
+to be both cleared and never handled, and only the guest can clear it.
+
+### THE MEASUREMENTS ARE RACED, and that has to be fixed before more are believed
+
+Every sample above — the peeks, the PC probe, `irq=ENABLE/STATE` — is taken **from the host thread
+while `m3e_ctrl` is inside its own frame**. That is precisely the data race
+[`pre3-netplay.md`](pre3-netplay.md) §3.8 documents, and it is why the frame-4 desync cost a round:
+"reading board state immediately after the update stage reads it while the worker is running the
+next frame."
+
+So the contradiction above may be an artifact of sampling an interrupt that is raised and acked
+*within* one emulated frame. Before drawing any further conclusion the probes should move inside the
+update stage's own window, which `Determinism::BoardFrameMarker` / `WaitForEmulatedFrame` already
+exist to provide. **That is the next step, and it comes before any more theorising about VBlank:**
+a coherent sample of `(IRQ state, 0x73798E, guest PC)` taken at a known emulated frame boundary
+would settle in one run what three rounds of racing snapshots have not.
 
 ### Where that leaves the comm board's own interrupt
 
