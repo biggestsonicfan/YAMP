@@ -836,11 +836,28 @@ namespace pre3
 		// What each of the module's eight button slots means, exactly as the m2ftg hosts hand it
 		// over — same table, same slot order (see execute_info::assign in pre3.h). Rewritten every
 		// frame because the board takes its copy every frame.
-		for (int p = 0; p < 2; p++)
+		if (gGeneral.GetGameId() == YAMPGeneral::GameId::SRC2)
 		{
-			for (int i = 0; i < 8; i++)
+			// SRC2 READS THIS ROW AS TWO FLOATS, NOT AS AN ASSIGN TABLE - see pre3.h. Its own
+			// mapper is hardcoded and ignores the rows, so handing it FV2's table was believed
+			// inert; it is not, because HLE hooks 13 and 14 multiply by these four-byte fields.
+			// The assign bytes are a denormal, so hook 13 was zeroing the board's
+			// motion-integration scalar and freezing every car that integrates through it.
+			//
+			// 1.0f makes both hooks the identity, which is the module's own mechanism doing
+			// nothing rather than the hook being switched off to stop it doing harm.
+			execute_info.src2_scalars.motion_scale = 1.0f;
+			execute_info.src2_scalars.bonus_scale = 1.0f;
+			for (unsigned char& tail : execute_info.src2_scalars.assign_tail) tail = 0;
+		}
+		else
+		{
+			for (int p = 0; p < 2; p++)
 			{
-				execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
+				for (int i = 0; i < 8; i++)
+				{
+					execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
+				}
 			}
 		}
 

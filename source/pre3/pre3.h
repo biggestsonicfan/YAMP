@@ -239,7 +239,39 @@ namespace pre3
 		// default layout: it produces a board on which no attack button exists at all, while the
 		// lever and START (which the shared base mapper handles) keep working. Directly visible in
 		// the board's own input test.
-		uint8_t assign[2][8];
+		//
+		// PER-GAME, AND SEGA RACING CLASSIC 2 DOES NOT USE IT AS AN ASSIGN TABLE. Its mapper
+		// (DLL 0x1800374F0) is hardcoded and reads no rows at all - but the first eight bytes are
+		// NOT therefore free, because two of the module's HLE hooks read them as FLOATS:
+		//
+		//     hook 13 (guest 0x02D2F0)  f *= *(float *)(rom + 0x374)   = &assign[0][0]
+		//     hook 14 (guest 0x036E2C)  r3 = r3 * *(float *)(rom + 0x378) = &assign[0][4]
+		//
+		// which is the same +0x368 block copy described above, four and eight bytes past the two
+		// volume scalars - and the constructor presets THOSE to 1.0f, which is the tell: this is a
+		// row of host-supplied scalars and the assign bytes are FV2's meaning for it, not the
+		// module's. Writing Input::MODULE_ASSIGN here gives SRC2 the byte pattern 02 03 04 ... ,
+		// a denormal of about 1e-36, so both hooks multiply by zero.
+		//
+		// Hook 13's site is `stfs f1, 0x1e4(r15)` - the store of a per-course float to guest
+		// 0x1051E4 - and that float is the MOTION-INTEGRATION SCALAR: guest 0x08DC98 reads it and
+		// multiplies the three velocity components by it before adding them to position. Zeroed,
+		// anything integrating through that path stops moving, which is exactly the frozen CPU
+		// cars. See src2_scalars below and docs/src2-hle-hooks.md.
+		union
+		{
+			uint8_t assign[2][8];
+			struct
+			{
+				// SRC2's reading of the same sixteen bytes. 1.0f each leaves both hooks as the
+				// identity, which is what the module is asking for rather than what a disabled
+				// hook would fake.
+				float motion_scale;   // +0x1684, hook 13
+				float bonus_scale;    // +0x1688, hook 14
+				uint8_t assign_tail[8];
+			} src2_scalars;
+		};
+		static_assert(sizeof(uint8_t[2][8]) == 16);
 
 		// +0x1694: the module->host TELEMETRY block, which is how Like a Dragon Gaiden tracks its
 		// arcade minigame (rank reached, character used, whether a match finished). Written by

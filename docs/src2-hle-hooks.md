@@ -122,12 +122,92 @@ and the object is memset to zero before the constructor runs.
 Every one of the module's 1839 functions was disassembled and searched for a store to `+0x374` or
 `+0x378`. There is exactly one hit, `FUN_180001820`, and it is a bulk-zeroing loop over the global
 array at `DAT_18062AB58` where 0x378 is a loop stride — not this object. **Nothing in the module
-writes either field.** So hook 13 multiplies f0 by 0.0, and hook 14 multiplies r3 by 0.0.
+writes either field.**
 
-So they are not scales — they are a **deliberate "zero this value" pair** dressed up as one, using a
-generic getter the other games presumably do fill in. Hook 13 zeroes an FPU value the ROM is about
-to consume at 0x02D2F0; hook 14 zeroes r3 *after* the routine at 0x036E2C has computed it. They are
-also the two easiest hooks to test by disabling, if either turns out to be wrong.
+### CORRECTION (2026-08-08): the HOST writes them, and it was writing garbage
+
+The sweep above was of the MODULE, and the conclusion drawn from it — that these are a deliberate
+"zero this value" pair — was right about the effect and wrong about the mechanism, which matters
+because the mechanism is fixable and a deliberate pair would not be.
+
+`M3EInput`'s per-frame update memcpys **0x100 bytes from `execute_info+0x1678` into the object at
+`+0x368`**. So `+0x374` and `+0x378` are `execute_info+0x1684` and `+0x1688` — the first eight bytes
+of `execute_info::assign`, which `Pre3Host` fills with `Input::MODULE_ASSIGN` **for every game**.
+The tell was in front of us the whole time: the constructor presets `+0x36C` and `+0x370`, the two
+fields immediately before, to **1.0f**. This is a row of host-supplied scalars, and the assign table
+is FV2's meaning for those bytes, not the module's.
+
+`MODULE_ASSIGN` is `02 03 04 05 06 07 08 ...`, which as a float is a denormal of about 1e-36 — so
+hook 13 multiplied by ~0 exactly as if the field were unwritten. Same answer, different cause.
+
+### What hook 13 was actually zeroing: the MOTION-INTEGRATION SCALAR
+
+Hook 13's site is not a generic FPU value. `0x0002D2F0` is `stfs f1, 0x1e4(r15)`, and `r15` is the
+game's global context at **guest 0x00105000** (proved by `r15+4` / `r15+6` being `DAT_00105004` /
+`DAT_00105006`, the screen index and timer the module already mirrors to `rom+0x205BC`). So the
+store lands at **guest 0x001051E4**, loaded from a per-course table.
+
+Scanning all of `.text` for `0x1e4(r15)` gives four accesses — two writers (`0x1F9AC`, and hook 13's
+`0x2D2F0`) and two readers:
+
+```
+0002cf04:  lfs   f2, 0x1e4(r15)      0008dc98:  lfs   f12, 0x1e4(r15)
+0002cf08:  fmuls f1, f1, f2          0008dc9c:  fmuls f13, f23, f12   ; velocity X * scalar
+                                     0008dca0:  fmuls f14, f24, f12   ; velocity Y * scalar
+                                     0008dca4:  fmuls f15, f25, f12   ; velocity Z * scalar
+                                     0008dca8:  fadds f29, f29, f13   ; position X += ...
+                                     0008dcb0:  fadds f30, f30, f14   ; position Y += ...
+```
+
+It is the value that turns velocity into displacement. Zeroed, anything integrating position
+through that path stops advancing — **which is why Sega Racing Classic 2's CPU cars slowed to a stop
+a few seconds into every race.** User-confirmed by isolating hook 13: with it disabled and all 25
+others at their shipped setting, the AI drives.
+
+Hook 14 is the same mechanism on `+0x378` and is genuinely minor: its site (`0x036E2C`,
+`lwz r3, 0x6254(r3)`) feeds `DAT_00105010 += DAT_00106254`, a bonus-time/score accumulator.
+
+**So the fix is not to disable hook 13.** Writing **1.0f** to `execute_info+0x1684` and `+0x1688`
+makes both hooks the identity, which is the module's own mechanism doing nothing rather than the
+hook being switched off to stop it doing harm — and it is presumably what Like a Dragon Gaiden
+itself passes. See `pre3_execute_info_t::src2_scalars` in `source/pre3/pre3.h`.
+
+## The three things Gaiden's table suppresses, and how to get each back
+
+Established 2026-08-08, by bisecting the table on a running board — which only became possible once
+SRC2 was drivable at all (the ADC ring had never been filled; see `pre3::SetDrivingAxes`). Masks are
+`DisabledHleHooksLo.SRC2` in `settings.ini`.
+
+| behaviour | hooks | mask | how established |
+|---|---|---|---|
+| **CPU car AI** | 13 | `0x0000000000002000` | **MEASURED.** Isolated: hook 13 disabled, all 25 others shipped -> the AI drives. |
+| **Start-up WARNING screen** | 16 | `0x0000000000010000` | Inferred - see below |
+| **Daytona 2 TITLE logo** | 17, 18, 19, 20 | `0x00000000001E0000` | Inferred - see below |
+| the boot presentation together | 16-21 | `0x00000000003F0000` | **MEASURED as a group** - both screens appeared |
+| everything above | 13, 16-21 | `0x00000000003F2000` | |
+
+**What is measured and what is not.** Disabling 16-21 as a group brought back both the warning
+screen and the title logo, user-confirmed. Which hook belongs to which screen is NOT yet measured -
+it is read off the two routines they sit in:
+
+* `FUN_00091600` holds **hook 16**. It draws two things through `FUN_0000BF3C` (message ids `0x1BC`
+  and `0x5A8`) at `locate(0, 10, 2)` and `locate(0x38, 0x11, 2)`, gated on the screen timer at
+  `r15+6` passing `0x11C` and `0x54`. Two text draws on a timer reads as the warning screen.
+* `FUN_000917C0` holds **hooks 17-20**. It walks a table of position triples through `FUN_0000CEB0`
+  / `FUN_0000F574`, then draws ids `0x6D6` and `0x6D7`, and indexes a 32-entry table by
+  `0x1F - (timer - 0x55)` clamped to 0..0x1F with a `(0x55 - timer) * 0x2000` fade underneath. An
+  animated 3D sequence with a 32-step curve reads as the title logo.
+* **Hook 21** (`FUN_0006A4B4`) belongs to the same cluster but its role is unread. The screen
+  sequencer calls it at `0x91560`, immediately before setting the timer to -1 and incrementing the
+  screen index at `r15+4` — i.e. at the end of a screen — so it is plausibly the skip/advance check.
+
+Splitting 16 from 17-20 is two runs with the two masks above; nobody has spent them yet.
+
+**These should become SRC2's `DefaultDisableMask`**, on exactly the argument
+`HleHooks.cpp` already makes for Fighting Vipers 2's hooks 7 and 10: Gaiden wants the boot sequence
+gone because the emulator is a minigame inside a menu, and YAMP is the cabinet, so the board's own
+power-up sequence is the authentic behaviour. Hook 13 is different in kind — it is a defect, not a
+preference, and the better fix is the 1.0f scalar above rather than a mask entry.
 
 ## Which hooks are load-bearing: exactly three (1, 2 and 5)
 
