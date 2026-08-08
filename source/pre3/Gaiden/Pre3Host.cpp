@@ -740,6 +740,23 @@ namespace pre3
 		const int32_t netplayLocalPad = netStatus.localPad;
 		const bool netplayLocked = netStatus.locked;
 
+		// A LINKED CABINET IS NOT IN A ROUND, so the things a round locks out must stay live.
+		//
+		// Everything `netplayLocked` disables below is disabled for one reason: a lockstep round
+		// transmits both pads and restores both boards from one savestate, so a local coin, a local
+		// pause or a local operator switch would land on one machine only and desync the pair.
+		// NONE of that is true of Sega Racing Classic 2. There is no round, no barrier and no
+		// transmitted pad - each cabinet reads its own controls and only the resulting car state
+		// crosses the wire - and the credit screen is not skipped by a savestate, it is where both
+		// players actually start a race from.
+		//
+		// So a linked cabinet with free play OFF could not be credited at all: the coin protocol
+		// saw a session in progress and declined to run, on reasoning that belongs to the other
+		// mechanism entirely. Free play merely hid it.
+		const bool linkedCabinet = CommBoard::LinkedCabinetSupported()
+			&& CommBoard::CurrentMode() != CommBoard::Mode::Off;
+		const bool roundLocked = netplayLocked && !linkedCabinet;
+
 		const auto* settings = gGeneral.GetSettings();
 
 		{
@@ -876,7 +893,7 @@ namespace pre3
 				// would raise the coin status bit on one machine only. A round starts from the
 				// board's VS start state, which is already credited, so there is nothing it would
 				// buy either.
-				if (down && !s_coinWasDown[p] && !s_pauseMenuOpen && !netplayLocked)
+				if (down && !s_coinWasDown[p] && !s_pauseMenuOpen && !roundLocked)
 				{
 					execute_info.status |= 0x20;
 				}
@@ -933,7 +950,7 @@ namespace pre3
 		// them. Here it has nothing to do: a round starts from the board's own VS start savestate,
 		// which is past the credit screen by construction, so the honest behaviour is for the
 		// protocol simply not to run.
-		if (!settings->m_m2Freeplay && !s_pauseMenuOpen && !netplayLocked)
+		if (!settings->m_m2Freeplay && !s_pauseMenuOpen && !roundLocked)
 		{
 			if (s_coinPending && s_startScreen)
 			{

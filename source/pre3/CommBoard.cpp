@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 namespace pre3
@@ -642,6 +644,60 @@ namespace pre3
 		s_roleResetFrame = s_frame;
 	}
 
+	bool CommBoard::LinkedCabinetSupported()
+	{
+		// The title, and nothing else. Sega Racing Classic 2 is the only game in this module with a
+		// CXComm to talk through; Fighting Vipers 2 is a lockstep game and answering yes for it
+		// would offer the wrong UI for the right feature.
+		return gGeneral.GetGameId() == YAMPGeneral::GameId::SRC2;
+	}
+
+	bool CommBoard::GetLinkedCabinet(CabinetStatus& out)
+	{
+		out = {};
+		if (!LinkedCabinetSupported() || s_mode == Mode::Off) return false;
+
+		// The board's own LINK ID convention, which is what the player sees on the service screen:
+		// 1 MASTER, 2 SLAVE. Node 0 is the master, so the two differ by one and always have.
+		out.role = (s_nodeId == 0) ? 1u : 2u;
+
+		BoardView view{};
+		const bool haveBoard = ReadBoard(view);
+
+		// RING UP MEANS BOTH HALVES. `net::LinkReady()` alone is the peer's ADDRESS being known,
+		// which is true from the moment a room forms and stays true after a cabinet has gone quiet
+		// - the same trap Virtual On documents, where it had to age its own liveness timeout on
+		// top. Here the second half is the board's own transfer state reaching 4, its running
+		// phase, so this cannot claim a ring the emulated hardware is not actually driving.
+		out.ringUp = net::LinkReady() && haveBoard && view.state >= 4;
+
+		// THE ROM'S OWN VERDICT, read out of guest RAM rather than inferred. FUN_00093DB4 writes
+		// `status & 0x1F` (this cabinet's id, 1-based) and `(status >> 5) & 0x1F` (the node count)
+		// into the two low bytes of the word at guest 0x100628, and gates on two bits of
+		// 0x7379B9 - 0x20 "board present" and 0x40 "board has no problem". A cabinet that has not
+		// finished its check reads zeroes here, which is exactly what the overlay needs to say
+		// "still checking" rather than "linked".
+		const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
+		if (ram != nullptr)
+		{
+			__try
+			{
+				const uint32_t nodes = *reinterpret_cast<const uint32_t*>(ram + 0x100628);
+				const uint32_t flagWord = *reinterpret_cast<const uint32_t*>(ram + 0x7379B8);
+				const uint8_t netFlags = static_cast<uint8_t>(flagWord >> 16);   // guest 0x7379B9
+				out.nodeId = static_cast<uint8_t>(nodes & 0x1F);
+				out.nodes = static_cast<uint8_t>((nodes >> 8) & 0x1F);
+				out.checkDone = (netFlags & 0x20) != 0 && (netFlags & 0x40) != 0
+					&& out.nodes >= 2;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				out.checkDone = false;
+			}
+		}
+		return true;
+	}
+
 	CommBoard::Mode CommBoard::CurrentMode() { return s_mode; }
 	uint8_t CommBoard::NodeId() { return s_nodeId; }
 	uint8_t CommBoard::NodeCount() { return s_nodeCount; }
@@ -710,6 +766,189 @@ namespace pre3
 			return hash;
 		}
 
+		// ---- THE CAR PROBE: are the AI cars the same on both cabinets? -----------------------
+		//
+		// The question this exists to answer cannot be answered by the block digest below. That one
+		// hashes 32 blocks of 0x40000 over the whole 8 MB and will report a difference for a dozen
+		// legitimate reasons - each cabinet has its own car, its own inputs, its own timers - so
+		// "the machines differ" says nothing about whether the AI agrees.
+		//
+		// WHAT MAKES A SHARPER TEST POSSIBLE is the car struct's layout, read out of the ROM's own
+		// physics integrator at guest 0x0008DBCC. It takes the car object in r4 and integrates it:
+		//
+		//     0008dc70  lfs   f29, 0x38(r31)     position  X Y Z   at +0x38 +0x3c +0x40
+		//     0008dc58  lfs   f23, 0x50(r31)     velocity  X Y Z   at +0x50 +0x54 +0x58
+		//     0008dc98  lfs   f12, 0x1e4(r15)    the motion-integration scalar (hook 13's byte)
+		//     0008dc9c  fmuls f13, f23, f12      velocity * scalar
+		//     0008dca8  fadds f29, f29, f13      position += that
+		//     0008dce0  stfs  f29, 0x38(r31)     written back
+		//
+		// and its only two callers pass the PLAYER's car, which `FUN_00025540` names outright:
+		//
+		//     0002557c  addi  r31, r15, 0xbcc    r15 = 0x105000, so the player's car is 0x105BCC
+		//
+		// So a car is recognisable by its own contents: three finite floats at +0x38 that move
+		// smoothly, and three more at +0x50 that are their rate of change. That is what this scans
+		// for, rather than needing the AI array's address - which is reached through a function
+		// pointer table and was not worth chasing statically when the running game can be asked.
+		//
+		// PER-BLOCK HASHES AT 0x100 GRANULARITY over a window around the game context, keyed on the
+		// GUEST frame exactly as LogSyncDigest is. Diff two cabinets' logs by matching gframe: a
+		// block that agrees is state the link is keeping in step, one that differs is state each
+		// cabinet owns. The player's own car MUST differ - it is the control that proves the probe
+		// can see a difference at all.
+		constexpr uint32_t CAR_PLAYER = 0x105BCC;   // proved above
+		constexpr size_t CAR_POS = 0x38;
+		constexpr size_t CAR_VEL = 0x50;
+
+		// ITS OWN FILE, NOT THE DEBUG LOG, and that is not tidiness - the first race's data came
+		// back damaged without it. `DebugLogFile` caps a line at ~1.1 KB and several subsystems
+		// write it from different threads, so a 256-block sample was truncated to 185 blocks AND
+		// had a `[draw]` line spliced into the middle of it with no newline. Both failures are
+		// silent: the parse simply stops early at the first non-hex token and reports a smaller
+		// window than was asked for.
+		//
+		// Opened and CLOSED per sample, the same discipline `yampnet.log` uses, so the file can be
+		// read over a share while the game runs rather than only after it exits.
+		FILE* OpenCarLog()
+		{
+			static std::string path = []
+			{
+				wchar_t exe[MAX_PATH] = {};
+				if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return std::string("src2_car.log");
+				std::filesystem::path p(exe);
+				p.replace_filename(L"src2_car.log");
+				return p.string();
+			}();
+			FILE* f = nullptr;
+			return fopen_s(&f, path.c_str(), "a") == 0 ? f : nullptr;
+		}
+
+		struct CarProbeConfig
+		{
+			bool enabled = false;
+			// THE DYNAMIC REGION, chosen from the first race's coarse digest rather than guessed.
+			// Of the 32 blocks of 0x40000 over the 8 MB work RAM, only ten ever moved during a
+			// race, and four of those are 0x100000-0x1FFFFF - which holds the game context at
+			// 0x105000, the player's car at 0x105BCC and the object at 0x10D000 the per-frame
+			// update carries alongside it. Two of the four (0x140000-0x1BFFFF) came back PARTIALLY
+			// agreeing between the cabinets, which is exactly what a region holding both shared and
+			// per-cabinet state looks like at 256 KB resolution - and the reason to re-sample it at
+			// 0x100.
+			uint32_t base = 0x100000;
+			uint32_t length = 0x100000;
+			uint32_t interval = 30;      // guest frames between samples
+		};
+
+		// YAMP_SRC2_CARPROBE=1, or =<hexBase>:<hexLen>:<interval> to move the window once the
+		// coarse digest has said where to look.
+		const CarProbeConfig& CarProbe()
+		{
+			static const CarProbeConfig cfg = []
+			{
+				CarProbeConfig c;
+				char value[64];
+				size_t length = 0;
+				if (getenv_s(&length, value, sizeof(value), "YAMP_SRC2_CARPROBE") != 0
+					|| length <= 1 || value[0] == '0')
+				{
+					return c;
+				}
+				c.enabled = true;
+				// The bare "1" form keeps the defaults; anything with a colon is a full window.
+				if (strchr(value, ':') != nullptr)
+				{
+					c.base = static_cast<uint32_t>(strtoul(value, nullptr, 16));
+					const char* first = strchr(value, ':');
+					c.length = static_cast<uint32_t>(strtoul(first + 1, nullptr, 16));
+					const char* second = strchr(first + 1, ':');
+					if (second != nullptr) c.interval = static_cast<uint32_t>(atoi(second + 1));
+				}
+				// The ceiling is the line buffer's, not the RAM's: 0x400000 is 16384 blocks and a
+				// ~80 KB sample line. Its own file makes that affordable where the shared debug log
+				// did not - see OpenCarLog.
+				if (c.length == 0 || c.length > 0x400000) c.length = 0x100000;
+				if (c.interval == 0) c.interval = 30;
+				return c;
+			}();
+			return cfg;
+		}
+
+		// A guest float. 4-byte reads through the module's RAM pointer are already in host order -
+		// the same property LogSyncDigest relies on to read the frame counter - so no swizzle here.
+		// The BYTE accessors elsewhere in YAMP need `^ 3`; these do not.
+		float GuestFloat(const uint8_t* ram, uint32_t guestAddress)
+		{
+			float out = 0.0f;
+			memcpy(&out, ram + guestAddress, sizeof(out));
+			return out;
+		}
+
+		void LogCarProbe(unsigned nodeId)
+		{
+			const CarProbeConfig& cfg = CarProbe();
+			if (!cfg.enabled) return;
+
+			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
+			if (ram == nullptr) return;
+
+			// THE BUFFER IS BUILT OUTSIDE THE `__try`, and it has to be: a scope that needs object
+			// unwinding cannot contain one (C2712). So the only thing inside the guard is C.
+			const uint32_t blockCount = cfg.length / 0x100;
+			static std::vector<char> buffer;
+			if (buffer.size() < static_cast<size_t>(blockCount) * 5 + 256)
+			{
+				buffer.assign(static_cast<size_t>(blockCount) * 5 + 256, '\0');
+			}
+			char* const out = buffer.data();
+			const int cap = static_cast<int>(buffer.size());
+
+			// Under SEH for the same reason LogSyncDigest is: a diagnostic must not be the thing
+			// that takes the board down, and this window has never been probed.
+			__try
+			{
+				const uint32_t guestFrame = *reinterpret_cast<const uint32_t*>(ram + ADDR_GUEST_FRAME);
+				static uint32_t lastBucket = ~0u;
+				const uint32_t bucket = guestFrame / cfg.interval;
+				if (bucket == lastBucket) return;
+				lastBucket = bucket;
+
+				// THE CONTROL, and it is the first thing on the line on purpose. Each cabinet
+				// drives its own car, so these three floats MUST differ between the two logs. If
+				// they ever match, the probe is reading something that is not the player's car and
+				// nothing else on the line can be believed.
+				const float px = GuestFloat(ram, CAR_PLAYER + CAR_POS + 0);
+				const float py = GuestFloat(ram, CAR_PLAYER + CAR_POS + 4);
+				const float pz = GuestFloat(ram, CAR_PLAYER + CAR_POS + 8);
+				const float vx = GuestFloat(ram, CAR_PLAYER + CAR_VEL + 0);
+				const float vz = GuestFloat(ram, CAR_PLAYER + CAR_VEL + 8);
+
+				int at = _snprintf_s(out, cap, _TRUNCATE,
+					"[%s car] gframe=%u node=%u player pos=%.2f,%.2f,%.2f vel=%.3f,%.3f win=%06X+%X ",
+					gGeneral.GetGameTag(), guestFrame, nodeId, px, py, pz, vx, vz,
+					cfg.base, cfg.length);
+
+				// 16 bits per block rather than 32: the diff only has to say SAME or DIFFERENT, and
+				// halving the width halves a log that a two-minute race fills 240 samples of.
+				for (uint32_t block = 0; block < blockCount && at > 0 && at < cap - 8; ++block)
+				{
+					const uint32_t hash = HashBlock(
+						ram + cfg.base + static_cast<size_t>(block) * 0x100, 0x100);
+					at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE, "%04X ",
+						static_cast<unsigned>((hash ^ (hash >> 16)) & 0xFFFF));
+				}
+				if (FILE* f = OpenCarLog())
+				{
+					fprintf(f, "%s\n", out);
+					fclose(f);
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				return;
+			}
+		}
+
 		void LogSyncDigest(uint32_t /*hostFrame*/, unsigned nodeId)
 		{
 			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
@@ -751,6 +990,12 @@ namespace pre3
 
 	void CommBoard::Update()
 	{
+		// BEFORE the no-link early return, deliberately. The probe's whole value is the DIFFERENCE
+		// between a linked pair and two stand-alone cabinets given the same drive: what agrees only
+		// when linked is what the link is synchronising. Gating it on a link would make the control
+		// half of that experiment impossible to run with the same binary.
+		LogCarProbe(s_nodeId);
+
 		if (s_mode == Mode::Off) return;
 		EnsureBuffers();
 		s_frame++;

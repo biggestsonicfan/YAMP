@@ -897,3 +897,118 @@ unexplained, and moot.)
 * **More than two cabinets.** The plugin's link channel is point-to-point, so the arrays and
   rendezvous groups are sized for `MAX_NODES` because the MODULE's are, not because this transport
   can fill them.
+
+## 8. A RACE, AND THE AI CARS ARE NOT SYNCED (2026-08-08)
+
+Two players, two machines, one RPCN room, driving a real race. **The AI cars are simulated
+independently on each cabinet.** You see each other correctly; you each see a different CPU field.
+
+Four independent lines of evidence, none of which depends on knowing where the AI cars live:
+
+1. **Nothing in guest RAM is kept in step.** Across the whole 8 MB work RAM at 0x40000 granularity,
+   every region that changes on BOTH cabinets during the race agrees **0.0%** of the time. Not one
+   exception, over ten dynamic regions.
+2. **The same answer at fine resolution, and it is not latency.** Over 1 MB around the game context
+   at 0x100 granularity, **0 of 592 dynamic blocks** agree above 95% - and that holds at every time
+   offset from -90 to +90 guest frames, so a broadcast arriving a frame or two late would have been
+   caught.
+3. **The link is healthy, so this is not a delivery failure.** Both cabinets' RX arrays hold
+   byte-identical contents - master `[0]487 nz / [1]475 nz`, slave the same, with matching churn.
+   Whatever the ROM chooses to send arrives intact at both ends.
+4. **The packets are SYMMETRIC, which kills the broadcast hypothesis.** In a race the two slots
+   carry 487 and 475 non-zero bytes of 848 - near-equal, each cabinet transmitting its own car. The
+   227-vs-45 asymmetry §7 recorded was the BOOT HANDSHAKE and disappears once racing starts. A
+   master broadcasting a shared AI field would look nothing like this: there is no authority in the
+   protocol for one.
+
+### The control, and why the finding can be believed
+
+The player's car is at guest **0x105BCC**, which is not inferred - `FUN_00025540` says so outright
+(`0002557c: addi r31, r15, 0xbcc`, r15 being the game context at 0x105000). The ROM's physics
+integrator at **0x0008DBCC** gives the car struct's layout, and it is what makes a runtime scan
+possible without ever locating the AI array:
+
+```
+0008dc70  lfs   f29, 0x38(r31)     position  X Y Z   at +0x38 +0x3c +0x40
+0008dc58  lfs   f23, 0x50(r31)     velocity  X Y Z   at +0x50 +0x54 +0x58
+0008dc98  lfs   f12, 0x1e4(r15)    the motion-integration scalar - hook 13's byte
+0008dca8  fadds f29, f29, f13      position += velocity * scalar
+0008dce0  stfs  f29, 0x38(r31)     written back
+```
+
+That car is **per-cabinet on every matched frame**, which is the control: each cabinet drives its
+own, so the probe is demonstrably able to see a difference. A probe that reported everything as
+"different" without a control would say nothing at all.
+
+### What the 386-block anomaly is, and is not
+
+386 blocks (~96 KB) flip to *perfectly* identical for a contiguous stretch (gframe ~7800-9500) and
+differ either side. That is the signature of a loaded RESOURCE region - both cabinets holding the
+same course data - not of live car state, which would never be bit-identical for 1700 frames and
+then diverge. Recorded because it is the one thing in the data that looks like synchronisation and
+is not.
+
+### How much this proves, honestly
+
+The probe hashes 0x100 blocks, so a block mixing a synced car with per-cabinet data reads as
+different. Strictly, the finding is *no 256-byte region of RAM is kept in step*. Car objects are
+>= 0x100 bytes and there are several, so some blocks should have been predominantly car - the
+conclusion is well supported, but the AI array has **not been located** and that is the honest
+limit. Finding it is the next step for anyone who wants to close the gap: the mode dispatch table
+at `0x000c0e6c` (four entries, three of them the per-car update at `0x0002535c`) is reached from
+`0x00025240` via `lbz r3, 5(r15)`, which is a GAME MODE index, not a car index - so the AI loop is
+somewhere else and was not worth chasing statically when the running game could be asked.
+
+**Whether this is a bug or the hardware's design is NOT established.** The symmetric packet is real
+evidence for "by design" - the protocol has no authority for a shared field. What would settle it
+is whether a real twin cabinet shows identical CPU traffic on both screens.
+
+### 8a. Two UI faults a linked cabinet exposed, both the same mistake
+
+**The netplay overlay never appeared.** `IsNetplayGame()` was
+`m2ftg::NetplaySupported() || pre3::NetplaySupported()`, and both of those ask *can this game
+sustain a LOCKSTEP round* - derived from a measured ROM frame counter on m2ftg, and from a pinnable
+deterministic clock on pre3, which is an FV2-only whitelist. A linked-cabinet game needs none of
+that and fails both tests forever, so Sega Racing Classic 2 got **no Netplay page, no overlay and no
+room id** while its link worked perfectly. Exactly the gap Virtual On had before
+`m2ftg::K2::GetLinkedCabinet` existed, in the pre3 half.
+
+`CommBoard::LinkedCabinetSupported()` and `CommBoard::GetLinkedCabinet()` mirror Virtual On's shape,
+so the UI asks one question and does not care which emulator is running. Every field is the
+CABINET'S own answer rather than the host's intent - `checkDone` is the ROM's verdict read out of
+guest RAM (`0x100628` id/count plus the two gate bits at `0x7379B9`), because a host that reported
+its own hopes would say the ring was fine while the board sat in its check. **Confirmed on screen.**
+
+**A linked cabinet could not be credited with free play off.** `netplayLocked`
+(`net::SessionInProgress()`) disabled the coin/start protocol for the whole session, on the
+reasoning that *a round starts from the board's own VS start savestate, which is past the credit
+screen by construction*. That is FV2's lockstep reasoning and none of it is true here: there is no
+round, no barrier, no transmitted pad, and the credit screen is exactly where both players start a
+race from. Free play merely hid it. `roundLocked` now excludes a linked cabinet from the coin path;
+pause and TEST/SERVICE stay locked, because those are still local-only actions that would put one
+cabinet somewhere the other is not.
+
+### 8b. The instrument, and the first attempt that damaged its own data
+
+`YAMP_SRC2_CARPROBE` samples every 30 GUEST frames - keyed on the guest counter at `0x737978`, never
+the host frame, because the two cabinets boot hundreds of host frames apart and run at different
+rates. Each sample carries the player car's position and velocity plus a 0x100-granularity hash of a
+configurable window (`=<hexBase>:<hexLen>:<interval>` to move it).
+
+**It writes its own `src2_car.log`, and the first race is why.** Sent through `DebugLogFile` the
+samples came back silently damaged: lines capped at ~1.1 KB, so a 256-block sample was truncated to
+185, and `[draw]` lines from another thread spliced into the middle with no newline. Both failures
+parse as "a smaller window than you asked for" rather than as an error. Opened and closed per
+sample, the same discipline `yampnet.log` uses, so it can also be read over a share while the game
+runs.
+
+It deliberately runs BEFORE `Update()`'s no-link early return: the probe's whole value is the
+difference between a linked pair and two stand-alone cabinets given the same drive, and gating it on
+a link would make the control half of that experiment impossible with the same binary.
+
+### 8c. Still open after the race
+
+* **Whether shared AI cars are what the hardware does.** See above - the honest answer is unknown.
+* **The AI array's address.** Not located; the probe reaches its conclusion without it.
+* **Latency.** Both machines are on one LAN.
+* **The lobby path.** Still only driven from `-net-host` / `-net-join`.

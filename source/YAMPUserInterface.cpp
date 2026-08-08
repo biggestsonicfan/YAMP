@@ -91,7 +91,35 @@ static bool IsPre3Game()
 // determinism set is already in its DwGame row), so "has a measured counter" is exactly "can\n// sustain a session" - and a game that gets one starts offering the page automatically.
 static bool IsNetplayGame()
 {
-	return m2ftg::NetplaySupported() || pre3::NetplaySupported();
+	// THREE ANSWERS, NOT TWO, and the third is a different question entirely. The first two ask
+	// "can this game sustain a LOCKSTEP round", which is derived from having a measured ROM frame
+	// counter (m2ftg) or a pinnable deterministic clock (pre3, FV2 only). A LINKED-CABINET game
+	// needs none of that and would fail both tests forever - so Sega Racing Classic 2 showed no
+	// Netplay page and no overlay at all while its link worked perfectly, which is the same gap
+	// Virtual On had on the m2ftg side before `GetLinkedCabinet` existed.
+	return m2ftg::NetplaySupported() || pre3::NetplaySupported()
+		|| pre3::CommBoard::LinkedCabinetSupported();
+}
+
+// The linked-cabinet report, whichever emulator is running. Both games answer the same questions
+// about the same kind of link, so the overlay below asks once and does not care which board it is.
+static bool GetLinkedCabinetStatus(pre3::CommBoard::CabinetStatus& out)
+{
+	if (pre3::CommBoard::GetLinkedCabinet(out))
+	{
+		return true;
+	}
+	m2ftg::K2::LinkedCabinet von = {};
+	if (!m2ftg::K2::GetLinkedCabinet(von))
+	{
+		return false;
+	}
+	out.role = von.role;
+	out.ringUp = von.ringUp;
+	out.nodeId = von.nodeId;
+	out.nodes = von.nodes;
+	out.checkDone = von.checkDone;
+	return true;
 }
 
 // The two families answer "has the emulated board booted?" and "put it back to a clean state"
@@ -2829,8 +2857,8 @@ void YAMPUserInterface::DrawNetplay()
 		// barrier, nothing to reset and nothing for "Start match" to open. Telling the player to
 		// press it would be telling them to press a button that does nothing - which is exactly
 		// what the overlay used to do through an entire match.
-		m2ftg::K2::LinkedCabinet lobbyLink = {};
-		const bool linkedCabinet = m2ftg::K2::GetLinkedCabinet(lobbyLink);
+		pre3::CommBoard::CabinetStatus lobbyLink = {};
+		const bool linkedCabinet = GetLinkedCabinetStatus(lobbyLink);
 		if (linkedCabinet)
 		{
 			ImGui::TextUnformatted("This game links its two cabinets itself. Once the other player "
@@ -2845,11 +2873,20 @@ void YAMPUserInterface::DrawNetplay()
 			ImGui::TextUnformatted("Both players press Start match. Nothing happens until both have - "
 				"the board is reset on both machines at that point so the round starts from the same state.");
 		}
-		if (IsPre3Game())
+		// FV2's round starts from a savestate; a linked cabinet has no round and reboots into its
+		// ROLE instead. Saying the first to a Sega Racing Classic 2 player describes a mechanism
+		// their session never uses.
+		if (IsPre3Game() && !linkedCabinet)
 		{
 			ImGui::TextUnformatted("This board restores its own versus start state rather than "
 				"rebooting, so the match picks up from there instead of from the attract screen. "
 				"Your HLE hook settings are held at their defaults until the session ends.");
+		}
+		else if (IsPre3Game())
+		{
+			ImGui::TextUnformatted("Joining a room reboots this cabinet so it comes up as the "
+				"MASTER or the SLAVE - the board reads that once at power-on, exactly as the real "
+				"one does, so it cannot be changed on a running machine.");
 		}
 		ImGui::PopTextWrapPos();
 
@@ -2936,8 +2973,8 @@ void YAMPUserInterface::DrawNetplayOverlay()
 	// consulted before the checks below. Doing that swallowed the room id (still 0 while
 	// connecting), the error text and the board-booting line, and drew a permanent box in offline
 	// solo play for anyone whose cabinet role was not NOLINK.
-	m2ftg::K2::LinkedCabinet link = {};
-	const bool linkedCabinet = m2ftg::K2::GetLinkedCabinet(link);
+	pre3::CommBoard::CabinetStatus link = {};
+	const bool linkedCabinet = GetLinkedCabinetStatus(link);
 
 	// Nothing to say before a session is started, and nothing worth covering the game with once
 	// one is running normally.

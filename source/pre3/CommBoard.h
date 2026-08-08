@@ -202,6 +202,35 @@ namespace pre3
 		// these frames as ordinary ones - see Pre3Host.
 		bool RoleResetPending();
 
+		// IS THIS GAME A LINKED-CABINET GAME AT ALL? Answered from the title, not from whether a
+		// session happens to be up, because the UI needs it before any session exists - it decides
+		// whether the Netplay page is offered.
+		//
+		// DELIBERATELY NOT `pre3::NetplaySupported()`, which is the LOCKSTEP question and answers
+		// FV2 only: that path is gated on a pinnable deterministic clock, which SRC2 does not have
+		// and does not need. Conflating the two is exactly why a linked SRC2 cabinet showed no
+		// netplay UI at all - no page, no overlay, no room id - while its link was working
+		// perfectly. Virtual On had the same gap on the m2ftg side and the same answer.
+		bool LinkedCabinetSupported();
+
+		// WHAT THE OVERLAY RENDERS, and the shape is `m2ftg::K2::LinkedCabinet`'s on purpose: the
+		// two games answer the same questions about the same kind of link, and the UI should not
+		// have to care which emulator is running.
+		//
+		// Every field is the cabinet's OWN answer rather than the host's intent - `checkDone` in
+		// particular is the ROM's verdict from its boot network check, not "YAMP thinks the link is
+		// up". A host that reported its own hopes would say the ring was fine while the board sat
+		// in its check.
+		struct CabinetStatus
+		{
+			uint32_t role;      // 1 = MASTER, 2 = SLAVE, matching the board's own LINK ID row
+			bool ringUp;        // the peer's packets are arriving AND the board is transferring
+			uint8_t nodeId;     // as the ROM read it out of the ring (1-based), guest 0x10062B
+			uint8_t nodes;      // guest 0x10062A
+			bool checkDone;     // FUN_00093DB4 passed both gates and agreed on a ring
+		};
+		bool GetLinkedCabinet(CabinetStatus& out);
+
 		Mode CurrentMode();
 		uint8_t NodeId();
 		uint8_t NodeCount();

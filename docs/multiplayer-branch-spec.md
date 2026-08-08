@@ -1325,6 +1325,30 @@ Both held comm `state=4` for ~3500 frames with the wire up, and **both machines'
 
 > **A direct-UDP transport was built for this and then removed.** Before RPCN was wired, the same `Mode::Link` path ran over a plain address pair (a `link_direct` ABI entry driving `Transport.h`'s `UdpTransport`), two instances on one machine over loopback. It reached `state=4` for 2300+ frames and passed the ROM's check on both cabinets — and it is what caught all three defects above, which is why the RPCN run then worked first try. It is **gone**, for §14.10's reason: a second transport that nothing tests is a second set of behaviours to keep true. It had one job — separating "does the game play linked over a real wire" from "does the RPCN client bring a peer pair up" — and it did it.
 
+**A RACE HAS NOW BEEN DRIVEN, AND THE AI CARS ARE NOT SYNCED.** Two players on the two machines
+over RPCN: across the whole 8 MB work RAM at 0x40000 granularity, every region that changes on both
+cabinets agrees 0.0% of the time, and at 0x100 granularity over 1 MB around the game context 0 of
+592 dynamic blocks agree above 95% at ANY time offset from -90 to +90 guest frames. The link is not
+the reason - both cabinets' RX arrays hold byte-identical contents throughout - and the packets are
+SYMMETRIC in a race (487 and 475 non-zero bytes of 848), so each cabinet is transmitting its own car
+rather than one broadcasting a shared field. The 227-vs-45 asymmetry above is the boot handshake and
+disappears once racing starts. **The two players see each other; they each see a different CPU
+field.** Whether that is a fault or what the hardware does is NOT established - the symmetric packet
+is real evidence for "by design", since the protocol has no authority for a shared field. Full
+method, the control that makes it believable, and the honest limits: `docs/src2-netplay-recon.md`
+§8.
+
+> **A linked cabinet is not a "netplay game" by the lockstep definition, and two features assumed it
+> was.** `IsNetplayGame()` was `m2ftg::NetplaySupported() || pre3::NetplaySupported()` - both of
+> which ask *can this sustain a LOCKSTEP round*, derived from a measured ROM frame counter or a
+> pinnable clock (an FV2-only whitelist). SRC2 fails both forever, so it got **no Netplay page, no
+> overlay and no room id** while its link worked perfectly. And `netplayLocked` disabled the
+> **coin/start protocol** for the whole session on FV2's reasoning that a round starts from a
+> savestate past the credit screen - so with free play off a linked cabinet could not be credited at
+> all. `CommBoard::LinkedCabinetSupported()` / `GetLinkedCabinet()` and a `roundLocked` that excludes
+> a linked cabinet fix both. **Carry this to Motor Raid and Sega Rally 2:** every gate spelled
+> "netplay" on this branch means "lockstep round", and a linked-cabinet game needs each one re-read.
+
 **Diagnostics.** `[SRC2 link]` lines carry the comm state machine, node id/count, the guest's packet size, sequence, the rendezvous word, wire tx/rx counters per node and the peer's board sequence — three counters rather than one because they fail separately: *nothing sent* = this cabinet is not producing; *sent but nothing received* = the wire or the far end; *received but the peer's board sequence frozen* = the peer's process is alive and its BOARD is not transferring, which no other field distinguishes. `[SRC2 linkgate]` prints the ROM's own verdict on its boot check. Both are gated to change-plus-heartbeat; the frame-boundary probe (`YAMP_PRE3_SYNCPROBE`) records to a memory ring and dumps at teardown, because a `DebugLogFile` per frame was expensive enough to **change the outcome it was measuring**.
 
 ---
@@ -1409,7 +1433,8 @@ Everything else described in this document is committed.
 
 **Sega Racing Classic 2 / linked-cabinet on Model 3 (§14.11), as of 2026-08-08:**
 
-- **Nobody has driven a race.** Both cabinets reach and hold the linked running state over RPCN on two machines, with each ROM agreeing on a two-node ring — but two players actually driving is unexercised, and the CPU-car handoff (one cabinet simulates them and carries them to the other) with it.
+- ~~**Nobody has driven a race.**~~ **Done, and it answered the CPU-car question in the negative:** the AI cars are simulated independently on each cabinet and nothing in guest RAM is kept in step. See §14.11 and `docs/src2-netplay-recon.md` §8. What is still open is whether that is a fault at all — the ROM's packet is symmetric, so there is no authority in the protocol for a shared field, and settling it needs a real twin cabinet rather than more host-side probing.
+- **The AI car array has not been located.** The analysis reaches its conclusion without it (by hashing RAM and using the player's car at guest `0x105BCC` as a control), but naming the array would turn a well-supported inference into a direct reading.
 - **Untested beyond a LAN**, exactly as §14.10.
 - **The lobby path is unexercised.** `DriveRoomRole` accepts a room formed at any time, so F1 → Netplay should now work as well as `-net-host` / `-net-join` does. It has only been driven from the command line.
 - **Two cabinets only.** The plugin's link channel is point-to-point, so a ring of three or more is not expressible on it. `CommBoard`'s arrays and rendezvous groups are sized for `MAX_NODES` because the MODULE's are, not because this transport can fill them.
