@@ -558,6 +558,44 @@ patch is a timed on-screen display gated on a counter at `r15+6` against `0x55`/
 That is consistent with a countdown screen whose rendering has been excised — but "consistent with"
 is not a measurement, and the run counts above are what a measurement would have to beat.
 
+### The ROM's startup network screen exists, runs, and is NOT hooked out
+
+Asked directly of the guest image, because "the hooks removed the waiting-for-link screen" was the
+standing suspicion and it is checkable rather than arguable.
+
+The ROM carries the text:
+
+| guest | string |
+|---|---|
+| `0xE38AC` | `        NETWORK CHECKING        ` |
+| `0xE38E4` | ` NO CARRIER! CHECK NETWORK CABLE` |
+| `0xE3908` | `   NETWORK BOARD NOT PRESENT    ` |
+| `0xE392C` | ` NETWORK BOARD HAS ANY PROBLEM  ` |
+| `0xE3298` | `WARNING` / `TROUBLE OCCURRED` |
+
+and the boot init chain calls the check **unconditionally**, four instructions after the site hook 1
+deletes:
+
+```
+0189EC  bl 0x7BA18               <- HOOK 1 deletes this (the security-overlay loader)
+...
+018A18  lbz r3, 0x19E(0x100000)  ; guest 0x10019E
+018A1C  bl 0x93DB4               ; FUN_00093DB4 -> FUN_0009212C, "NETWORK CHECKING"
+018A20  cmpwi r3, 0 / bgt 0x18AC4
+```
+
+**None of SRC2's 26 hook addresses fall inside `FUN_00093DB4`, `FUN_0009212C` or `FUN_0009065C`.**
+So the screen is present and the check runs.
+
+**And its argument is the LINK ID byte.** Guest `0x10019E` is the settings working copy at
+`0x100180` plus `0x1E`, which is the LINK ID row (see `source/pre3/ArcadeSettings.h`, read off the
+board's own service-menu table). That is an independent confirmation of the measured requirement
+that LINK ID must not be SINGLE: the ROM feeds that exact byte to its network check.
+
+What hooks 16-20 gut is therefore a DIFFERENT routine that merely lives nearby - a timed display
+over 0x34-byte descriptors at `0xE3400`/`0xE3434`/`0xE3468` with a message-id table at `0xE349C`.
+Identifying it is still open, and it is no longer the leading explanation of anything.
+
 **What the next experiment has to be: many trials per condition, not one.** Everything above is 1-6
 runs deep, which cannot separate a 25% race from a fix. A scripted N=20 sweep across {hook mask} x
 {launch delay} is the only thing that will, and it should come before any further code change.
