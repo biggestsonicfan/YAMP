@@ -433,6 +433,57 @@ A healthy stand-alone board has `0x73798E = 0x44`, so VBlank does fire there. So
 with interrupts masked and not a board that has stopped: **it is taking one interrupt and not the
 other, and it is blocked on the one it is not taking.**
 
+### CORRECTION: pre3 DOES raise VBlank, and the first scan for it was wrong
+
+The paragraph that used to stand here said pre3 never raises IRQ `0x02` and proposed injecting it.
+**That was wrong, and the way it was wrong is worth keeping.** The scan behind it looked only at
+calls through the memory object's vtable slot `0x98` — and `0x98` is the CLEAR:
+
+```
+CM3Mem vtable 0x18010BC50:  +0x90 = FUN_180012430   state |=  mask    RAISE
+                            +0x98 = FUN_180012460   state &= ~mask    CLEAR
+```
+
+The frame step uses both, and slot `0x90` is where the interrupts actually come from
+(`FUN_18003B0A0`):
+
+```c
+mem->vtable[0x90](mem, 2);      // VBLANK, unconditional, once per emulated frame
+  ... if (rom->0x482 & 0x20) loop up to 0x80 times:
+mem->vtable[0x90](mem, 0x40);   //   scanline: raise
+mem->vtable[0x98](mem, 0x40);   //            ...and clear
+mem->vtable[0x90](mem, 9);      // and 4 at the end of the frame
+```
+
+So VBlank is raised every frame, and the "injection" built on the wrong conclusion was calling
+`0x98` — **clearing VBlank once per frame**, the exact opposite of its intent. It has been removed.
+The trap is easy to fall into a second time: the SCSI window's `vtable[0x98](0x100)` reads naturally
+as "raise the SCSI interrupt" and is in fact an acknowledge-on-read.
+
+### And VBlank is unmasked on the hung board too
+
+The raise only asserts the CPU line when the guest has enabled the bit:
+
+```c
+state |= mask;
+if ((state & (ENABLE | 0x100)) != 0 && cpu != NULL) cpu->assert_line(1);   // ENABLE = mem+0x34
+```
+
+`mem+0x34` is what the guest programs through `0xF0100014`. Measured on a hung pair, both nodes:
+
+```
+irq=6E/0005      enable 0x6E (VBlank bit 0x02 IS set), state word 0x0005
+```
+
+which also matches the guest's own soft copy at `0x737984`. So the board is **not** missing VBlank
+because it is masked, and **not** because the module fails to raise it.
+
+**What is left is narrow and specific:** VBlank is raised, VBlank is enabled, and the ISR that would
+increment `0x73798E` still does not run on a linked board. The next thing to check is therefore the
+delivery path rather than the source — whether `cpu->assert_line(1)` is reached (the `mem+0x358`
+branch above), and whether the guest is spinning with `MSR[EE]` clear, which would make this a wait
+for an interrupt the board itself has disabled.
+
 ### Where that leaves the comm board's own interrupt
 
 `CXComm` raises nothing: its seven methods and `FUN_180035BA0` only touch its own registers, and the

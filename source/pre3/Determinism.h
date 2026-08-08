@@ -88,6 +88,11 @@ namespace pre3
 	// exactly like a board whose offsets are wrong. See CommBoard.cpp's diagnostic.
 	int BoardPhase();
 
+	// The CM3Mem object (machine+0xA0), or null until the machine is up. It owns the guest's
+	// address decode and, at +0x36, the Model 3 INTERRUPT STATE byte the guest polls at
+	// 0xF0100018 - so this is what a host has to reach to assert an interrupt the module does not.
+	void* BoardMemObject();
+
 	// The ROM object the machine is running (machine+0x90), or null until it is up.
 	//
 	// THE ONE PLACE THAT KNOWS WHERE THE MACHINE IS. Everything reaching into the emulator - the

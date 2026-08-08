@@ -203,6 +203,42 @@ namespace pre3
 			return s_ring != nullptr;
 		}
 
+		// ---- the emulated interrupt controller, for diagnosis ----------------------------
+		//
+		// PRE3 DOES RAISE VBLANK. The frame step asserts it unconditionally once per emulated frame
+		// (DLL 0x18003B0A0: `mem->vtable[0x90](mem, 2)`), alongside 0x40 in its scanline loop and 9
+		// and 4 at the end. An earlier version of this file claimed the opposite and shipped an
+		// "injection" to make up for it. That claim came from scanning only vtable slot 0x98, and
+		// 0x98 is the CLEAR:
+		//
+		//     CM3Mem vtable 0x18010BC50:  +0x90 = FUN_180012430   state |=  mask    RAISE
+		//                                 +0x98 = FUN_180012460   state &= ~mask    CLEAR
+		//
+		// so the injection was CLEARING VBlank every frame. Recorded because the mistake is easy to
+		// repeat: the SCSI window's `vtable[0x98](0x100)` reads naturally as "raise the SCSI IRQ"
+		// and is in fact an acknowledge-on-read.
+		//
+		// What the raise does with the mask is the next question, and it is why these two bytes are
+		// logged rather than reasoned about:
+		//
+		//     state |= mask;
+		//     if ((state & (ENABLE | 0x100)) != 0 && cpu != NULL) cpu->assert_line(1);
+		//
+		// ENABLE is mem+0x34, which the GUEST programs through 0xF0100014 - so a raise the guest has
+		// not enabled sets the state bit and delivers nothing. mem+0x36 is the state word whose LOW
+		// BYTE the guest polls at 0xF0100018 and dispatches its ISRs from.
+		inline constexpr size_t MEM_IRQ_ENABLE = 0x34;
+		inline constexpr size_t MEM_IRQ_STATE = 0x36;
+
+		static bool ReadIrq(uint8_t& enable, uint16_t& state)
+		{
+			const auto* mem = static_cast<const uint8_t*>(BoardMemObject());
+			if (mem == nullptr) return false;
+			enable = *(mem + MEM_IRQ_ENABLE);
+			state = *reinterpret_cast<const uint16_t*>(mem + MEM_IRQ_STATE);
+			return true;
+		}
+
 		static uint64_t& Rendezvous()
 		{
 			return (s_mode == Mode::Shared && s_ring != nullptr) ? s_ring->rendezvous : s_rendezvous;
@@ -566,10 +602,14 @@ namespace pre3
 				mine[4], mine[5], mine[6], mine[7]);
 		}
 
+		uint8_t irqEnable = 0;
+		uint16_t irqState = 0;
+		ReadIrq(irqEnable, irqState);
+
 		DebugLogFile("[%s link] f=%u state=%u node=%d/%d size=%u seq=%u bank=%u cmd=%04X "
-			"status=%04X rendezvous=%016llX tx=%s\n",
+			"status=%04X rendezvous=%016llX irq=%02X/%04X tx=%s\n",
 			gGeneral.GetGameTag(), s_frame, view.state, view.nodeId, view.nodeCount,
 			view.packetSize, view.sequence, view.bank, view.command, view.status,
-			static_cast<unsigned long long>(Rendezvous()), slot);
+			static_cast<unsigned long long>(Rendezvous()), irqEnable, irqState, slot);
 	}
 }

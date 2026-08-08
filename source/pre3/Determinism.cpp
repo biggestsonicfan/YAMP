@@ -168,6 +168,18 @@ namespace pre3
 		//     mem+0x68 -> the second bank, restored from the same bytes
 		//     mem+0x48 =  0x800000 VRAM
 		inline constexpr size_t MEM_OBJECT = 0xA8;
+
+		// machine+0xA0 is a DIFFERENT object from MEM_OBJECT above, and the two are easy to
+		// conflate: this is the CM3Mem the machine build constructs with FUN_180013D90 and stores at
+		// +0xA0, i.e. the guest ADDRESS DECODE, while +0xA8 is the one whose bank descriptors the
+		// canary reads. The frame step's own interrupt raise goes through +0xA0
+		// (DLL 0x18003B1B0, `mov rcx,[rbx+0xA0]` then vtable +0x98), which is what pins it.
+		//
+		// +0x36 on it is the Model 3 INTERRUPT STATE byte: the 0xF0 window's sub-address 0x18
+		// returns it verbatim (DLL 0x18001355A), so it is exactly what the guest polls at
+		// 0xF0100018 and dispatches its ISRs from.
+		inline constexpr size_t MEM_DECODE = 0xA0;
+		inline constexpr size_t IRQ_RAISE_SLOT = 0x98 / 8;
 		inline constexpr size_t MEM_BANK0_DESC = 0x60;
 		inline constexpr size_t RAM_SIZE = 0xC00000;
 
@@ -249,6 +261,13 @@ namespace pre3
 		const uint8_t* machine = Machine::Object();
 		if (machine == nullptr) return -1;
 		return *reinterpret_cast<const int*>(machine + Machine::BOOT_STATE);
+	}
+
+	void* BoardMemObject()
+	{
+		uint8_t* machine = Machine::Running();
+		if (machine == nullptr) return nullptr;
+		return *reinterpret_cast<void* const*>(machine + Machine::MEM_DECODE);
 	}
 
 	void* BoardRomObject()
