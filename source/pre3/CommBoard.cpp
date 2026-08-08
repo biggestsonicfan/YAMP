@@ -571,6 +571,23 @@ namespace pre3
 		const uint32_t w98C = *reinterpret_cast<const uint32_t*>(ram + 0x73798C);
 		const uint32_t w984 = *reinterpret_cast<const uint32_t*>(ram + 0x737984);
 		const uint32_t w9A8 = *reinterpret_cast<const uint32_t*>(ram + 0x7379A8);
+		// THE GAME'S OWN NETWORK VERDICT, which beats anything the host can infer.
+		//
+		// FUN_00093DB4 is SRC2's network check, called unconditionally from the boot chain at
+		// guest 0x18A1C, and it picks between four outcomes from two bits and one status word:
+		//
+		//     DAT_007379B9 & 0x20 == 0   ->  "NETWORK BOARD NOT PRESENT"
+		//     DAT_007379B9 & 0x40 == 0   ->  "NETWORK BOARD HAS ANY PROBLEM"
+		//     status & 0x800             ->  "NO CARRIER! CHECK NETWORK CABLE"
+		//     otherwise                  ->  low 5 bits = node id, bits 5-9 = node count
+		//
+		// and its countdown loop calls FUN_0004C948 - the wait-for-flag helper our hung boards
+		// spin inside. So these bytes say which of the game's own four diagnoses applies while
+		// the screen that would print it is stuck mid-frame and never paints.
+		const uint32_t w9B8 = *reinterpret_cast<const uint32_t*>(ram + 0x7379B8);
+		const uint8_t netFlags = static_cast<uint8_t>(w9B8 >> 16);   // guest 0x7379B9
+		const uint32_t w628 = *reinterpret_cast<const uint32_t*>(ram + 0x100628);
+
 		const uint8_t vblank = static_cast<uint8_t>(w98C >> 8);    // guest 0x73798E
 		const uint8_t irq08 = static_cast<uint8_t>(w984);          // guest 0x737987
 		const uint8_t irq04 = static_cast<uint8_t>(w9A8 >> 24);    // guest 0x7379A8
@@ -592,9 +609,12 @@ namespace pre3
 		BoardView view{};
 		ReadBoard(view);
 		DebugLogFile("[%s sync] f=%u irq=%02X/%04X vblank(73798E)=%02X irq08(737987)=%02X "
-			"irq04(7379A8)=%02X commstate=%u seq=%u\n",
+			"irq04(7379A8)=%02X net(7379B9)=%02X%s%s nodes(100628)=%08X commstate=%u seq=%u\n",
 			gGeneral.GetGameTag(), now, irqEnable, irqState, vblank, irq08, irq04,
-			view.state, view.sequence);
+			netFlags,
+			(netFlags & 0x20) == 0 ? " BOARD-NOT-PRESENT" : "",
+			(netFlags & 0x40) == 0 ? " BOARD-HAS-PROBLEM" : "",
+			w628, view.state, view.sequence);
 	}
 
 	bool CommBoard::ReadBoard(BoardView& out)
