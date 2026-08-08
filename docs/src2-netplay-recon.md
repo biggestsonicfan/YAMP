@@ -399,7 +399,54 @@ at `0x737987`, `0x73798E` and `0x7379A8`. It is the same shape as the spin hook 
 So the VBlank interrupt is alive — the frame counter next door proves it — and **the byte the board
 is actually waiting on is never written by anybody.**
 
-### The strong candidate: pre3's comm board never interrupts the guest
+### The flag is the VBLANK counter, and only VBlank stops
+
+Daytona USA 2's guest image loaded at matching addresses settles what the flag is. Parity checked
+first, against two known-fixed values: `0x04C998` reads back the exact spin loop above, and
+`0x0189EC` is `4806302D`, hook 1's instruction.
+
+```c
+FUN_00001D80:                      // xref: installed from 0x00001AA4
+    ...call the registered handlers...
+    DAT_0073798E++;                // <-- THE FLAG THE HUNG BOARD IS WAITING ON
+    DAT_00700000++;
+    do { *FUN_0000AEC4() = 0x2000000; } while (DAT_FE100018 & 2);   // ack, and 2 is VBLANK
+```
+
+So `0x73798E` is the **VBlank counter**, and its two siblings are the other two interrupts:
+`FUN_00001E10` increments `0x737987` and acks bit `0x08`; `FUN_00001E78` increments `0x7379A8` and
+acks bit `0x04` (the routine already in [`src2-hle-hooks.md`](src2-hle-hooks.md)).
+
+And the ticking neighbour that first looked like a healthy VBlank is nothing of the sort: guest
+`0x73798C` is written by `FUN_0004C9EC` — the function whose own wait-for-flag at `0x04CA40` is
+where **hook 0**, the idle-loop cut-out, sits. It moves because the host yields there.
+
+**Interrupts are still being delivered to the hung board.** Reading the low byte of the same peek
+(guest `0x737987` is host `0x737984`):
+
+| guest byte | ISR | on the HUNG board |
+|---|---|---|
+| `0x737987` | `FUN_00001E10`, IRQ bit `0x08` | `0x66 → 0xFC → 0x92 → 0x28 → 0xBE` — **+150 per 150 frames** |
+| `0x73798E` | `FUN_00001D80`, IRQ bit `0x02` (VBlank) | **`0x00`, never** |
+
+A healthy stand-alone board has `0x73798E = 0x44`, so VBlank does fire there. So this is not a board
+with interrupts masked and not a board that has stopped: **it is taking one interrupt and not the
+other, and it is blocked on the one it is not taking.**
+
+### Where that leaves the comm board's own interrupt
+
+`CXComm` raises nothing: its seven methods and `FUN_180035BA0` only touch its own registers, and the
+memory object's IRQ raise/clear — `FUN_180012430` (`or word ptr [mem+0x36]`) and `FUN_180012460`
+(`and`), which the SCSI window reaches through vtable `+0x98` with mask `0x100` — is never reached
+from the comm path. That remains true and remains a defect, but it is no longer the leading
+explanation of THIS hang, because the board is not waiting on a comm interrupt. It is waiting on
+VBlank.
+
+**The next question is precise: what gates pre3's VBlank assertion, and why does a linked board stop
+getting it?** The callers of `FUN_180012430` and their masks are where to look, and whether bit
+`0x02` is conditional on something the linked board no longer does.
+
+### The comm board never interrupts the guest either
 
 Real Model 3 network hardware raises an IRQ when a transfer completes. `CXComm` has no such call:
 its seven methods and `FUN_180035BA0` only touch its own registers, and the memory object's
