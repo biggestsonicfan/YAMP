@@ -37,8 +37,14 @@ rather than by guessing:
 
 The bug that was actually stopping it: the peer's packet was delivered **before `module_main`**, and
 the module's own link transfer runs inside it and copies board 1's (never-executed, all-zero) send
-buffer straight over the window. `DeliverCommPayload` now runs from the link-transfer shim
-immediately after `g_origLinkTransfer()`, writes BOTH banks, and leaves the flag register alone.
+buffer straight over the window.
+
+**That was fixed twice, and the second fix is the one in the code now.** The first was
+`DeliverCommPayload`, running from the link-transfer shim immediately *after*
+`g_origLinkTransfer()` and writing both banks of board 0's receive slot. The second - `StageCommPayload`
+- inverts it: the peer's packet is written into **board 1's SEND buffer** just *before* the transfer,
+and the module's own transfer performs the delivery. See "THE MODULE ALREADY DELIVERS IT" in
+`von-netplay-recon.md`.
 
 ## IT RUNS OVER RPCN, ON TWO MACHINES (2026-08-07)
 
@@ -183,6 +189,6 @@ work-RAM hashes) are the older aids. Two machines are now the only way to test a
 ## Files
 
 `source/m2ftg/K2/K2Host.cpp` (cabinet role, CommFirmware, soft reset, `ExchangeCommPayload` /
-`DeliverCommPayload`, `LogLinkState`, `GetLinkedCabinet`), `plugin/yampnet/` (`kPacketLink`),
+`StageCommPayload`, `LogLinkState`, `GetLinkedCabinet`), `plugin/yampnet/` (`kPacketLink`),
 `source/m2ftg/VonHooks.inc` (120 classified hooks), `docs/von-hle-hooks.md`,
 `docs/von-netplay-recon.md`.

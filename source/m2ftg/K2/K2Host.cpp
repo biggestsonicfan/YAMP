@@ -183,6 +183,23 @@ namespace m2ftg
 			constexpr size_t COMM_PAYLOAD   = 0x700;      // bytes the link moves per board per frame
 			constexpr size_t COMM_P2        = 0x7CA738;   // P1 + 0x8008
 			constexpr size_t COMM_BANK      = 0x4000;     // the second 16 KB bank
+
+			// THE DPRAM SLOT LAYOUT, read out of the module's own per-frame link transfer
+			// (`FUN_18006A310`, the function this file hooks). Per comm block, per bank:
+			//
+			//     +0x2000  SEND      the board's outgoing packet, written by its i960
+			//     +0x2700  RECV[0]   the OTHER board's packet
+			//     +0x2E00  RECV[1]   this board's own echo
+			//
+			// and the transfer does exactly four 0x700 copies to fill them - each one into the bank
+			// the destination is NOT currently reading - before toggling bit7 (data ready) and bit0
+			// (bank select) on both flag registers. So the slot layout, the double-buffering and the
+			// data-ready flag are the MODULE'S protocol, not something YAMP has to reproduce: put a
+			// packet in a SEND buffer and the module delivers it, correctly banked, on its own.
+			//
+			// Only RECV[0] is named: it is the one YAMP reads back to check the module's work.
+			// SEND already has its two absolute forms above, and nothing here touches RECV[1].
+			constexpr size_t COMM_RECV0     = 0x2700;
 			// THE FIRMWARE STATUS BYTES, at the base of whichever bank the flag selects. The ROM's
 			// link check polls these and NEVER writes them (they are read-only to it): byte0 is
 			// "ring up", byte2 the node id, byte3 the node count. On hardware the comm board's own
@@ -568,9 +585,10 @@ namespace m2ftg
 		// been SEEN at 1 (the ROM's own release during its boot-time check), so a cold boot - or
 		// any run where the check never re-runs - behaves exactly as before this existed.
 		static void (*g_origLinkTransfer)() = nullptr;
-		// Defined with the rest of the link, driven from the shim below - the module's own transfer
-		// is a writer into the same window, so the peer's packet has to be laid down after it.
-		static void DeliverCommPayload();
+		// Defined with the rest of the link, driven from the shim below - it hands the peer's packet
+		// to the module's OWN transfer as board 1's outgoing packet, so it has to be in place BEFORE
+		// that transfer runs.
+		static void StageCommPayload();
 		namespace CommReset
 		{
 			// Register RVAs per comm block: reset at +0x8000, flag at +0x8001 (see OmgRva).
@@ -618,12 +636,11 @@ namespace m2ftg
 				}
 			}
 
+			// The peer's packet goes in BEFORE the module's transfer, which is what then delivers it.
+			StageCommPayload();
+
 			CommReset::s_transfers++;
 			g_origLinkTransfer();
-
-			// The peer's packet goes down AFTER the module's transfer and BEFORE the CPU steps.
-			// This is the only window in the frame where it survives to be read.
-			DeliverCommPayload();
 
 			// POST: a comm board held in reset drives nothing, so undo what this frame's
 			// transfer did to its registers. The ROM's release (writing 1) happens inside the
@@ -1541,7 +1558,7 @@ namespace m2ftg
 			//
 			// THE TAKE IS RATE-LIMITED FOR A SHARPER REASON THAN THE SEND. The plugin queues
 			// received packets in order so no one-frame state is discarded on the way in - but
-			// `DeliverCommPayload` lays down whatever `s_peerPacket` holds, and the ROM reads the
+			// `StageCommPayload` lays down whatever `s_peerPacket` holds, and the ROM reads the
 			// comm window ONCE per board frame. Taking a packet per module_main call therefore
 			// overwrote s_peerPacket two or three times between reads and showed the ROM only the
 			// last of them, which is the same discard the queue exists to prevent, just moved
@@ -1560,8 +1577,8 @@ namespace m2ftg
 			s_lastSentSeq = seq;
 			LinkSendMark();
 
-			// Nothing arrived: keep the packet we already have. Delivery is DeliverCommPayload's
-			// job, and it happens after the module's transfer rather than here - see there.
+			// Nothing arrived: keep the packet we already have. Delivery is StageCommPayload's job,
+			// and it happens just before the module's transfer rather than here - see there.
 			net::LinkSend(outgoing, OmgRva::COMM_PAYLOAD);
 			if (net::LinkTake(s_peerPacket, OmgRva::COMM_PAYLOAD) != OmgRva::COMM_PAYLOAD)
 			{
@@ -1572,32 +1589,42 @@ namespace m2ftg
 			(LinkPacketStamped(s_peerPacket) ? s_pktStamped : s_pktUnstamped)++;
 		}
 
-		// THE RECEIVE HALF, and its position in the frame is the whole point.
+		// THE RECEIVE HALF — and it is the MODULE that performs the delivery, not this function.
 		//
-		// Called from the link-transfer shim IMMEDIATELY AFTER the module's own transfer and before
-		// either board's CPU steps, because the module's transfer is a writer into the very window
-		// this fills. On a one-board cabinet it copies board 1's send buffer - never executed, all
-		// zeros - straight over the peer's packet, and the ROM then stages 0x700 zero bytes and
-		// rejects them (0x0000 against 0xAE5E). That is precisely what was measured: valid stamped
-		// packets sitting in comm RAM frame after frame, `stage=0000/0000`, `rx=FF`, and cRecn
-		// never written once in a 1200-frame run on either cabinet.
+		// The remote cabinet is board 1. Its comm block exists, its send buffer is real memory, and
+		// the module's own per-frame transfer (`FUN_18006A310`) already copies that buffer into
+		// board 0's RECV[0] slot - into the bank board 0 is not reading, then flipping the selector
+		// so it is - and raises bit7 (data ready), which is what `Net_check` step 9 waits for. The
+		// only reason board 1's packet is normally garbage is that its i960 never runs to write one.
+		// So YAMP writes it, and the entire delivery protocol comes from the module.
 		//
-		// BOTH BANKS, deliberately, and no flag poke at all. The bank the i960 reads is the module's
-		// business - its transfer toggles the selector on its own schedule, and YAMP's attempts to
-		// drive bit0 were simply overwritten - so writing both removes the question instead of
-		// answering it. Nothing is lost by doing so: the two banks exist to stop a DMA tearing
-		// against a CPU read, and YAMP writes between emulated instructions where no tear is
-		// possible. bit7 (data ready) is left to the module's transfer, which sets it every frame
-		// and is what `Net_check` step 9 is waiting for.
-		static void DeliverCommPayload()
+		// Called from the link-transfer shim IMMEDIATELY BEFORE that transfer and before either
+		// board's CPU steps. Position is still the whole point, just inverted: the transfer READS
+		// this buffer, so the packet has to be resident when it runs.
+		//
+		// THE BANK IS THE MODULE'S ANSWER, NOT A GUESS. The transfer sources board 1's packet from
+		// bank `P2flag & 1`, and this reads that same byte one C statement earlier with no emulated
+		// instruction in between - so the single correct bank is knowable rather than something to
+		// hedge against. This is what replaced writing BOTH banks of board 0's RECV[0] after the
+		// fact: that hedge existed only because YAMP was writing the transfer's OUTPUT, where the
+		// selector had already moved on and YAMP's attempts to drive bit0 were overwritten.
+		//
+		// RESIDENCY IS FREE NOW. Nothing in the module ever writes a send buffer (measured: the only
+		// references to 0x1807CC738 are the three reads inside the transfer), so an un-refreshed
+		// packet simply stays and keeps being delivered - which is what a DPRAM does between
+		// arrivals, and it means a dropped datagram still costs nothing.
+		static void StageCommPayload()
 		{
-			if (!s_peerHave || g_dllBase == nullptr || s_cabinetRole == 0)
+			// In `-von-2board` the second board really is running and really is producing packets,
+			// so its send buffer belongs to its i960 and must not be written over. That mode is the
+			// local two-cabinet experiment; it has no wire.
+			if (!s_peerHave || g_dllBase == nullptr || s_cabinetRole == 0 || WantTwoBoardMode())
 			{
 				return;
 			}
-			uint8_t* const block = g_dllBase + OmgRva::COMM_P1;
-			memcpy(block + 0x2700, s_peerPacket, OmgRva::COMM_PAYLOAD);
-			memcpy(block + OmgRva::COMM_BANK + 0x2700, s_peerPacket, OmgRva::COMM_PAYLOAD);
+			const size_t bank =
+				(*(g_dllBase + OmgRva::COMM_P2_FLAG) & 1) ? OmgRva::COMM_BANK : 0;
+			memcpy(g_dllBase + OmgRva::COMM_P2_SEND + bank, s_peerPacket, OmgRva::COMM_PAYLOAD);
 		}
 
 		static void DriveCommFirmware()
@@ -1825,12 +1852,18 @@ namespace m2ftg
 			s_lastMode = mode;
 
 
-			// WHERE THE PEER'S PACKET IS AT THE END OF A HOST FRAME. Three points along the path it
+			// WHERE THE PEER'S PACKET IS AT THE END OF A HOST FRAME. Four points along the path it
 			// takes, so a failure names its own cause instead of leaving a choice of suspects:
 			//
-			//   data0/data1  the emulated comm RAM's receive window, BOTH banks - what YAMP wrote
+			//   b1snd        board 1's send buffer - what YAMP STAGED for the module to deliver
+			//   data0/data1  the emulated comm RAM's receive window, BOTH banks - what the MODULE's
+			//                own transfer put there out of b1snd
 			//   stage        guest 0x501CE0, what the ROM's own memcpy picked up out of it
 			//   cRecn        only written if the ROM accepted it
+			//
+			// The first two split the delivery in half, which is the point of logging b1snd at all:
+			// a valid pair in b1snd and zeros in data0/data1 means the module's transfer did not run
+			// or sourced the other bank, and an empty b1snd means nothing was staged.
 			//
 			// Each is the packet's <seq>/<check> pair, and the pair is self-validating: a live
 			// packet has check == seq ^ 0xAE5E, so a glance says whether what is sitting there is a
@@ -1842,10 +1875,16 @@ namespace m2ftg
 				snprintf(out, n, "%04X/%04X%s", seq, check,
 					check == static_cast<uint16_t>(seq ^ OmgRva::PKT_CHECK_XOR) ? "*" : "");
 			};
-			char data0[16], data1[16], stage[16], send0[16], send1[16];
-			pair(g_dllBase + OmgRva::COMM_P1 + 0x2700, data0, sizeof(data0));
-			pair(g_dllBase + OmgRva::COMM_P1 + OmgRva::COMM_BANK + 0x2700, data1, sizeof(data1));
+			char data0[16], data1[16], stage[16], send0[16], send1[16], b1snd[16];
+			pair(g_dllBase + OmgRva::COMM_P1 + OmgRva::COMM_RECV0, data0, sizeof(data0));
+			pair(g_dllBase + OmgRva::COMM_P1 + OmgRva::COMM_BANK + OmgRva::COMM_RECV0,
+				data1, sizeof(data1));
 			pair(I960At(g_dllBase, 0, 0x501CE0), stage, sizeof(stage));
+			// Whichever bank the module will source board 1's packet from next transfer - the same
+			// selector StageCommPayload writes through, so the two cannot drift apart in the log.
+			pair(g_dllBase + OmgRva::COMM_P2_SEND
+				+ ((*(g_dllBase + OmgRva::COMM_P2_FLAG) & 1) ? OmgRva::COMM_BANK : 0),
+				b1snd, sizeof(b1snd));
 			// And the OUTGOING window, both banks. `tx` above is what the ROM stamped into cSend;
 			// these are where that landed once its own memcpy put it in comm RAM, which is what
 			// decides whether the bank YAMP transmits from is the one the ROM just wrote.
@@ -1859,12 +1898,12 @@ namespace m2ftg
 			net::Logf("[von] f=%d %s | net=%u id=%u node=%u/%u main=%u "
 				"tx=%02X rx=%02X vs=%u sel=%u field=%u stage tx=%04X rx=%04X | "
 				"seq tx=%04X rx=%04X | stamped=%u unstamped=%u | "
-				"flag=%02X send0=%s send1=%s data0=%s data1=%s stg=%s xfer=%u",
+				"flag=%02X send0=%s send1=%s b1snd=%s data0=%s data1=%s stg=%s xfer=%u",
 				frame, verdict,
 				netFlag, linkId, nodeId, nodes, mode,
 				txState, rxState, versus, stageSel, fieldNo, txStage, rxStage,
 				txSeq, rxSeq, s_pktStamped, s_pktUnstamped,
-				*(g_dllBase + OmgRva::COMM_P1_FLAG), send0, send1, data0, data1, stage,
+				*(g_dllBase + OmgRva::COMM_P1_FLAG), send0, send1, b1snd, data0, data1, stage,
 				CommReset::s_transfers);
 		}
 

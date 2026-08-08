@@ -1,5 +1,129 @@
 # Virtual On (`omg`) netplay
 
+## *** THE MODULE ALREADY DELIVERS IT — `StageCommPayload` replaces `DeliverCommPayload` (2026-08-08) ***
+
+Prompted by the Sega Racing Classic 2 result (`pre3` turned out to contain a complete emulated Model 3
+comm board), the `omg` DLL was re-read to see whether Virtual On's link had been hand-rolled the same
+way. **It had been, in one half.** The comm board in this module is split, and the two halves need
+opposite treatment:
+
+**The DEVICE half is complete, and more of it is there than this file records.**
+
+- The access handlers are a whole family at `0x18006A580`–`0x18006AA03` — 8/16/32/64/96/128-bit reads
+  and writes. Only two of them are *named functions* in Ghidra (`FUN_18006A5F0`, the 16-bit read, and
+  `FUN_18006A790`, the 8-bit write); **the other nine are orphan instruction runs Ghidra never turned
+  into functions**, which is why earlier sweeps of this DLL never saw them. They all decode
+  identically: `btr edx,0x14` (the uncached mirror), guest `0x1A10000`–`0x1A13FFF` → DPRAM at bank
+  `flag & 1`, `0x1A14000` → `CommBoardReset`, `0x1A14002` → the flag register. Nothing but DPRAM
+  access — the firmware boot response lives only in the 8-bit write.
+- **`FUN_18006A310` is a complete linked-cabinet exchange**, called once per frame from the frame
+  driver `FUN_180073910` at `0x180073931` — the site YAMP already hooks, and **its only caller**.
+  It performs four 0x700 copies:
+
+| source | destination | meaning |
+|---|---|---|
+| P1.send[bank] | P2 + 0x2700 [~bank] | board 0's packet → board 1's RECV **slot 0** |
+| P1.send[bank] | P1 + 0x2E00 [~bank] | board 0's own echo → **slot 1** |
+| P2.send[bank] | P1 + 0x2700 [~bank] | board 1's packet → board 0's RECV **slot 0** |
+| P2.send[bank] | P2 + 0x2E00 [~bank] | board 1's own echo → **slot 1** |
+
+  then toggles bit7 (data ready) and bit0 (bank select) on both flag registers. Each copy targets the
+  bank its destination is *not* reading, and the flip is what makes it current. **So the slot layout,
+  the double-buffering and the data-ready flag are the module's protocol** — the same
+  "the wire format is the module's, not ours" arrangement as SRC2's `CXComm`.
+
+**The FIRMWARE half is a genuine stub, and `DriveCommFirmware` is not reinvention.**
+`FUN_18006A790`'s boot response writes ring-up / node-count as immediates and node id as
+`board_index + 1`, latched at `+0x8004` so it fires once per reset cycle, and **nothing in the DLL
+ever touches those bytes again**. No socket imports at all. No HLE hook covers any of it either — the
+`resetCommBoard` / `getCommStatus` strings in the DLL are ROM symbol labels on **Inert** hook records
+(`VonHooks.inc` 128-133). Same for the reset-semantics shim: the transfer toggles bit7 every frame
+regardless of whether the ROM has released the board.
+
+### What changed in the code
+
+`DeliverCommPayload` wrote the peer's packet into board 0's RECV[0] in **both banks**, *after*
+`g_origLinkTransfer()`, deliberately not touching bit0/bit7. `StageCommPayload` writes it into
+**board 1's SEND buffer** (`0x1807CC738`, +0x4000 for the second bank) *before* the transfer, and the
+module delivers it. Three things fall out:
+
+- **The bank stops being a hedge.** The transfer sources board 1's packet from bank `P2flag & 1`, and
+  the staging reads that same byte one C statement earlier with no emulated instruction in between —
+  so the correct bank is *knowable*. Writing both banks was only ever necessary because YAMP was
+  writing the transfer's OUTPUT, downstream of a selector that had already moved on.
+- **bit7 is not a coincidence any more.** It was already the module's transfer that raised it; now
+  the packet and the flag are raised by the same operation instead of two that happen to agree.
+- **Residency is free.** Nothing in the module writes a send buffer — measured: the only references
+  to `0x1807CC738` are the three reads inside `FUN_18006A310` — so an un-refreshed packet stays put
+  and keeps being delivered. That is what a DPRAM does between arrivals, and it is why a dropped
+  datagram still costs nothing. The old code had to *re-lay* the packet every transfer to get this.
+
+Guarded off under `-von-2board`, where board 1 genuinely runs and owns its own send buffer.
+
+### IS THAT EVERYTHING? — the exhaustive list of comm-board code in the DLL
+
+Asked directly, and answered by enumeration rather than by spot-check. **Four things in the whole
+module touch the comm board**, and the xrefs close it: the block pointer `DAT_1807C2728`, both block
+bases, both flag registers and the RECV[0] slot have no referrers outside this list.
+
+| | what it is |
+|---|---|
+| `FUN_180069D30` | the bank switch. Sets the current block pointer to `0x1807C2730 + board*0x8008` — **two blocks, hardcoded**. There is no N-node model and no third block. |
+| `FUN_180069E80` | per-board reset: `memset(block, 0, 0x8000)`, presets the register pair to `0x7EFE`, clears the firmware-booted latch at `+0x8004`. |
+| `FUN_18006A310` | the per-frame transfer, above. **The sole writer of either flag register in the entire DLL.** |
+| `0x18006A580`–`0x18006AA03` | the eleven access handlers. Only the 8-bit write carries the firmware boot response; the other ten are plain DPRAM. |
+
+That resolves the three things YAMP still owns, two of them in the module's favour:
+
+- **`DriveCommFirmware` writing the status bytes to BOTH banks is the module's own discipline, not a
+  YAMP hedge.** `FUN_18006A790`'s boot response writes byte0/2/3 into `(flag&1)*0x4000` *and*
+  `(~flag&1)*0x4000` — both banks, explicitly. Keep it.
+- **The reset-semantics shim has no module equivalent and cannot have one.** The transfer toggles
+  bit7 every frame with no regard for the reset register, and nothing else writes the flag at all.
+- **The continuous status has no module equivalent either.** The `+0x8004` latch makes the boot
+  response fire once per reset cycle and never again.
+
+One candidate change was examined and **rejected on evidence**: the module's reset preset for the
+flag byte is `0x7E`, where YAMP's shim pins `0`. Every ROM read of `0x1A14002` masks bit 7 alone —
+`setbit 7,0` + `and` at `0xC58D4`, `chkbit 7` at `0xC59FC`, `bbc 7` at `0xC5C88` — so bits 1-6 are
+never read and the difference is unobservable. Not worth touching a live-verified path for.
+
+And there is no host-provided slot to fill: `m2ftg_execute_info_t` has no analogue of SRC2's
+`p_work_ptr[0..2]`. **That ABI has no comm hooks at all**, which is exactly why Virtual On needed a
+host-side firmware and Sega Racing Classic 2 did not.
+
+### VERIFIED ON TWO MACHINES (2026-08-08)
+
+RPCN room 103, host = MASTER (`yamptest`), joiner = SLAVE (`yamptest2`) launched over PsExec into
+session 2 of DESKTOP-GHRIIHN. Both cabinets reached `LINKED - accepting the peer's packets`,
+`net=1`, `node=1/2` and `2/2`, and walked the handshake through to a match — `main=4 tx=31 rx=31
+vs=1` with **`sel=3 field=3` on both**, the joiner rolling the stage (`stage tx=0003`) and the host
+adopting it (`stage rx=0003`). `stamped=5994 unstamped=1` on the host over ~6000 frames.
+
+The delivery is visible working in the new probe field, and it tracks the module's bank flip exactly:
+
+```
+f=5760  flag=81  b1snd=AEBD/00E3*  data0=AEBD/00E3*  data1=6940/C71E*  stg=6940/C71E*
+f=5880  flag=00  b1snd=0F40/A11E*  data1=0F40/A11E*  data0=AE1D/0043*  stg=AE1D/0043*
+```
+
+`b1snd` — what YAMP staged — appears verbatim in `data0` when the flag selects bank 1 and in `data1`
+when it selects bank 0, i.e. always in the bank the reader is *not* on, which is precisely what
+`FUN_18006A310` is specified to do. `stg` (the ROM's own memcpy out of the window) is the previous
+packet, one board frame behind, and every pair carries the `*` self-consistency stamp.
+
+**Status: builds clean, verified on two machines.** The `[von]` probe grew a `b1snd=` field
+(the staged packet's seq/check pair) next to `data0=`/`data1=`, which splits the delivery in half: a
+valid pair in `b1snd` with zeros in `data0/data1` means the transfer did not run or sourced the other
+bank; an empty `b1snd` means nothing was staged. The sections below describe the previous
+(`DeliverCommPayload`) arrangement and are kept because the reasoning that produced it still holds.
+
+**A note on why nine of the eleven access handlers were invisible.** They are Ghidra ORPHAN RUNS —
+disassembled instructions that were never turned into functions, so `/decompile` cannot see them and
+a function-name sweep does not list them. They only surfaced through `xrefs_to` on the block pointer,
+which reports the raw address with no enclosing function name. **When a sweep of this DLL comes back
+"nothing else touches X", check `/loose_code` for the address range before believing it.**
+
 ## *** THE LINK RUNS OVER RPCN (2026-08-07) ***
 
 Two machines, an RPCN room, and the cabinets link with **no direct address configured anywhere**.
