@@ -242,18 +242,29 @@ namespace net
         bool s_sessionEnded = false;
 
         // Copies the whitespace-delimited token following `flag` out of the command line.
+        //
+        // THE MATCH MUST END AT A SPACE. No pair of the flags below collides today, but the moment
+        // one is a PREFIX of another a plain substring search finds the longer one and reads the
+        // rest of its NAME as a value - quietly, with a plausible-looking result. That is the same
+        // trap Main.cpp documents twice, for `-fv` against `-fv2` and `-vf5fs` against `-vf5fs-lj`,
+        // and it costs four lines to make impossible here rather than to remember later.
         bool ArgStr(const wchar_t* cmd, const wchar_t* flag, char* out, size_t cap)
         {
-            const wchar_t* at = wcsstr(cmd, flag);
-            if (!at)
-                return false;
-            at += wcslen(flag);
-            while (*at == L' ') ++at;
-            size_t n = 0;
-            while (*at && *at != L' ' && n + 1 < cap)
-                out[n++] = static_cast<char>(*at++);   // ASCII: hosts, npids and hex only
-            out[n] = '\0';
-            return n != 0;
+            const size_t flagLen = wcslen(flag);
+            for (const wchar_t* at = wcsstr(cmd, flag); at != nullptr;
+                 at = wcsstr(at + flagLen, flag))
+            {
+                const wchar_t* after = at + flagLen;
+                if (*after != L' ' && *after != L'\0')
+                    continue;   // a longer flag that merely starts the same way
+                while (*after == L' ') ++after;
+                size_t n = 0;
+                while (*after && *after != L' ' && n + 1 < cap)
+                    out[n++] = static_cast<char>(*after++);   // ASCII: hosts, npids and hex only
+                out[n] = '\0';
+                return n != 0;
+            }
+            return false;
         }
     }
 

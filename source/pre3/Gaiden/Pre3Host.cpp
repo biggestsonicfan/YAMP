@@ -990,6 +990,18 @@ namespace pre3
 		// taken depend on the player, which is exactly what must not vary. Self-limiting - see
 		// SaveResetSnapshot.
 		SaveResetSnapshot();
+
+		// THE ROOM'S ANSWER TO "WHAT IS THIS CABINET", applied to a board that is already running.
+		// Immediately after Drive() because that is what makes the room state current, and
+		// immediately after SaveResetSnapshot because the snapshot is what it reboots into - on the
+		// very first running frame both happen in that order, which is the only ordering where a
+		// room that formed while the board was still booting is handled at all.
+		//
+		// A no-op on every frame but the one after a room forms or dissolves, and on every game but
+		// Sega Racing Classic 2. See CommBoard::DriveRoomRole for why a linked cabinet has to be
+		// REBOOTED into its role rather than simply told about it.
+		CommBoard::DriveRoomRole();
+
 		// Step() also overwrites BOTH pads in execute_info with the transmitted inputs, which is
 		// why it runs after the local pad fill above: whatever csl_pad produced is a local
 		// prediction that the network's copy must replace, or the two machines simulate different

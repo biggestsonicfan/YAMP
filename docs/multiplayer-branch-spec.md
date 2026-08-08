@@ -67,9 +67,11 @@ Practical consequences a reimplementer must respect:
 | `-vf5fs` | VF5: Final Showdown | Yakuza 6 | Y6 | DX11on12 | `vf5fs/Y6` |
 | `-vf5fs-lj` | VF5: Final Showdown | Lost Judgment | LJ | DX12 | `vf5fs/LJ` |
 | `-vf5fs-ylad` | VF5: Final Showdown | Yakuza: Like a Dragon | YLAD | DX11 | `vf5fs/YLAD` |
+| `-fv2` | Fighting Vipers 2 | Like a Dragon Gaiden | LJ | DX12 | `pre3/Gaiden` |
+| `-src2` | Sega Racing Classic 2 (Daytona USA 2) | Like a Dragon Gaiden | LJ | DX12 | `pre3/Gaiden` |
 | *(no argument)* | Game-select launcher | — | — | — | `GameLauncher` |
 
-Only `-vf5fs` existed at the baseline. **Nine playable titles** exist at the tip.
+Only `-vf5fs` existed at the baseline. **Eleven playable titles** exist at the tip — the last two on a different arcade board entirely (Model 3, §9.7).
 
 ### 2.2 Feature areas added
 
@@ -636,6 +638,28 @@ Host-relevant differences from LJ and YLAD, each found by **running and reading 
 **Still unchecked:** Model 2 boards commonly carry a country jumper on the I/O board, read through the I/O port window rather than backup RAM or the config block. That would sit outside all six checks above. If a Japanese *graphic* ever needs explaining, that and the texture ROMs are where to look — not the program ROM.
 
 
+### 9.7 `pre3` — the Model 3 host family (a sibling of `m2ftg`, not part of it)
+
+> Numbered inside §9 to avoid renumbering §10-18. It is a **separate family**: a different arcade board, a different module, a different protocol. Its own reconnaissance lives in `docs/pre3-model3-support.md`, `docs/pre3-netplay.md`, `docs/pre3-hle-hooks.md`, `docs/src2-hle-hooks.md` and `docs/src2-netplay-recon.md`; only what §14.11 needs is summarised here.
+
+**One module, six games, two reachable.** Like a Dragon Gaiden ships `pre3-pxd-w64-d3d12_retail.dll`, a **Model 3** emulator (PowerPC 603e + Real3D), on the same LJ `pxd` generation as `m2ftg/LJ` — so it reuses the whole `pxd/LJ` platform layer and the DX12 renderer, and only the arcade half is new. Of its six ROM classes, `-fv2` (Fighting Vipers 2) and `-src2` (Sega Racing Classic 2, the Daytona USA 2 engine) are playable from a stock install.
+
+| | Fighting Vipers 2 | Sega Racing Classic 2 |
+|---|---|---|
+| Netplay mechanism | **lockstep** (§14.3-14.9) | **linked cabinet** (§14.11) |
+| ROM class | `M3ERomFv2` | `M3ERomSrc2`, which *embeds a real comm board* |
+| Round start | the module's own `vs_start.bin` savestate | n/a — cabinets link at boot and stay linked |
+
+**`source/pre3/`** — `Gaiden/Pre3Host.cpp` (the host loop), `HleHooks` (decoded-trace substitution, **not** ROM patching), `Determinism`, `CommBoard`, `ArcadeSettings`, `SystemSwitches`, `SecurityBoard`, `BoardVtables`, `Patch`, `NetSession`.
+
+Three pieces §14.11 depends on directly:
+
+- **`Determinism`** owns the machine. `IsBoardBooted()` (phase word `machine+0x88` reaching `0x10`), and two different resets driven through the module's own request bitfield at `machine+0x120`, which the frame step drains at the top of every frame: bit 4 restores a **preloaded** state (FV2's shipped VS start), bit 0 saves and bit 1 restores YAMP's **power-on snapshot**. That snapshot is requested on the first host frame that sees the machine RUNNING — the board has reached its terminal phase but **has not stepped a single guest frame** — so what it captures is the pristine pre-boot machine, and restoring it makes the guest re-run its entire boot chain. Requested unconditionally for every pre3 game, because making *when* it was taken depend on whether a session happened to be up is exactly what must not vary.
+- **`ArcadeSettings`** writes the board's GAME ASSIGNMENTS rows the module's own injector cannot reach, into both copies (working at guest `0x100180`, NVRAM at `0x72629C`). It applies once and then **latches**, leaving the rows to the game's service menu — `Reset()` re-arms it.
+- **`SystemSwitches`** funnels TEST/SERVICE and the 8-channel ADC ring through `M3EInput::read_port`, sampled at read time, which is also what the hardware does.
+
+**The emulator runs on its own thread** (`m3e_ctrl`), reachable only via `machine+0x148`. Every host-thread read of board state races it; `WaitForEmulatedFrame` is the only coherent sampling point, and **using it unconditionally is itself a bug** — it puts the host loop in lockstep with the worker and took a board from ~395 draws a frame to 8.
+
 ---
 
 ## 10. The VF5FS hosts
@@ -862,11 +886,11 @@ YAMP.exe                                     yampnet.dll (optional)
     ▲ driven by LJ/LJHost.cpp (StF, FV) and YLAD/VF2.cpp (VF2)
 ```
 
-**Two mechanisms, not one.** Everything in §14.3-14.9 is the lockstep path, which is what StF, FV, VF2 and the Model 3 games use. **Virtual On uses none of it** — it is a *linked-cabinet* game whose hardware already has a link protocol, so YAMP carries that protocol's own bytes and lets the ROM do the synchronising. No barrier, no seed, no frame numbering, no determinism requirement. §14.10 is that path; the two share only the session, the room and the socket.
+**Two mechanisms, not one.** Everything in §14.3-14.9 is the lockstep path, which is what StF, FV, VF2 and Fighting Vipers 2 use. **Virtual On and Sega Racing Classic 2 use none of it** — it is a *linked-cabinet* game whose hardware already has a link protocol, so YAMP carries that protocol's own bytes and lets the ROM do the synchronising. No barrier, no seed, no frame numbering, no determinism requirement. §14.10 is that path on Model 2 and §14.11 the same idea on Model 3; the lockstep and linked-cabinet paths share only the session, the room and the socket.
 
 **Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
 
-### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 9`)
+### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 10`)
 
 Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exported symbol**, `YampNet_GetApi(uint32_t requested_abi)`, returning a `yampnet_api` function table, so the loader does exactly one `GetProcAddress` and every later addition is a version bump rather than a new symbol.
 
@@ -881,6 +905,7 @@ Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exp
 - ABI 3 added **desync detection**: `submit_state_check(session, frame, value)` and `get_desync(session, &frame, &local, &remote)`. Lockstep guarantees identical *inputs*; it cannot guarantee the two emulators agree on what those inputs produced. The value YAMP submits is the ROM's own `frame_counter` at emulated `0x500020`, which advances exactly once per emulated frame and is therefore free of timing noise. The plugin carries the most recent one on every input packet. `get_desync` is **latched** — only the *first* disagreement is reported, because everything after it is a consequence rather than a cause.
 - ABI 7/8 concern the **match seed**: 8 strengthens *when* `get_match_seed` is promised valid (from `IN_ROOM`, not `SYNCING`) and adds the host's `kPacketSeed` heartbeat, because a guest that pressed Start before the host had published anything seeded its emulator with 0.
 - ABI 9 added the **linked-cabinet channel** — `link_ready` / `link_send` / `link_take` — see §14.10. Appended to the table and adding no struct, but a bump all the same: a stale plugin simply would not have the three entries, and calling through a null tail pointer is not a failure mode worth allowing.
+- ABI 10 changed **no signature at all** — it changed the linked-cabinet channel's WIRE format to an RLE-coded payload (§14.10). The function table is untouched, so the bump exists purely to stop a `YAMP.exe` and a `yampnet.dll` from different builds pairing up: they would agree on every call and disagree on the bytes. Note what a version cannot do here — it guards YAMP against ITS plugin, not one machine against another. **Two peers still have to be updated together.**
 - ABI 6 added **room game flags**: `yampnet_room_config::game_flags` (in), `yampnet_room_info::game_flags` (out, per browser row) and `get_room_flags(session)`. These carry the **cabinet settings a match is played under**, which are properties of the *room*, not of a machine — see §14.9.
 
 > **Adding a flag BIT is not an ABI change.** The plugin carries `game_flags` verbatim between the
@@ -1226,6 +1251,82 @@ The packet's own fields, all decoded from the ROM:
 
 **Status.** Verified on two machines over RPCN: both cabinets reach "Network Check Success", exchange the ROM's payload continuously, run the versus handshake, agree on a stage and play a match through. Untested: real internet RTT and jitter — the LAN figures say nothing about either.
 
+### 14.11 The linked-cabinet path — Sega Racing Classic 2, on Model 3 (2026-08-08)
+
+**The same idea as §14.10 and almost none of the same work**, because on this board the module already emulates the comm hardware. `M3ERomSrc2` **embeds a `CXComm` subobject at `rom+0x588`** with two 64 KB banks — the reason SRC2 and Spikeout allocate 0x20610 bytes where every other game in the module allocates 0x5E0 — and the guest's `0xC0xxxxxx` window reaches it live:
+
+```
+guest 0xC0xxxxxx -> CM3Mem window entry 9 -> the device pointer at mem+0x360, which
+                    CM3Mem::init fills with the ROM OBJECT -> M3ERomSrc2 vtable slots
+                    10-13 -> rom+0x588, the CXComm banks, byte-swapped and addressed ^ 2
+```
+
+This is the exact opposite of Virtual On, where the module's comm firmware was a stub and `K2Host` had to *drive* one (`DriveCommFirmware`). Worth stating because the **same game contains the opposite arrangement**: SRC2's security board (slots 2/3) *is* a stub that returns 0 and discards writes, and that stub is why two of its HLE hooks exist at all.
+
+**So the wire format is the module's, not YAMP's.** `FUN_180035BA0` runs once per emulated frame from SRC2's own per-frame task and moves bytes through three pointers the host puts in `execute_info.p_work_ptr[0..2]` — three nullable slots YAMP had always left null, which is the entire reason nothing ever linked:
+
+| slot | meaning |
+|---|---|
+| `p_work_ptr[0]` | **TX array** — the board copies its outgoing packet *into* it, at slot `[nodeId]` |
+| `p_work_ptr[1]` | **RX array** — the board copies every node's packet *out* of it, indexed by node |
+| `p_work_ptr[2]` | a **u64 rendezvous word**, shared between all cabinets |
+
+Both arrays are `nodeCount * packetSize`, and **packetSize is a register the GUEST programs** (`0xC0020808` → `comm+0x20024`; SRC2 chooses 848). The host never picks it, which is why `CommBoard`'s buffers are sized for the largest a bank can hold rather than for an expected value — the module memcpys with a length YAMP does not control.
+
+**The rendezvous word is four bit-fields in one, and the groups are DIRECTIONAL.** Getting this backwards is not a subtle failure:
+
+| bits | direction | meaning |
+|---|---|---|
+| `0 .. n-1` | host → module | node *i*'s packet is present in RX. Transfer state 3 counts these |
+| `16 .. 16+n-1` | host → module | node *i* has finished booting. The machine's **boot barrier** counts these |
+| `nodeId+0x20` | module → host | this node answered the guest's `0xF000` ready command |
+| `nodeId+0x30` | module → host | this node has finished booting |
+
+The module never signals itself through it: it **reports** in the high groups and **waits** on the host in the low ones, because the host is what knows about the others. Setting `0x30` where the module reads `0x10` stalls the board before its running phase — 800 frames, zero draws, no other symptom. Both waits are spelled as an early return out of the frame, which is what makes this path need no lockstep, no barrier, no seed and no determinism contract.
+
+#### The role comes from the ROOM, and the board is REBOOTED into it
+
+`CommBoard::Configure()` runs **once**, immediately before `module_start`, because that is where the module latches the node id and peer count out of the config block and never re-reads either. An RPCN room does not exist at that instant and cannot be made to — connect, TLS, login, discovery and create/join are seconds of round trips. So "ask the room what this cabinet is" answered *no room* on every launch and the cabinet silently came up STAND-ALONE, every time.
+
+**Guessing the role earlier from the launch flags is the wrong fix** and was rejected: a room is what decides it, and a player who joins from the lobby never touched a launch flag. `CommBoard::DriveRoomRole()` (once per host frame, from `Pre3Host`) changes it *afterwards*, and every mechanism it uses is the module's own:
+
+1. **write the config globals** — `+0x100C` node id, `+0x1010` peer count. The comm board re-latches both when its state machine passes back through state 1, which the guest does for itself during boot by writing 0 to `0xC0010180`.
+2. **`ArcadeSettings::Reset()`** — re-arms the LINK ID row. The restore is about to wipe the guest RAM both copies live in, and without this the rebooted board reads back the SINGLE it powered on with and its check returns before printing anything.
+3. **`RestoreResetSnapshot()`** — the power-on snapshot of §9.7, so the guest re-runs its whole boot chain including the network check `FUN_00093DB4`.
+
+Virtual On does the equivalent by pulsing TEST, because its ROM re-enters `Net_check` on operator-menu exit. **SRC2's check is called once from the boot chain and nothing re-enters it**, so the equivalent here is bigger and, usefully, more literal: put the board back to power-on and let it boot again.
+
+> `s_appliedRole` is deliberately a **separate variable** from `s_nodeId`: the first is what the guest last BOOTED as, the second what the host currently wants it to be. Collapsing them would make the role change believe its work was done the instant it asked for it — the same mistake §14.10's `ApplyCabinetRole` documents from the other direction.
+
+**A cabinet with no room is untouched.** A plain `-src2` launch emits no `[SRC2 link]` line at all, leaves `Src2LinkId` at whatever the operator set, and its check runs SINGLE.
+
+#### Three wire defects that shared memory structurally could not expose
+
+Like a Dragon Gaiden runs its own cabinets in one process against literal shared memory, so `Mode::Shared` (a named section, both instances mapping it, TX and RX the *same* array) is not a model of the link — it *is* the link, and it linked cleanly. It also hides everything about delivery. Over a real wire:
+
+- **The plugin de-dupes byte-identical link payloads** (`LinkPush`), which is right for Virtual On — it rate-limits itself to one datagram per board frame — and wrong here, where the host transmits every host frame and needs every transmission to count as a sign of life. A cabinet whose packet has not changed is not a cabinet that has gone away, but with the de-dupe in the way it looks like one: nothing arrives, the staleness window expires, the peer's ready bit is cleared, and the board waits forever for a peer that is transmitting perfectly. Fixed with a **`seq` byte that moves every frame** — which leaves the three REDUNDANCY copies of one datagram byte-identical, so they still collapse to one. That is exactly the split wanted.
+- **The RX slot was indexed by the SENDER's packet size**, where the module reads that array as `rx + ourPacketSize * i`. The two agree in every healthy session, so it worked and would have gone on working right up until they disagreed — at which point the peer's data lands at an offset the board never reads, and the symptom is a silent peer on a link with traffic on it.
+- **`STALE_FRAMES` was 6**, which under shared memory could never fire. Over a wire the two cabinets do not run at the same rate — measured ~2.4:1 between a debug build with probes on and one without — so a window measured in OUR frames has an unknown length in THEIRS. Now 30. Liveness is also no longer tied to the peer having programmed a packet size: any valid datagram refreshes the clock, because "is the peer there" and "has the peer's guest programmed a size yet" are unrelated facts.
+
+**The wire header** is 8 bytes — magic, node, flags (`ready`/`ack`/`booted`, the sender's own contribution to the rendezvous word, re-expanded into the peer's positions on arrival), the `seq` byte, size, and the board's own transfer counter for the log. Carrying the flags rather than inferring them is what lets the **boot barrier** work at all: the module sets its own bit `0x30` and waits for everyone's, and no other channel exists to learn that a peer has booted. **A packet size of zero is not a reason not to send** — the guest cannot programme a size until its board runs, the board cannot run until the barrier releases, and the barrier cannot release until each peer has heard the other has booted, which rides in this header. That is a deadlock if the header is withheld.
+
+#### Verified
+
+Two machines, a real RPCN room, `-net-host` / `-net-join <roomId>`:
+
+```
+MASTER  the boot network check ran as MASTER CONTROLLER (LINK ID = 1), settled on
+        id=1 nodes=2, net=0xE8 -> agreed on a ring
+SLAVE   the boot network check ran as SLAVE (LINK ID = 2), settled on
+        id=2 nodes=2, net=0xE8 -> agreed on a ring
+```
+
+Both held comm `state=4` for ~3500 frames with the wire up, and **both machines' RX arrays carried identical contents** — node 0's slot 227 non-zero bytes, node 1's 45-47, with matching per-frame churn on each side. The datagram is 856 raw bytes (8-byte header + the guest's 848), RLE-coded to 55-199 on the wire. Node results land at guest `0x10062A` (node COUNT) and `0x10062B` (this cabinet's id, 1-based) — measured from the pair, which is how they came out labelled backwards the first time.
+
+> **A direct-UDP transport was built for this and then removed.** Before RPCN was wired, the same `Mode::Link` path ran over a plain address pair (a `link_direct` ABI entry driving `Transport.h`'s `UdpTransport`), two instances on one machine over loopback. It reached `state=4` for 2300+ frames and passed the ROM's check on both cabinets — and it is what caught all three defects above, which is why the RPCN run then worked first try. It is **gone**, for §14.10's reason: a second transport that nothing tests is a second set of behaviours to keep true. It had one job — separating "does the game play linked over a real wire" from "does the RPCN client bring a peer pair up" — and it did it.
+
+**Diagnostics.** `[SRC2 link]` lines carry the comm state machine, node id/count, the guest's packet size, sequence, the rendezvous word, wire tx/rx counters per node and the peer's board sequence — three counters rather than one because they fail separately: *nothing sent* = this cabinet is not producing; *sent but nothing received* = the wire or the far end; *received but the peer's board sequence frozen* = the peer's process is alive and its BOARD is not transferring, which no other field distinguishes. `[SRC2 linkgate]` prints the ROM's own verdict on its boot check. Both are gated to change-plus-heartbeat; the frame-boundary probe (`YAMP_PRE3_SYNCPROBE`) records to a memory ring and dumps at teardown, because a `DebugLogFile` per frame was expensive enough to **change the outcome it was measuring**.
+
 ---
 
 ## 15. Settings file reference
@@ -1298,12 +1399,21 @@ Everything else described in this document is committed.
 - **Netplay credentials share `settings.ini`** with per-game settings, so resetting game settings destroys the account configuration. They belong in their own file.
 - **HLE hook hit-counters read 0 for VF2**, because the instruction-fetch hook that feeds them is LJ-only. Absent rather than wrong, but it looks broken in the settings panel.
 
-**Virtual On / linked-cabinet (§14.10), as of 2026-08-07:**
+**Virtual On / linked-cabinet (§14.10), as of 2026-08-08:**
 
-- **Untested beyond a LAN.** The link payload is 1808 bytes on the wire against a 1500-byte path MTU, so every datagram IP-fragments, and the exchange runs roughly twice per frame — about 200 KB/s each way. A LAN carries it; fragmented UDP is dropped far more readily on the open internet and a lost fragment loses the whole datagram. Two levers before internet play is worth attempting: send only when the ROM has stamped a NEW counter (the `+2` field makes that free to detect, and it roughly halves the rate), and delta-code against the last payload sent.
+- ~~**The payload fragments against a 1500-byte MTU** at ~200 KB/s each way.~~ **Done.** Both levers named here were implemented: the send is rate-limited to one datagram per board frame off the ROM's own `+2` stamp, and the payload is stateless byte-RLE coded. Datagram avg ~120 B, max 241 B, nothing fragments. The rate limit **reintroduced the stage desync** on its own — see the warning in §14.10 — which `kLinkRedundancy = 3` then fixed deliberately.
+- **Still untested beyond a LAN.** Real internet RTT and jitter say nothing that the LAN figures cover, and the ROM's protocol expects a partner one frame away on a serial ring.
 - **Input mapping for a linked match is unfinished** — the cabinets link and play, but which physical control reaches which pod has not been worked through.
 - **`SoftResetIntoRole` has never been driven from the settings UI at runtime**, only from a room join and from a direct call. Same code path, but the setting-change route is unexercised.
 - **The catch-up pacer is capped at 4 board frames** and drops the debt past that. A host that is persistently slower than 60 Hz therefore still runs slow, just less so; the cap exists because a long hitch repaid in one burst freezes the host.
+
+**Sega Racing Classic 2 / linked-cabinet on Model 3 (§14.11), as of 2026-08-08:**
+
+- **Nobody has driven a race.** Both cabinets reach and hold the linked running state over RPCN on two machines, with each ROM agreeing on a two-node ring — but two players actually driving is unexercised, and the CPU-car handoff (one cabinet simulates them and carries them to the other) with it.
+- **Untested beyond a LAN**, exactly as §14.10.
+- **The lobby path is unexercised.** `DriveRoomRole` accepts a room formed at any time, so F1 → Netplay should now work as well as `-net-host` / `-net-join` does. It has only been driven from the command line.
+- **Two cabinets only.** The plugin's link channel is point-to-point, so a ring of three or more is not expressible on it. `CommBoard`'s arrays and rendezvous groups are sized for `MAX_NODES` because the MODULE's are, not because this transport can fill them.
+- **No desync canary and no determinism contract**, by design — the ROM's own protocol does the synchronising. There is correspondingly nothing that would *tell* you the two cabinets had diverged; the guest-RAM digest in `CommBoard.cpp` is a manual diff tool, keyed on the guest's own frame counter at `0x737978` rather than the host frame (keying it on the host frame put the cabinets 29 guest frames apart and reported a desync on every run).
 
 ## 17. Suggested reimplementation order
 

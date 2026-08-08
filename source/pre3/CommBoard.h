@@ -115,6 +115,18 @@ namespace pre3
 			// A real peer over the netplay plugin's linked-cabinet channel (kPacketLink, the one
 			// Virtual On already uses). Our TX slot goes on the wire, the peer's packet lands in
 			// its RX slot, and the rendezvous bits follow the packets.
+			//
+			// WHICH TRANSPORT CARRIES IT IS NOT THIS FILE'S BUSINESS, and that separation is the
+			// point. `-net-link` arms the channel over a plain address pair - no server, no room,
+			// no NAT traversal - and an RPCN room arms the same channel over the same calls. So the
+			// wire protocol below is proven once, against the transport with the fewest ways to
+			// fail, and swapping in RPCN afterwards changes nothing here. Everything that goes
+			// wrong with RPCN (login, room scoping, signaling, punching) presents from the game as
+			// a link that never came up, which is precisely the confusion worth avoiding.
+			//
+			// TWO CABINETS. The plugin's channel is point-to-point, so a ring of three or more is
+			// not expressible on it - the arrays and the rendezvous groups here are written for
+			// MAX_NODES because the MODULE's are, not because this transport can fill them.
 			Link = 3,
 		};
 
@@ -128,11 +140,14 @@ namespace pre3
 		// single-player session is and what the board boots as.
 		//
 		// Sources, in priority order:
-		//   1. A NETPLAY ROOM. Hosting makes this machine the MASTER (node 0), joining makes it
-		//      the SLAVE (node 1) - `local_player` 0 = host, 1 = guest, the same rule Virtual On
-		//      uses and the same way two real cabinets are wired. A live link also takes over the
-		//      board's LINK ID row (see YAMPUserInterface), because the service-menu row and the
-		//      module's node id describe one fact and must not disagree.
+		//   1. A NETPLAY SESSION, which is either a room or a direct link and this file cannot
+		//      tell them apart - deliberately. Both publish a LOCAL PLAYER ID, and that id is the
+		//      whole of what the cabinet's role is read from: 0 makes this machine the MASTER,
+		//      anything else the SLAVE, the same rule Virtual On uses and the same way two real
+		//      cabinets are wired. `-net-link-node 0/1` therefore needs no case of its own here.
+		//      A live link also takes over the board's LINK ID row (see YAMPUserInterface),
+		//      because the service-menu row and the module's node id describe one fact and must
+		//      not disagree.
 		//   2. YAMP_PRE3_LINK, the harness, matching the YAMP_PRE3_* family the diagnostics use:
 		//        probe[:count]              one cabinet, an imaginary peer that never speaks
 		//        shared:<nodeId>[:count]    two processes on this machine, real shared memory
@@ -147,6 +162,45 @@ namespace pre3
 		// VS mode on, and the input path changes the coin/start latch — for a board with no comm
 		// object to talk through.
 		void Configure();
+
+		// THE ROLE CHANGE ON A RUNNING BOARD - pre3's answer to Virtual On's SoftResetIntoRole, and
+		// the thing that lets a room decide the cabinet rather than the command line.
+		//
+		// Configure() above runs once, before module_start, and by then an RPCN room does not exist:
+		// connect, TLS, login, discovery and create/join are seconds of round trips, and the board
+		// has to boot long before any of them land. So "ask the room what this cabinet is" answers
+		// `no room` on every launch, and the cabinet comes up STAND-ALONE every time. The fix is not
+		// to guess the role earlier from the launch flags - a room is what actually decides it, and
+		// a player who joins from the lobby never touched a launch flag. The fix is to be able to
+		// CHANGE it afterwards.
+		//
+		// VIRTUAL ON DOES THIS BY PULSING THE TEST SWITCH: the ROM re-runs `Net_check` when the
+		// operator menu is left, and that is where it re-reads its cabinet byte. SRC2's boot network
+		// check (`FUN_00093DB4`, guest 0x18A1C) is not reachable that way - it is called once from
+		// the boot chain and nothing re-enters it - so the equivalent here is bigger and, usefully,
+		// more literal: PUT THE BOARD BACK TO POWER-ON AND LET IT BOOT AGAIN.
+		//
+		// Everything that needs is already the module's own:
+		//   * the config globals hold the node id and peer count, and the comm board re-latches
+		//     them when its state machine passes back through state 1 - which the guest does for
+		//     itself during boot, by writing 0 to 0xC0010180;
+		//   * Determinism's power-on snapshot is the pristine pre-boot machine, captured before a
+		//     single guest frame ran, and restoring it makes the guest re-run its whole boot chain
+		//     including the network check;
+		//   * ArcadeSettings::Reset re-arms the LINK ID row so the service-menu byte is written
+		//     again after the restore has wiped guest RAM.
+		//
+		// So the host writes two config words, re-arms the settings latch and asks for the restore.
+		// The module does the rest, and the cabinet comes up as a MASTER or a SLAVE having genuinely
+		// booted as one - which is what the ROM's own check needs in order to print its verdict.
+		//
+		// Call once per frame. A no-op when the room's answer already matches what the board was
+		// booted as, which is every frame but the one after a room forms or dissolves.
+		void DriveRoomRole();
+
+		// True while a role change is waiting for the board to come back. The host must not treat
+		// these frames as ordinary ones - see Pre3Host.
+		bool RoleResetPending();
 
 		Mode CurrentMode();
 		uint8_t NodeId();

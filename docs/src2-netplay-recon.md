@@ -776,3 +776,124 @@ owes it, is unread.
 the accessors this section proposed turned out to be inert. The inference was "16-bit is the natural
 width for a tile entry", which is exactly the kind of reasoning this document has now had to retract
 three times; the counter is the only reason it took one run rather than a day.
+
+## 7. IT PLAYS LINKED OVER RPCN, ON TWO MACHINES (2026-08-08)
+
+Two PCs, a real RPCN room, and the ROM's own network check agreeing on a two-node ring on both
+cabinets. This is the milestone §4 was written for.
+
+```
+host  192.168.50.250   YAMP.exe -src2 -net-host          -> room 105
+guest 192.168.50.209   YAMP.exe -src2 -net-join 105      (PsExec -i, staged on G:\YAMP\Debug)
+
+MASTER  the boot network check ran as MASTER CONTROLLER (LINK ID = 1), settled on
+        id=1 nodes=2, net=0xE8 -> agreed on a ring
+SLAVE   the boot network check ran as SLAVE (LINK ID = 2), settled on
+        id=2 nodes=2, net=0xE8 -> agreed on a ring
+```
+
+Both boards then held `state=4` for ~3500 frames with `wire=up`, and - the part that says the link
+is real rather than merely up - **both machines' RX arrays carried the same contents**: node 0's
+slot 227 non-zero bytes, node 1's 45-47, with matching per-frame churn on each side. The plugin's
+own accounting reports `856 raw` per datagram, which is the 8-byte wire header plus the 848 bytes
+the guest programmes, RLE-coded to 55-199 bytes on the wire.
+
+### 7a. The role comes from the ROOM, and the board is REBOOTED into it
+
+The blocker was never the wire. `CommBoard::Configure()` runs once, immediately before
+`module_start`, because that is where the module latches the node id and peer count out of the
+config block and never re-reads either. An RPCN room does not exist at that instant and cannot be
+made to - connect, TLS, login, discovery and create/join are seconds of round trips - so "ask the
+room what this cabinet is" answered `no room` on every launch and the cabinet silently came up
+STAND-ALONE. Every time.
+
+Guessing the role earlier from the launch flags is the wrong fix: a room is what actually decides
+it, and a player who joins from the lobby never touched a launch flag. `CommBoard::DriveRoomRole()`
+changes it AFTERWARDS instead, and every mechanism it uses is the module's own:
+
+1. write the config globals - `+0x100C` node id, `+0x1010` peer count. The comm board re-latches
+   both when its state machine passes back through state 1, which the guest does for itself during
+   boot by writing 0 to `0xC0010180`;
+2. `ArcadeSettings::Reset()`, re-arming the LINK ID row - the restore is about to wipe the guest RAM
+   both copies of it live in, and without this the rebooted board reads back the SINGLE it powered
+   on with and its check returns before printing anything;
+3. `RestoreResetSnapshot()` - Determinism's power-on snapshot, captured before a single guest frame
+   ran, so restoring it makes the guest re-run its entire boot chain including `FUN_00093DB4`.
+
+Virtual On does the equivalent by pulsing the TEST switch, because its ROM re-enters `Net_check`
+when the operator menu is left. SRC2's check is called once from the boot chain and nothing
+re-enters it, so the equivalent here is bigger and, usefully, more literal: put the board back to
+power-on and let it boot again. Measured end to end:
+
+```
+[SRC2 linkgate] LINK ID work=0 nvram=0 src=0 | ROM latched mode=0 (SINGLE)     <- booted stand-alone
+[SRC2 link] config +0x100C/+0x1010: 0/0 -> 0/2
+[SRC2 link] room says this cabinet is MASTER (node 0) (was STAND-ALONE)
+[SRC2 link] board restored after 1 frame(s); it is now booting as MASTER (node 0)
+[SRC2 linkgate] LINK ID work=1 nvram=1 src=1 | ROM latched mode=1 (MASTER CONTROLLER)
+[SRC2 link] state=1 -> 2 -> 3 -> 4, node=0/2, size=848
+```
+
+`s_appliedRole` is deliberately a separate variable from `s_nodeId`: the first is what the guest
+last BOOTED as, the second what the host currently wants it to be. Collapsing them would make the
+role change believe its work was done the instant it asked for it - the same mistake Virtual On's
+`ApplyCabinetRole` documents from the other direction.
+
+**A cabinet with no room is untouched.** A plain `-src2` launch emits no `[SRC2 link]` line at all,
+keeps `Src2LinkId` at whatever the operator set, and its check runs SINGLE - verified after the
+fact, because the `settings.ini`-fakes-a-regression trap has now cost this project three sessions.
+
+### 7b. What the two-machine run corrected in the wire, and what shared memory had hidden
+
+Three defects in the `Mode::Link` path could not exist under `Mode::Shared`, because shared memory
+has one array, no framing and no delivery to fail:
+
+* **The plugin de-dupes byte-identical link payloads** (`Plugin.cpp`'s `LinkPush`), which is right
+  for Virtual On - it rate-limits itself to one datagram per board frame - and wrong here, where the
+  host transmits every host frame and needs every transmission to count as a sign of life. A cabinet
+  whose packet has not changed is not a cabinet that has gone away, but with the de-dupe in the way
+  it looks like one: nothing arrives, `STALE_FRAMES` expires, the peer's ready bit is cleared, and
+  the board waits forever for a peer that is transmitting perfectly. Fixed with a `seq` byte that
+  moves every frame - which leaves the three REDUNDANCY copies of one datagram byte-identical, so
+  they still collapse to one.
+* **The RX slot was indexed by the SENDER's packet size**, where the module reads that array as
+  `rx + ourPacketSize * i`. The two agree in every healthy session, so it worked and would have gone
+  on working right up until they disagreed, at which point the peer's data lands at an offset the
+  board never reads.
+* **`STALE_FRAMES` was 6**, which under shared memory could never fire. Over a wire the two cabinets
+  do not run at the same rate - the guest here sent ~2.4 packets per one of the host's - so a window
+  measured in OUR frames has an unknown length in THEIRS. Now 30.
+
+Liveness is also no longer tied to the peer having programmed a packet size: any valid datagram
+refreshes the staleness clock, because "is the peer there" and "has the peer's guest programmed a
+size yet" are unrelated facts.
+
+### 7c. A direct-UDP transport was built, proved the wire, and was then removed
+
+Before RPCN was wired, the same `Mode::Link` path was exercised over a plain address pair (a
+`link_direct` ABI entry driving `Transport.h`'s `UdpTransport`). Two instances on one machine over
+loopback reached `state=4` for 2300+ frames, exchanged 848-byte packets, and both passed the ROM's
+network check - `net=E8`, master id 1 / count 2, slave id 2 / count 2. That is what caught all three
+defects in §7b and what made the RPCN run work first try.
+
+It is **gone**, deliberately, and the reasoning is Virtual On's: a second transport that nothing
+tests is a second set of behaviours to keep true. It had one job - separating "does the game play
+linked over a real wire" from "does the RPCN client bring a peer pair up" - and it did it. RPCN is
+what this ships on.
+
+(The cross-machine attempt over that transport never linked: both sides sent thousands of datagrams
+and neither received any, and a bare UDP listener confirmed zero arrivals on the far end even with
+an inbound allow rule in place. RPCN's P2P on port 3658 then worked between the same two machines in
+both directions on the first try, so the block was specific to those ports rather than general -
+unexplained, and moot.)
+
+### 7d. Still open
+
+* **Nobody has driven a race.** Both cabinets reach and hold the linked running state; what the ROM
+  does with two players actually driving is unexercised, and the CPU-car handoff (§5c) in particular.
+* **Latency.** Both machines are on one LAN. The ROM's protocol expects a partner on a serial ring.
+* **The lobby path.** `DriveRoomRole` handles a room formed at any time, so the F1 -> Netplay page
+  should now work as well as the command line does - untested.
+* **More than two cabinets.** The plugin's link channel is point-to-point, so the arrays and
+  rendezvous groups are sized for `MAX_NODES` because the MODULE's are, not because this transport
+  can fill them.

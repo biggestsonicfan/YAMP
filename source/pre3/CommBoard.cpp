@@ -3,11 +3,13 @@
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 #include "../net/NetPlugin.h"
+#include "ArcadeSettings.h"
 #include "Determinism.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +42,19 @@ namespace pre3
 
 			// The module's own CXComm vtable. Used ONLY as a self-check — see ReadBoard.
 			inline constexpr uintptr_t RVA_CXCOMM_VTABLE = 0x10C858;
+
+			// THE CONFIG GLOBAL, which module_start fills by copying 0x1028 bytes out of the params
+			// block and which nothing in the module ever writes again. Same justification as the
+			// vtable RVA above: GameVerify has pinned this build by SHA-256, and a data global has
+			// no code around it to pattern-match on.
+			//
+			// It is the LIVE copy - the one FUN_180035BA0 latches its node id from in state 1, and
+			// the one the settings injector folds into the board's LINK ID row at boot. Writing it
+			// is therefore how a role change reaches BOTH of the two switches that have to agree,
+			// without either being written directly.
+			inline constexpr uintptr_t RVA_CONFIG = 0x18A050;
+			inline constexpr size_t CONFIG_LINK_NODE_ID = 0x100C;
+			inline constexpr size_t CONFIG_LINK_PEER_COUNT = 0x1010;
 
 			// Fields inside CXComm, all read off its seven methods and FUN_180035BA0.
 			inline constexpr size_t COMM_NODE_ID = 0x20008;
@@ -106,6 +121,21 @@ namespace pre3
 		static uint8_t s_nodeCount = 0;
 		static bool s_configured = false;
 
+		// WHAT THE BOARD WAS ACTUALLY BOOTED AS - one source of truth, and deliberately not the
+		// same variable as s_mode/s_nodeId.
+		//
+		// The two describe different instants. s_nodeId is what the HOST wants this cabinet to be
+		// and changes the moment a room forms; this is what the guest last BOOTED as, and it only
+		// moves when the board has been through the restore and come back. Collapsing them would
+		// make DriveRoomRole think its work was done the instant it asked for it, which is the
+		// same mistake Virtual On's ApplyCabinetRole documents from the other direction - there,
+		// reading the SETTING instead of the applied role reported a standalone cabinet while the
+		// ROM had already been told it was a slave.
+		enum class Role : uint8_t { Unknown, Standalone, Master, Slave };
+		static Role s_appliedRole = Role::Unknown;
+		static bool s_roleResetPending = false;
+		static uint32_t s_roleResetFrame = 0;
+
 		// ---- the rendezvous word ---------------------------------------------------------
 		//
 		// Four bit groups in one u64, and they are DIRECTIONAL - see CommBoard.h. The low two are
@@ -128,18 +158,34 @@ namespace pre3
 
 		// How long a peer's packet stays "fresh" enough to hold its ready bit up.
 		//
-		// A DELIBERATE POLICY RATHER THAN A READING OF THE MODULE, and the first thing to revisit
-		// with two machines. Nothing in the module ever CLEARS a ready bit, so holding them all
-		// set makes the board free-run and holding them strictly per-frame makes it lockstep; the
-		// truth is whatever Gaiden's own host does, which cannot be read from here. This picks the
-		// middle: a peer's bit stays up while its packets keep arriving and drops when they stop,
-		// so jitter is absorbed and a dead peer stalls the board rather than being simulated as a
-		// silent one. Six frames is ~100 ms at 60 Hz.
-		inline constexpr uint32_t STALE_FRAMES = 6;
+		// A DELIBERATE POLICY RATHER THAN A READING OF THE MODULE. Nothing in the module ever
+		// CLEARS a ready bit, so holding them all set makes the board free-run and holding them
+		// strictly per-frame makes it lockstep; the truth is whatever Gaiden's own host does, which
+		// cannot be read from here. This picks the middle: a peer's bit stays up while its packets
+		// keep arriving and drops when they stop, so jitter is absorbed and a dead peer stalls the
+		// board rather than being simulated as a silent one.
+		//
+		// SIX FRAMES WAS FOR SHARED MEMORY, WHERE IT COULD NEVER FIRE. Over a wire the two cabinets
+		// do not run at the same rate - a debug build with the tilemap probes on is nowhere near a
+		// release build's frame time - so a window measured in OUR frames is a window whose length
+		// in THEIR frames is unknown. Thirty is half a second at 60 Hz, which is far longer than any
+		// jitter this link can produce and far shorter than a player would take to notice a peer
+		// that has actually gone. The exact number is not load-bearing; being well clear of normal
+		// scheduling noise is.
+		inline constexpr uint32_t STALE_FRAMES = 30;
 
 		static uint32_t s_frame = 0;
 		static uint32_t s_lastRx[MAX_NODES] = {};
 		static bool s_everRx[MAX_NODES] = {};
+
+		// Wire counters, for the log only. THREE numbers rather than one because they fail
+		// separately and the whole diagnostic value is in which of them is stuck:
+		// nothing sent = this cabinet is not producing; sent but nothing received = the wire or the
+		// far end; received but the board sequence frozen = the peer's process is alive and its
+		// BOARD is not transferring, which no other field here distinguishes.
+		static uint32_t s_txPackets = 0;
+		static uint32_t s_rxPackets[MAX_NODES] = {};
+		static uint16_t s_peerBoardSeq[MAX_NODES] = {};
 
 		// ---- the wire ---------------------------------------------------------------------
 		//
@@ -153,17 +199,41 @@ namespace pre3
 		// rather than inferring it is what lets the BOOT barrier work at all: the module sets its
 		// own bit 0x30 and waits for everyone's, and no other channel exists to learn that a peer
 		// has finished booting.
+		//
+		// `seq` EXISTS TO DEFEAT A DEDUPE, and without it this link stalls on any static screen.
+		//
+		// The plugin's link channel drops an arriving payload that is byte-identical to the last
+		// one it enqueued (Plugin.cpp's LinkPush), which is right for the sender it was written
+		// for - Virtual On rate-limits itself to one datagram per board frame - and wrong for this
+		// one, which transmits every host frame and needs every transmission to count as a sign of
+		// life. A cabinet whose packet has not changed is not a cabinet that has gone away, but with
+		// the dedupe in the way it looks like one: nothing arrives, STALE_FRAMES expires, this host
+		// clears the peer's ready bit and the board waits forever for a peer that is transmitting
+		// perfectly. A counter that moves every frame makes each frame's datagram distinct while
+		// leaving the three REDUNDANCY COPIES of one datagram byte-identical - so they still collapse
+		// to one, which is exactly the split that is wanted.
+		//
+		// `boardSeq` is the emulated board's own transfer counter, carried for the log only. It is
+		// the one field that separates "the peer's process is alive and sending" from "the peer's
+		// BOARD is running transfers", and those two look identical from every other field here.
 #pragma pack(push, 1)
 		struct WireHeader
 		{
 			uint8_t magic;      // 'C', so a stale ABI's datagram is dropped rather than decoded
 			uint8_t node;
 			uint8_t flags;      // bit0 ready, bit1 ack, bit2 booted
-			uint8_t reserved;
+			uint8_t seq;        // low 8 bits of the sender's host frame counter - see above
 			uint16_t size;
+			uint16_t boardSeq;  // CXComm's own sequence, diagnostic only
 		};
 #pragma pack(pop)
-		static_assert(sizeof(WireHeader) == 6);
+		static_assert(sizeof(WireHeader) == 8);
+
+		// The most this datagram may be. The plugin's channel carries kLinkPayloadMax = 0x700
+		// bytes, and anything longer is refused by link_send with no error the caller can see - so
+		// the limit is restated here, where it can be reported against the size the GUEST chose.
+		// SRC2 programs 848, which with the header is 856 and fits with room to spare.
+		inline constexpr size_t MAX_WIRE = 0x700;
 
 		inline constexpr uint8_t WIRE_MAGIC = 'C';
 		inline constexpr uint8_t FLAG_READY = 0x01;
@@ -350,15 +420,12 @@ namespace pre3
 		// one makes it the SLAVE (node 1), which is the same rule Virtual On uses - `local_player`
 		// 0 = host, 1 = guest - and the same rule two real cabinets are wired under.
 		//
-		// TIMING, AND IT IS A REAL CONSTRAINT: this runs once, immediately before module_start,
-		// because the module latches the node id and count out of the config there and never looks
-		// again. So the room has to exist BEFORE the board boots. A room formed later cannot
-		// change this cabinet's role without restarting the module - there is no equivalent of
-		// Virtual On's SoftResetIntoRole here, which pulses the TEST switch on a running board.
-		//
-		// (There may be one to build: writing the module's own config globals and then driving the
-		// comm board's state machine back through state 1 - a guest write of 0 to 0xC0010180
-		// resets it - would re-latch both fields. Untried, and noted rather than assumed.)
+		// A ROOM FORMED LATER IS NOT A LOST CAUSE - see DriveRoomRole, which is the pre3 answer to
+		// Virtual On's SoftResetIntoRole. This function still runs exactly once, immediately before
+		// module_start, because that is where the module latches the node id and peer count out of
+		// the config block; what DriveRoomRole adds is the ability to CHANGE those and put the
+		// board back through its own power-on boot so the new values are read. So this is the
+		// launch-time answer, not the only one.
 		const net::Status netStatus = net::GetStatus();
 		const bool inRoom = netStatus.local_player >= 0;
 
@@ -371,6 +438,8 @@ namespace pre3
 		else if (!ParseEnvironment())
 		{
 			// No room and no harness override: a single cabinet, exactly as before any of this.
+			// DriveRoomRole takes over from here if one appears.
+			s_appliedRole = Role::Standalone;
 			return;
 		}
 
@@ -385,8 +454,192 @@ namespace pre3
 		case Mode::Link:   modeName = "LINK (netplay)"; break;
 		default: break;
 		}
-		DebugLogFile("[%s link] mode=%s node=%u/%u (config +0x100C/+0x1010)\n",
-			gGeneral.GetGameTag(), modeName, s_nodeId, s_nodeCount);
+		s_appliedRole = (s_mode == Mode::Off) ? Role::Standalone
+			: (s_nodeId == 0 ? Role::Master : Role::Slave);
+		DebugLogFile("[%s link] mode=%s node=%u/%u (config +0x100C/+0x1010) from %s\n",
+			gGeneral.GetGameTag(), modeName, s_nodeId, s_nodeCount,
+			inRoom ? "a live room" : "YAMP_PRE3_LINK");
+	}
+
+	// ---- The live role change ------------------------------------------------------------
+	//
+	// See CommBoard.h for why this exists at all. What follows is the mechanics.
+
+	namespace CommBoard
+	{
+	namespace
+	{
+		const char* RoleName(Role role)
+		{
+			switch (role)
+			{
+			case Role::Standalone: return "STAND-ALONE";
+			case Role::Master:     return "MASTER (node 0)";
+			case Role::Slave:      return "SLAVE (node 1)";
+			default:               return "unknown";
+			}
+		}
+
+		// What the ROOM says this cabinet is, right now. The single place the mapping lives, so the
+		// launch-time path and the live path cannot drift apart: `local_player` 0 = host = master,
+		// anything else = guest = slave, and no room at all = a cabinet nobody has linked.
+		Role RoleFromRoom()
+		{
+			const net::Status status = net::GetStatus();
+			if (status.local_player < 0) return Role::Standalone;
+			return status.local_player == 0 ? Role::Master : Role::Slave;
+		}
+
+		// Write the module's own config globals. Returns false without writing if the module is not
+		// where it should be, so a caller can decline to reset a board it cannot reconfigure -
+		// rebooting into the SAME role would be a visible glitch that achieved nothing.
+		bool WriteConfigRole(uint8_t nodeId, uint8_t nodeCount)
+		{
+			auto* base = reinterpret_cast<uint8_t*>(
+				GetModuleHandleW(L"pre3-pxd-w64-d3d12_retail.dll"));
+			if (base == nullptr) return false;
+
+			auto* nodeIdField = reinterpret_cast<int32_t*>(
+				base + Board::RVA_CONFIG + Board::CONFIG_LINK_NODE_ID);
+			auto* nodeCountField = reinterpret_cast<int32_t*>(
+				base + Board::RVA_CONFIG + Board::CONFIG_LINK_PEER_COUNT);
+
+			// SANITY-CHECK BEFORE WRITING, because a wrong RVA here is silent: these are two small
+			// integers in a 0x1028-byte block of other small integers, so a misplaced write lands on
+			// some other setting and the only symptom is the board behaving oddly in a way nobody
+			// connects to netplay. What is known about them is their RANGE - the module's own tests
+			// are `< 2` on the count and an index into a 4-slot ring on the id - so anything outside
+			// it means this is not the field it is supposed to be.
+			const int32_t wasId = *nodeIdField;
+			const int32_t wasCount = *nodeCountField;
+			if (wasId < 0 || wasId >= MAX_NODES || wasCount < 0 || wasCount > MAX_NODES)
+			{
+				DebugLogFile("[%s link] role change REFUSED: the config at +0x100C/+0x1010 reads "
+					"%d/%d, which is not a node id and count. Not writing.\n",
+					gGeneral.GetGameTag(), wasId, wasCount);
+				return false;
+			}
+
+			*nodeIdField = static_cast<int32_t>(nodeId);
+			*nodeCountField = static_cast<int32_t>(nodeCount);
+			DebugLogFile("[%s link] config +0x100C/+0x1010: %d/%d -> %u/%u\n",
+				gGeneral.GetGameTag(), wasId, wasCount, nodeId, nodeCount);
+			return true;
+		}
+
+		// Everything this file remembers about a life of the board, dropped. The rendezvous word
+		// especially: its bits describe cabinets that no longer exist, and carrying a stale BOOTED
+		// bit into a fresh boot would release the module's barrier before the peer was there.
+		void ForgetLinkState()
+		{
+			s_rendezvous = 0;
+			s_frame = 0;
+			s_txPackets = 0;
+			for (uint8_t node = 0; node < MAX_NODES; ++node)
+			{
+				s_lastRx[node] = 0;
+				s_everRx[node] = false;
+				s_rxPackets[node] = 0;
+				s_peerBoardSeq[node] = 0;
+			}
+			if (!s_tx.empty())
+			{
+				std::fill(s_tx.begin(), s_tx.end(), uint8_t{ 0 });
+				std::fill(s_rx.begin(), s_rx.end(), uint8_t{ 0 });
+			}
+		}
+	}
+	}
+
+	bool CommBoard::RoleResetPending() { return s_roleResetPending; }
+
+	void CommBoard::DriveRoomRole()
+	{
+		if (gGeneral.GetGameId() != YAMPGeneral::GameId::SRC2) return;
+
+		// A HARNESS SESSION OWNS THE ROLE. YAMP_PRE3_LINK's Probe and Shared modes have no room
+		// behind them and never will, so letting "no room" drag them back to stand-alone would
+		// make the two single-machine experiments impossible to run. Link is left alone for the
+		// same reason: it was asked for explicitly.
+		if (s_mode != Mode::Off && s_appliedRole != Role::Standalone
+			&& net::GetStatus().local_player < 0)
+		{
+			return;
+		}
+
+		// Waiting for the board to come back. The restore is asynchronous by one frame and the
+		// guest then re-runs its whole boot chain, so this stays true for a while - which is the
+		// point of publishing it.
+		if (s_roleResetPending)
+		{
+			if (BoardRestorePending()) return;
+			s_roleResetPending = false;
+			DebugLogFile("[%s link] board restored after %u frame(s); it is now booting as %s\n",
+				gGeneral.GetGameTag(), s_frame - s_roleResetFrame, RoleName(s_appliedRole));
+			return;
+		}
+
+		const Role wanted = RoleFromRoom();
+		if (wanted == s_appliedRole) return;
+
+		// The board has to BE somewhere before it can be sent back to the start. Both of these are
+		// ordinary early frames rather than faults, so they are silent.
+		if (!IsBoardBooted() || BoardRestorePending()) return;
+
+		if (!ResetSnapshotTaken())
+		{
+			// NOT AN ERROR ON THE FRAME IT FIRST HAPPENS. Pre3Host asks for the snapshot on the
+			// first frame the machine reports itself running and the module takes it during that
+			// frame's update stage, so on that one frame the answer here is legitimately "not yet" -
+			// and a room formed during boot lands exactly there. Reporting it immediately printed
+			// "cannot change role" a frame before the role changed perfectly well, which is a line
+			// that would send someone looking for a bug that had already fixed itself.
+			//
+			// So retry quietly and only complain if it PERSISTS, which would mean the snapshot
+			// genuinely never happened and the role can never change.
+			static uint32_t waiting = 0;
+			if (++waiting == 300)
+			{
+				DebugLogFile("[%s link] cannot change role to %s: 300 frames on and no power-on "
+					"snapshot exists, so there is nothing to reboot the board into.\n",
+					gGeneral.GetGameTag(), RoleName(wanted));
+			}
+			return;
+		}
+
+		const uint8_t nodeId = (wanted == Role::Slave) ? 1 : 0;
+		const uint8_t nodeCount = (wanted == Role::Standalone) ? 0 : 2;
+		if (!WriteConfigRole(nodeId, nodeCount)) return;
+
+		// The host's own view moves with the config, and BEFORE the restore is asked for: Attach()
+		// runs every frame and the module must find the work pointers already correct on the frame
+		// its boot chain first reaches for them.
+		s_mode = (wanted == Role::Standalone) ? Mode::Off : Mode::Link;
+		s_nodeId = nodeId;
+		s_nodeCount = nodeCount;
+		if (s_mode != Mode::Off) EnsureBuffers();
+		ForgetLinkState();
+
+		// RE-ARM THE SETTINGS LATCH. ArcadeSettings writes the board's LINK ID row once and then
+		// latches, leaving the row to the game's own service menu; the restore is about to wipe the
+		// guest RAM both copies live in, so without this the rebooted board would read back the
+		// SINGLE it powered on with and its network check would return before printing anything.
+		ArcadeSettings::Reset();
+
+		DebugLogFile("[%s link] room says this cabinet is %s (was %s) - putting the board back to "
+			"power-on so it boots as one\n",
+			gGeneral.GetGameTag(), RoleName(wanted), RoleName(s_appliedRole));
+
+		if (!RestoreResetSnapshot())
+		{
+			DebugLogFile("[%s link] the restore request was refused; the board keeps running as "
+				"%s\n", gGeneral.GetGameTag(), RoleName(s_appliedRole));
+			return;
+		}
+
+		s_appliedRole = wanted;
+		s_roleResetPending = true;
+		s_roleResetFrame = s_frame;
 	}
 
 	CommBoard::Mode CommBoard::CurrentMode() { return s_mode; }
@@ -552,6 +805,20 @@ namespace pre3
 		{
 			// No peer yet. Leave the peers' bits clear: the board then waits, which is the correct
 			// behaviour and is the ROM's own.
+			//
+			// SAID OUT LOUD, on a heartbeat, because "the plugin has no peer address" and "the peer
+			// address is known and nothing comes back" are different faults with the same symptom -
+			// a cabinet sitting on its network check - and only the first of them is visible here.
+			// A link armed with -net-link is never in this state for long: the address is configured
+			// rather than discovered, so still being here means the plugin did not load or
+			// link_direct was never called.
+			static uint32_t lastSaid = 0;
+			if (s_frame - lastSaid >= 300)
+			{
+				lastSaid = s_frame;
+				DebugLogFile("[%s link] f=%u no peer: the netplay channel reports no address to "
+					"send to. The board will wait here.\n", gGeneral.GetGameTag(), s_frame);
+			}
 			LogState();
 			return;
 		}
@@ -561,7 +828,13 @@ namespace pre3
 		// the boot barrier releases, and the barrier cannot release until each peer has heard that
 		// the other has booted - which is carried in this datagram's flags. So the header always
 		// goes out; the payload is whatever there is, which early on is nothing.
-		const size_t payload = (packet > 0 && packet <= MAX_PACKET) ? packet : 0;
+		// TWO CEILINGS, AND THEY FAIL DIFFERENTLY, which is why they are reported separately.
+		//
+		// MAX_PACKET is this file's own buffer: a size past it is memory the module is already
+		// corrupting and YAMP can only report. MAX_WIRE is the plugin channel's, and a size past
+		// THAT is merely undeliverable - link_send refuses it silently, so without this the symptom
+		// would be a link that comes up, exchanges nothing, and blames the network.
+		size_t payload = (packet > 0 && packet <= MAX_PACKET) ? packet : 0;
 		if (packet > MAX_PACKET)
 		{
 			static bool said = false;
@@ -575,6 +848,19 @@ namespace pre3
 					gGeneral.GetGameTag(), packet, MAX_PACKET);
 			}
 		}
+		else if (sizeof(WireHeader) + payload > MAX_WIRE)
+		{
+			static bool said = false;
+			if (!said)
+			{
+				said = true;
+				DebugLogFile("[%s link] guest programmed packet size %zu; with the %zu-byte header "
+					"that is past the %zu-byte netplay channel, which would drop it silently. "
+					"Sending flags only - this link cannot carry a packet this large.\n",
+					gGeneral.GetGameTag(), packet, sizeof(WireHeader), MAX_WIRE);
+			}
+			payload = 0;
+		}
 
 		// SEND LAST FRAME'S TX SLOT. The board wrote it during the previous update stage, which is
 		// why this runs before the module's frame rather than after: one packet per board frame,
@@ -583,8 +869,9 @@ namespace pre3
 			auto* header = reinterpret_cast<WireHeader*>(s_wire.data());
 			header->magic = WIRE_MAGIC;
 			header->node = s_nodeId;
-			header->reserved = 0;
+			header->seq = static_cast<uint8_t>(s_frame);
 			header->size = static_cast<uint16_t>(payload);
+			header->boardSeq = haveBoard ? view.sequence : 0;
 			header->flags = static_cast<uint8_t>(FLAG_READY
 				| ((Rendezvous() & NodeMask(BIT_ACK, s_nodeId)) != 0 ? FLAG_ACK : 0)
 				| ((Rendezvous() & NodeMask(BIT_BOOTED, s_nodeId)) != 0 ? FLAG_BOOTED : 0));
@@ -594,6 +881,7 @@ namespace pre3
 					s_tx.data() + static_cast<size_t>(s_nodeId) * payload, payload);
 			}
 			net::LinkSend(s_wire.data(), static_cast<unsigned int>(sizeof(WireHeader) + payload));
+			s_txPackets++;
 		}
 
 		// INGEST. LinkTake is newest-wins, so this drains what the plugin has and keeps the last
@@ -613,13 +901,34 @@ namespace pre3
 				continue;   // a stale or corrupt datagram is dropped, never decoded
 			}
 
+			// ANY VALID DATAGRAM IS A SIGN OF LIFE, sized or not.
+			//
+			// This used to be inside the `size > 0` branch below, which tied "is the peer there" to
+			// "has the peer's guest programmed a packet size yet" - two unrelated facts. A cabinet
+			// still running its self-test sends header-only packets for hundreds of frames, and on
+			// the old rule those did not refresh the staleness clock at all. It happened not to
+			// matter only because the clock was never armed until the first sized packet arrived;
+			// the moment either side legitimately went back to sending flags only, the peer's ready
+			// bit would drop underneath a link that was working.
+			s_lastRx[header->node] = s_frame;
+			s_everRx[header->node] = true;
+
 			// size 0 is legal and carries only the peer's flags - see the deadlock note above.
 			if (header->size > 0)
 			{
-				memcpy(s_rx.data() + static_cast<size_t>(header->node) * header->size,
-					s_wire.data() + sizeof(WireHeader), header->size);
-				s_lastRx[header->node] = s_frame;
-				s_everRx[header->node] = true;
+				// INDEXED BY *OUR* PACKET SIZE, NOT THE SENDER'S, because the module reads this
+				// array as `rx + ourPacketSize * i`. The two agree in every healthy session - both
+				// guests are the same ROM programming the same register - so using the sender's
+				// worked and would have gone on working right up until they disagreed, at which
+				// point the peer's data would land at an offset the board never reads and the
+				// symptom would be a silent peer on a link with traffic on it. Copy no more than
+				// one slot holds.
+				const size_t slot = (payload > 0) ? payload : header->size;
+				const size_t bytes = (header->size < slot) ? header->size : slot;
+				memcpy(s_rx.data() + static_cast<size_t>(header->node) * slot,
+					s_wire.data() + sizeof(WireHeader), bytes);
+				s_rxPackets[header->node]++;
+				s_peerBoardSeq[header->node] = header->boardSeq;
 			}
 
 			// The peer's own report, expanded into the groups the MODULE READS - 0x00 and 0x10.
@@ -863,8 +1172,16 @@ namespace pre3
 		char slot[256] = "-";
 		if (view.packetSize > 0 && static_cast<size_t>(view.packetSize) <= MAX_PACKET)
 		{
+			// WHICH ARRAY IS WORTH LOOKING AT DEPENDS ON THE TRANSPORT, and getting it wrong makes
+			// this read as a dead link. Shared memory has ONE array, so TX and RX are the same
+			// bytes and every node's slot is live in it. A real wire has two, and only THIS node's
+			// slot is ever written in TX - so printing TX over a link would show the peer's slot
+			// permanently empty however well the link was working. RX is where a peer's packet
+			// actually lands, and it holds this cabinet's own mirrored slot too, so it carries
+			// everything the TX view had.
 			const uint8_t* base = (s_mode == Mode::Shared && s_ring != nullptr)
-				? s_ring->packets : s_tx.data();
+				? s_ring->packets
+				: (s_mode == Mode::Link ? s_rx.data() : s_tx.data());
 
 			static std::vector<uint8_t> previous;
 			const size_t span = static_cast<size_t>(view.nodeCount ? view.nodeCount : 1)
@@ -894,10 +1211,27 @@ namespace pre3
 		uint16_t irqState = 0;
 		ReadIrq(irqEnable, irqState);
 
+		// THE WIRE'S OWN COUNTERS, and only on the transports that have one. Printed next to the
+		// board's fields rather than in a line of their own so one log line answers the whole
+		// question: the board's state machine, what this cabinet put on the wire, what came back,
+		// and whether the peer's BOARD (not merely its process) is transferring.
+		char wire[96] = "";
+		if (s_mode == Mode::Link)
+		{
+			int at = _snprintf_s(wire, sizeof(wire), _TRUNCATE, " wire=%s tx=%u rx=",
+				net::LinkReady() ? "up" : "NO PEER", s_txPackets);
+			for (uint8_t node = 0; node < s_nodeCount; ++node)
+			{
+				if (node == s_nodeId) continue;
+				at += _snprintf_s(wire + at, sizeof(wire) - at, _TRUNCATE, "[%u]%u/bseq%u",
+					node, s_rxPackets[node], s_peerBoardSeq[node]);
+			}
+		}
+
 		DebugLogFile("[%s link] f=%u state=%u node=%d/%d size=%u seq=%u bank=%u cmd=%04X "
-			"status=%04X rendezvous=%016llX irq=%02X/%04X tx=%s\n",
+			"status=%04X rendezvous=%016llX irq=%02X/%04X%s tx=%s\n",
 			gGeneral.GetGameTag(), s_frame, view.state, view.nodeId, view.nodeCount,
 			view.packetSize, view.sequence, view.bank, view.command, view.status,
-			static_cast<unsigned long long>(Rendezvous()), irqEnable, irqState, slot);
+			static_cast<unsigned long long>(Rendezvous()), irqEnable, irqState, wire, slot);
 	}
 }
