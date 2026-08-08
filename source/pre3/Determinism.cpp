@@ -150,6 +150,11 @@ namespace pre3
 		// to set the coin latch and to ask whether the "press start" screen is up.
 		inline constexpr uintptr_t RVA_MACHINE = 0x1895D0;
 
+		// machine+0x90, the ROM object - the same global module_main independently reads for the
+		// coin latch, which is the free corroboration named above. Everything game-specific hangs
+		// off it, so BoardRomObject() publishes it rather than each caller re-deriving the machine.
+		inline constexpr size_t ROM_OBJECT = 0x90;
+
 		// Bring-up phase. The frame step switches on it; 0x10 is the terminal "running" case, and
 		// the savestate pump (DLL 0x180037E50) refuses to do anything until it is reached.
 		inline constexpr size_t BOOT_STATE = 0x88;
@@ -237,6 +242,20 @@ namespace pre3
 			return *reinterpret_cast<const int*>(machine + BOOT_STATE) == BOOT_STATE_RUNNING
 				? machine : nullptr;
 		}
+	}
+
+	int BoardPhase()
+	{
+		const uint8_t* machine = Machine::Object();
+		if (machine == nullptr) return -1;
+		return *reinterpret_cast<const int*>(machine + Machine::BOOT_STATE);
+	}
+
+	void* BoardRomObject()
+	{
+		uint8_t* machine = Machine::Running();
+		if (machine == nullptr) return nullptr;
+		return *reinterpret_cast<void* const*>(machine + Machine::ROM_OBJECT);
 	}
 
 	bool IsBoardBooted()

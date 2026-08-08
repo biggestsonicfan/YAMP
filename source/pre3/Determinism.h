@@ -80,6 +80,23 @@ namespace pre3
 	// SHA-256, and these are DATA offsets with no code to pattern-match. Each was read out of the
 	// function named beside it.
 
+	// The machine's bring-up phase - the word at machine+0x88 that the frame step switches on.
+	// 0x10 is running; -1 means the module is not loaded.
+	//
+	// Exposed because "not running" has more than one cause and the caller usually needs to tell
+	// them apart: a linked cabinet held at the boot barrier parks at 0xF, which from outside looks
+	// exactly like a board whose offsets are wrong. See CommBoard.cpp's diagnostic.
+	int BoardPhase();
+
+	// The ROM object the machine is running (machine+0x90), or null until it is up.
+	//
+	// THE ONE PLACE THAT KNOWS WHERE THE MACHINE IS. Everything reaching into the emulator - the
+	// canary, the savestate requests, the comm board's CXComm subobject - hangs off this object,
+	// and the RVA that finds it was briefly written down in two files at once. A second copy is a
+	// second thing to get wrong when a module build moves, and the copies would not disagree
+	// loudly: they would each read a plausible number out of a different structure.
+	void* BoardRomObject();
+
 	// True once the machine has finished booting - its phase word (machine+0x88, the switch in
 	// the frame step) reaches 0x10, the running state.
 	//

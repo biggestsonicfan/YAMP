@@ -3,6 +3,7 @@
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 #include "../net/NetPlugin.h"
+#include "Determinism.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -23,11 +24,12 @@ namespace pre3
 		// exact build by SHA-256, so these are DATA offsets with no code to pattern-match.
 		namespace Board
 		{
-			// TaskM3E, the emulator object — see Determinism.h. Its +0x90 is the ROM object, the
-			// same global module_main independently reads for the coin latch.
-			inline constexpr uintptr_t RVA_MACHINE = 0x1895D0;
-			inline constexpr size_t MACHINE_ROM = 0x90;
-			inline constexpr size_t MACHINE_PHASE = 0x88;
+			// THE MACHINE IS NOT RE-DERIVED HERE. Determinism owns the RVA that finds it and
+			// publishes the ROM object through BoardRomObject(); a second copy of that address
+			// would be a second thing to get wrong when a module build moves, and the two copies
+			// would not disagree loudly - each would read a plausible number out of a different
+			// structure. What IS here is everything below the ROM object, which is layout rather
+			// than address and has no code to anchor a pattern on.
 			inline constexpr int MACHINE_RUNNING = 0x10;
 
 			// The CXComm subobject inside M3ERomSrc2, from the ROM factory's
@@ -49,21 +51,12 @@ namespace pre3
 			inline constexpr size_t COMM_SEQUENCE = 0x20026;
 			inline constexpr size_t COMM_STATE = 0x20028;
 
+			// Only the CXComm vtable self-check needs the module's own base; everything else
+			// arrives as a pointer from Determinism.
 			static const uint8_t* ModuleBase()
 			{
 				return reinterpret_cast<const uint8_t*>(
 					GetModuleHandleW(L"pre3-pxd-w64-d3d12_retail.dll"));
-			}
-
-			// The machine's bring-up phase, or -1 when the module is not loaded. 0x10 is running;
-			// a link that stalls the BOOT BARRIER parks it at 0xF. Telling those two apart is the
-			// difference between "the host never delivered a rendezvous bit" and "the comm offsets
-			// are wrong" - a distinction the first probe run needed and did not have.
-			static int Phase()
-			{
-				const uint8_t* base = ModuleBase();
-				if (base == nullptr) return -1;
-				return *reinterpret_cast<const int*>(base + RVA_MACHINE + MACHINE_PHASE);
 			}
 
 			// The CXComm, or null when the machine is not up, the game is not SRC2, or the object
@@ -75,12 +68,7 @@ namespace pre3
 				const uint8_t* base = ModuleBase();
 				if (base == nullptr) return nullptr;
 
-				const uint8_t* machine = base + RVA_MACHINE;
-				if (*reinterpret_cast<const int*>(machine + MACHINE_PHASE) != MACHINE_RUNNING)
-				{
-					return nullptr;
-				}
-				const uint8_t* rom = *reinterpret_cast<const uint8_t* const*>(machine + MACHINE_ROM);
+				const auto* rom = static_cast<const uint8_t*>(BoardRomObject());
 				if (rom == nullptr) return nullptr;
 
 				const uint8_t* comm = rom + ROM_COMM;
@@ -451,7 +439,7 @@ namespace pre3
 			if (s_frame > 300 && s_frame - lastSaid >= 300)
 			{
 				lastSaid = s_frame;
-				const int phase = Board::Phase();
+				const int phase = BoardPhase();
 				DebugLogFile("[%s link] f=%u no CXComm: machine phase=0x%X%s rendezvous=%016llX\n",
 					gGeneral.GetGameTag(), s_frame, phase,
 					phase == Board::MACHINE_RUNNING
