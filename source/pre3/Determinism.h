@@ -88,6 +88,21 @@ namespace pre3
 	// exactly like a board whose offsets are wrong. See CommBoard.cpp's diagnostic.
 	int BoardPhase();
 
+	// Hand the board's own symbols over, resolved from the module by pattern rather than by RVA.
+	// Called once from the host's install step, BEFORE module_start.
+	//
+	// Passing null for either is legal and means "not resolved": the hardcoded RVA is then used and
+	// the fact is logged. That is a deliberate fallback rather than a silent one - the RVA is
+	// correct for the build GameVerify pins, so a failed pattern must not stop the game booting,
+	// but it must also not pass unnoticed, because the next module build is exactly when the RVA
+	// stops being right and the symptom is a board that reads as "never booted".
+	void SetBoardSymbols(void* machineObject, const void* cxcommVtable);
+
+	// The CXComm vtable the comm board self-checks against, resolved or fallen back. Published
+	// here rather than in CommBoard because this file already owns "where the module's things are"
+	// and one owner was the point of the last cleanup.
+	const void* BoardCommVtable();
+
 	// The CM3Mem object (machine+0xA0), or null until the machine is up. It owns the guest's
 	// address decode and, at +0x36, the Model 3 INTERRUPT STATE byte the guest polls at
 	// 0xF0100018 - so this is what a host has to reach to assert an interrupt the module does not.

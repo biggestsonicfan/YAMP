@@ -76,7 +76,13 @@ namespace pre3
 				// whatever else lives in a 0x20610-byte object, and "state 0, size 0" is exactly
 				// what a board that has not linked looks like — so the failure would be invisible
 				// and would be believed. The vtable pointer is the known-fixed value.
-				if (*reinterpret_cast<const uint8_t* const*>(comm) != base + RVA_CXCOMM_VTABLE)
+				//
+				// Compared against the RESOLVED vtable when the import found one, so the check is
+				// no longer only as good as the constant it validates against; the RVA is the
+				// fallback and is right for the build GameVerify pins.
+				const void* expected = BoardCommVtable();
+				if (expected == nullptr) expected = base + RVA_CXCOMM_VTABLE;
+				if (*reinterpret_cast<const void* const*>(comm) != expected)
 				{
 					return nullptr;
 				}

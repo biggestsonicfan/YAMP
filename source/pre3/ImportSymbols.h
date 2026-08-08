@@ -55,6 +55,25 @@ namespace pre3
 		IO_READ_PORT,
 
 		IB_CREATE,
+
+		// THE EMULATOR OBJECT ITSELF - `TaskM3E`, the static instance the frame step and the
+		// savestate pump take as `this`, and the root of every board reach in Determinism.cpp and
+		// CommBoard.cpp. Both addressed it by hardcoded RVA until 2026-08-07.
+		//
+		// Worth importing where the struct offsets under it are not, and the difference is the
+		// point: an offset INSIDE a structure has no code to anchor a pattern on, but the ADDRESS
+		// of the structure is referenced by code and can be found exactly the way
+		// SL_CONTEXT_INSTANCE and D3DDEVICE already are. A stale RVA does not fail loudly - it
+		// reads plausible qwords out of whatever moved into its place, which presents as "the
+		// board never booted" rather than as a bad address. That mistake is already recorded in
+		// Determinism.h, made against M2FTGAppModule.
+		MACHINE_OBJECT,
+
+		// The module's `CXComm` vtable - the emulated Model 3 network board's. CommBoard compares
+		// the object at rom+0x588 against it before believing any field, so this is the
+		// known-fixed value that whole self-check rests on; leaving it an RVA made the check only
+		// as good as the constant it validated against.
+		CXCOMM_VTABLE,
 	};
 
 	using Imports = pxd::ImportsT<ImportSymbol>;

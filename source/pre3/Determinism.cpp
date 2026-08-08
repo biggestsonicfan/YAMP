@@ -230,6 +230,11 @@ namespace pre3
 		inline constexpr size_t REGS_FIRST = 0x10;    // GPR0
 		inline constexpr size_t REGS_LAST = 0x1A8;    // one past LR
 
+		// Filled by SetBoardSymbols before module_start; null until then, and null for good if the
+		// pattern did not resolve - in which case Object() falls back to RVA_MACHINE.
+		static uint8_t* importedMachine = nullptr;
+		static const void* importedCommVtable = nullptr;
+
 		static const uint8_t* ModuleBase()
 		{
 			// Named literally, as HleHooks does: the module is ASLR'd, there is exactly one pre3
@@ -242,6 +247,9 @@ namespace pre3
 		// from DLL load onwards. The phase word below is what says whether it means anything yet.
 		static uint8_t* Object()
 		{
+			// The RESOLVED address wins. The RVA below is right for the build GameVerify pins and
+			// silently wrong for any other, which is the whole reason the pattern exists.
+			if (importedMachine != nullptr) return importedMachine;
 			const uint8_t* base = ModuleBase();
 			if (base == nullptr) return nullptr;
 			return const_cast<uint8_t*>(base + RVA_MACHINE);
@@ -254,6 +262,40 @@ namespace pre3
 			return *reinterpret_cast<const int*>(machine + BOOT_STATE) == BOOT_STATE_RUNNING
 				? machine : nullptr;
 		}
+	}
+
+	void SetBoardSymbols(void* machineObject, const void* cxcommVtable)
+	{
+		Machine::importedMachine = static_cast<uint8_t*>(machineObject);
+		Machine::importedCommVtable = cxcommVtable;
+
+		const uint8_t* base = Machine::ModuleBase();
+		const void* rvaMachine = (base != nullptr) ? base + Machine::RVA_MACHINE : nullptr;
+
+		if (machineObject == nullptr)
+		{
+			DebugLogFile("[%s] TaskM3E did not resolve by pattern - falling back to the RVA (%p). "
+				"Correct for the pinned build, wrong for any other.\n",
+				gGeneral.GetGameTag(), rvaMachine);
+		}
+		else if (machineObject != rvaMachine)
+		{
+			// Available AND disagreeing is the case the hardcoded RVA could never report: the
+			// module's layout has moved, and every offset expressed against it is now suspect.
+			DebugLogFile("[%s] TaskM3E resolved to %p but the RVA says %p - the module layout has "
+				"MOVED. Using the resolved address.\n",
+				gGeneral.GetGameTag(), machineObject, rvaMachine);
+		}
+		else
+		{
+			DebugLogFile("[%s] board symbols resolved: TaskM3E %p, CXComm vftable %p\n",
+				gGeneral.GetGameTag(), machineObject, cxcommVtable);
+		}
+	}
+
+	const void* BoardCommVtable()
+	{
+		return Machine::importedCommVtable;
 	}
 
 	int BoardPhase()

@@ -331,6 +331,16 @@ namespace pre3
 		// The vtables are located ONCE and handed to both, because locating them keys on slot 0 -
 		// which is exactly what InstallSystemSwitches replaces. Letting each installer find them
 		// itself would make the second one silently find nothing.
+		// The two board-side addresses everything else is expressed against, resolved by pattern
+		// rather than by RVA. Handed over BEFORE module_start, because the first thing that reads
+		// the machine object is the netplay install below it.
+		//
+		// Both are OPTIONAL in the import table and null-tolerant here: the RVA fallback is right
+		// for the build GameVerify pins, so a pattern that stops matching must not stop the game
+		// booting - it must only stop being silent about it, which SetBoardSymbols logs.
+		SetBoardSymbols(symbolMap.TryGetSymbol(ImportSymbol::MACHINE_OBJECT),
+			symbolMap.TryGetSymbol(ImportSymbol::CXCOMM_VTABLE));
+
 		if (void* const readPort = symbolMap.TryGetSymbol(ImportSymbol::IO_READ_PORT))
 		{
 			void* vtables[MAX_BOARD_VTABLES];

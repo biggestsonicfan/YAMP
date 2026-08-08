@@ -110,6 +110,32 @@ namespace pre3
 			//                  register at [this+0x33], which post-increments mod 8
 			//     anything else -> 0xFF
 			{ S::IO_READ_PORT, get_module_pattern(dll, "4C 8B C1 80 FA 04 74 34 80 FA 08 74 28 80 FA 0C 74 1C 80 FA 3C 75 14") },
+
+			// TaskM3E, the static emulator object. Anchored on module_start's own prologue, which
+			// loads the app-module global and then takes the address of TaskM3E three
+			// instructions later:
+			//
+			//     mov  rbx, [rip+...]        ; the M2FTGAppModule global
+			//     lea  r14, [rip+...]        ; <- TaskM3E, the immediate this reads
+			//     xor  ebp, ebp
+			//     xor  r9b, r9b
+			//
+			// Both displacements are wildcarded and the pattern is unique in .text. The last two
+			// instructions are what makes it so: `48 8B 1D ? ? ? ? 4C 8D 35 ? ? ? ?` alone is not.
+			{ S::MACHINE_OBJECT, immediate(get_module_pattern(dll, "48 8B 1D ? ? ? ? 4C 8D 35 ? ? ? ? 33 ED 45 32 C9", 10)) },
+
+			// The CXComm vtable, from the ROM factory's SRC2 case, which writes it into the ROM
+			// object as the embedded comm board's:
+			//
+			//     mov  dword [rbx+0x57C], 0x4AC65D40   ; the game's own float constant
+			//     lea  rax, [rip+...]                  ; <- CXComm::vftable
+			//     mov  [rbx+0x588], rax                ; the subobject CommBoard reads
+			//
+			// The float constant is carried in the pattern deliberately. `lea` followed by
+			// `mov [rbx+0x588], rax` matches THREE sites on its own - the D2-family ROMs all
+			// build one - and only this one is Sega Racing Classic 2's.
+			{ S::CXCOMM_VTABLE, immediate(get_module_pattern(dll,
+				"C7 83 7C 05 00 00 40 5D C6 4A 48 8D 05 ? ? ? ? 48 89 83 88 05 00 00", 13)) },
 		};
 
 		// ---- gs::ib_create: NOT PRESENT IN THIS MODULE ------------------------------------
