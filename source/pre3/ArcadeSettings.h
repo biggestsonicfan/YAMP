@@ -66,6 +66,33 @@ namespace pre3
 		// no-op for any game that is not SRC2, and before the board's own injector has run.
 		void Update();
 
+		// THE BOOT NETWORK-CHECK GATE, and whether our LINK ID ever reaches it.
+		//
+		// SRC2's boot network screen is `FUN_00093DB4`, called exactly once from the boot main:
+		//
+		//     00018a14  lis  r3, 0x10
+		//     00018a18  lbz  r3, 0x19e(r3)     ; LINK ID - the working copy, 0x100180 + 0x1E
+		//     00018a1c  bl   0x93db4
+		//
+		// and the first thing it does is `if (mode == 0) { nodes = 1; id = 1; return; }` - so a
+		// SINGLE cabinet prints NOTHING. Every string it can draw ("THIS IS MASTER CONTROLLER",
+		// "NO CARRIER! CHECK NETWORK CABLE", "NETWORK BOARD NOT PRESENT") is below that early
+		// return. No text is composed, which is a very different thing from text being composed
+		// and lost, and docs/src2-netplay-recon.md §6 spent a commit on the second reading.
+		//
+		// THE TIMING IS THE QUESTION THIS ANSWERS. The module's own settings injector (HLE hook 5,
+		// guest 0x7480, inside FUN_00007434) runs at guest 0x18950 - 0xC8 bytes of boot code
+		// before that read, in the SAME emulated frame. Update() above deliberately waits for that
+		// injector and therefore writes a HOST frame later, by which point the guest is thousands
+		// of instructions past 0x18A1C. If that is right, the UI's LINK ID row can never affect
+		// the boot check, only the service menu and everything after it.
+		//
+		// So this samples the two copies of LINK ID against the ROM's own latched answer and logs
+		// a line whenever any of them moves, plus a one-shot verdict the moment the check is seen
+		// to have completed. Cheap, unconditional, and self-terminating - it stops sampling once
+		// the verdict is out. Call once per frame beside Update().
+		void LogLinkGate();
+
 		// Resets the latch. Call when the board restarts.
 		void Reset();
 	}

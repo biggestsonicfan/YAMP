@@ -36,6 +36,7 @@ unsigned int ModuleDrawLimitNow();
 #include "../Patch.h"
 #include "../CommBoard.h"
 #include "../Determinism.h"
+#include "../ArcadeSettings.h"
 #include "../NetSession.h"
 
 #include "../../input/Input.h"
@@ -346,6 +347,11 @@ namespace pre3
 		// board writes to tilemap RAM is discarded - which is every piece of text it draws. See
 		// pre3/Patch.h.
 		InstallTilemapAccess();
+
+		// And the reason none of the board's boot screens are ever displayed: the module's scene
+		// submit waits on the GAME's frame counter, which Daytona 2 does not start until after
+		// its self-test. See Patch.h. Same .rdata unprotect, same must-run-before-module_start.
+		InstallBootRender();
 
 		if (void* const readPort = symbolMap.TryGetSymbol(ImportSymbol::IO_READ_PORT))
 		{
@@ -711,6 +717,7 @@ namespace pre3
 			// see CommBoard::DumpTrace. No-op unless YAMP_PRE3_SYNCPROBE asked for them.
 			CommBoard::DumpTrace();
 			LogTilemapAccess();
+			LogBootRender();
 
 			const int stopResult = module_stop(0, nullptr);
 			DebugLogFile("[%s::Run] module_stop -> 0x%X\n", gGeneral.GetGameTag(), stopResult);
@@ -1012,6 +1019,11 @@ namespace pre3
 			const bool wantBoardSample = CommBoard::TraceEnabled();
 			const unsigned long long boardMarker = wantBoardSample ? BoardFrameMarker() : 0;
 
+			// Before the module touches anything: the other half of the tilemap-pipeline sample.
+			// See Patch.h - one sample per frame cannot separate "the dirty flag is never
+			// consumed" from "it is set again after the scene ran".
+			SampleTilemapPipelinePreFrame();
+
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
 			if (funcResult == 0 && entries.render_begin != nullptr)
@@ -1054,6 +1066,18 @@ namespace pre3
 		// any netplay condition: its whole value is that an ordinary run reports whether a round
 		// COULD have worked.
 		LogBoardStateOnce();
+
+		// Whether our LINK ID ever reaches the ROM's boot network check, which is the question
+		// behind "why is no network status ever displayed". Here rather than beside
+		// ArcadeSettings::Update in the UI so that its frame numbers are the SAME frame numbers as
+		// the [pre3] heartbeat below - the whole probe is a comparison of when two things happen.
+		// Self-terminating: it stops sampling once the check is seen to have run.
+		ArcadeSettings::LogLinkGate();
+
+		// And whether the 2D layer that would PRINT it ever reaches the GPU. See Patch.h - the
+		// whole tilemap render sits behind one dirty flag that only render_begin sets, and only
+		// when the board has advanced the producer index.
+		LogTilemapPipeline();
 
 		{
 			static int s_frame = 0;

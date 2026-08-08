@@ -1,5 +1,7 @@
 #include "ArcadeSettings.h"
 
+#include "Determinism.h"
+
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 
@@ -29,6 +31,48 @@ namespace pre3
 		inline constexpr uint32_t OFF_CAR_NUMBER = 0x1F;
 		inline constexpr uint32_t OFF_CABINET_TYPE = 0x20;
 
+		// The ROM globals LogLinkGate reads. Guest addresses, byte-swizzled like everything else
+		// here; each one is named by the routine that writes it rather than by a guess.
+		//
+		//   0x737B90  DAT_00737b90 - the mode FUN_00091FC0 latches from FUN_00093DB4's argument,
+		//                            i.e. the ROM's own record of the LINK ID it was given.
+		//   0x10062A  NODE COUNT - `(status >> 5) & 0x1F`, and the value the ROM multiplies by
+		//              0x350 to index its ring-layout table at 0x728518.
+		//   0x10062B  THIS CABINET'S ID, 1-based - `status & 0x1F`.
+		//
+		// Both are DAT_00100628's bytes 2 and 3, every exit path of the check writes both, and
+		// the SINGLE early return writes 1 and 1. WHICH IS WHICH WAS MEASURED, NOT READ OFF THE
+		// DECOMPILER: a linked shared-memory pair reports 2/1 on the master and 2/2 on the slave,
+		// so the byte that is equal on both cabinets is the count and the one that differs is the
+		// id. They were labelled the other way round until that run.
+		inline constexpr uint32_t ADDR_LATCHED_MODE = 0x737B90;
+		inline constexpr uint32_t ADDR_NODE_COUNT = 0x10062A;
+		inline constexpr uint32_t ADDR_NODE_ID = 0x10062B;
+
+		// A THIRD COPY OF THE SETTINGS, and the one that wins. FUN_00007434 - the routine HLE
+		// hook 5 injects into - refills the working block from it:
+		//
+		//     if (FUN_0000769C(0x31) == 1) {
+		//         src = 0x1001C6; dst = 0x10018C; n = 0x3A; do { *dst++ = *src++; } while (--n);
+		//     }
+		//
+		// The working LINK ID at 0x10019E is 0x12 bytes into that destination, so its source is
+		// 0x1001C6 + 0x12. Sampled here because a host write to the working copy that is later
+		// overwritten looks identical to a host write that never happened.
+		inline constexpr uint32_t ADDR_SOURCE_LINK_ID = 0x1001D8;
+
+		// WHICH OF THE CHECK'S FOUR OUTCOMES APPLIES, once it is known to have run at all.
+		//
+		//   0x7379B9  DAT_007379b9. Bit 0x20 = network board present (set unconditionally by
+		//             FUN_0000479C from the BIOS init). Bit 0x40 = comm firmware uploaded, set by
+		//             FUN_00004820 after it copies the blob at 0xFFFF8000 into 0xC0020000 and
+		//             programs 0xC0020800/04/08. Clear ⇒ "NETWORK BOARD NOT PRESENT" and
+		//             "NETWORK BOARD HAS ANY PROBLEM" respectively.
+		//   0x737B5C  DAT_00737b5c. Set to 0xFE by the failure/cancel tail (LAB_00094084) and by
+		//             nothing else in the check, so it separates "gave up" from "agreed".
+		inline constexpr uint32_t ADDR_NET_FLAGS = 0x7379B9;
+		inline constexpr uint32_t ADDR_FAIL_MARK = 0x737B5C;
+
 		static Desired s_desired{};
 		static bool s_applied = false;
 
@@ -57,9 +101,25 @@ namespace pre3
 			s_desired.carNumber = carNumber < 8 ? carNumber : 0;
 		}
 
+		// Read-only companion to BytePtr, same swizzle. Separate because the probe below takes the
+		// validated base from Determinism, which hands out a const pointer.
+		static uint8_t GuestByte(const uint8_t* ram, uint32_t guestAddress)
+		{
+			return ram[guestAddress ^ 3u];
+		}
+
+		static bool s_gateDone = false;
+		static uint64_t s_gateLast = ~0ull;
+		static uint8_t s_gateFail = 0xFF;
+		static int s_gateFrame = -1;
+
 		void Reset()
 		{
 			s_applied = false;
+			s_gateDone = false;
+			s_gateLast = ~0ull;
+			s_gateFail = 0xFF;
+			s_gateFrame = -1;
 		}
 
 		void Update()
@@ -103,9 +163,94 @@ namespace pre3
 			if (!settled) return;
 
 			s_applied = true;
-			DebugLogFile("[%s] game assignments applied: country=%u cabinet=%u link=%u car=%u\n",
-				gGeneral.GetGameTag(), s_desired.country, s_desired.cabinetType,
+			// frame= is LogLinkGate's counter, deliberately: what matters about this line is
+			// whether it lands before or after the boot network check, and that comparison is
+			// only meaningful if both are stamped by the same clock.
+			DebugLogFile("[%s] game assignments applied (frame=%d): country=%u cabinet=%u link=%u "
+				"car=%u\n",
+				gGeneral.GetGameTag(), s_gateFrame, s_desired.country, s_desired.cabinetType,
 				s_desired.linkId, s_desired.carNumber);
+		}
+
+		void LogLinkGate()
+		{
+			if (gGeneral.GetGameId() != YAMPGeneral::GameId::SRC2) return;
+
+			// Counted from the first call rather than from the first successful read, so the
+			// numbers are comparable with the [pre3] frame= heartbeat and with the "game
+			// assignments applied" line above - which is the comparison the probe exists to make.
+			s_gateFrame++;
+			if (s_gateDone) return;
+
+			// The VALIDATED base (it refuses anything that does not decode guest 0x189EC to SRC2's
+			// `bl 0x07BA18`), because a plausible-looking base that reads zeroes everywhere has
+			// already produced a run of confident wrong readings on this board twice.
+			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
+			if (ram == nullptr) return;   // board not up yet; try again next frame
+
+			const uint8_t work = GuestByte(ram, BASE_WORK + OFF_LINK_ID);
+			const uint8_t nvram = GuestByte(ram, BASE_NVRAM + OFF_LINK_ID);
+			const uint8_t coin = GuestByte(ram, BASE_NVRAM + OFF_COIN);
+			const uint8_t mode = GuestByte(ram, ADDR_LATCHED_MODE);
+			const uint8_t nodes = GuestByte(ram, ADDR_NODE_COUNT);
+			const uint8_t nodeId = GuestByte(ram, ADDR_NODE_ID);
+			const uint8_t source = GuestByte(ram, ADDR_SOURCE_LINK_ID);
+			const uint8_t netFlags = GuestByte(ram, ADDR_NET_FLAGS);
+			const uint8_t failMark = GuestByte(ram, ADDR_FAIL_MARK);
+
+			static const char* const MODE_NAME[4] =
+				{ "SINGLE", "MASTER CONTROLLER", "SLAVE", "LIVE" };
+			const auto name = [](uint8_t value)
+			{
+				return value < 4 ? MODE_NAME[value] : "?";
+			};
+
+			const uint64_t key = static_cast<uint64_t>(work) | static_cast<uint64_t>(nvram) << 8
+				| static_cast<uint64_t>(coin) << 16 | static_cast<uint64_t>(mode) << 24
+				| static_cast<uint64_t>(nodeId) << 32 | static_cast<uint64_t>(nodes) << 40
+				| static_cast<uint64_t>(source) << 48 | static_cast<uint64_t>(netFlags) << 56;
+			if (key != s_gateLast || failMark != s_gateFail)
+			{
+				s_gateLast = key;
+				s_gateFail = failMark;
+				DebugLogFile("[%s linkgate] frame=%d LINK ID work=%u nvram=%u src=%u coin=0x%02X | "
+					"ROM latched mode=%u (%s) id=%u nodes=%u | net=0x%02X%s%s fail=0x%02X\n",
+					gGeneral.GetGameTag(), s_gateFrame, work, nvram, source, coin, mode,
+					name(mode), nodeId, nodes, netFlags,
+					(netFlags & 0x20) != 0 ? " present" : " NOT-PRESENT",
+					(netFlags & 0x40) != 0 ? " fw" : " NO-FW", failMark);
+			}
+
+			// THE CHECK HAS RUN once the node COUNT is non-zero. Not the id: the BIOS gets there
+			// first - FUN_00004820's `FUN_00012DA4(0, 1, 0x100)` stores the dword 1 at 0x100628,
+			// whose low byte IS 0x10062B, so an id of 1 says nothing. 0x10062A is written only by
+			// FUN_00093DB4, on every one of its exit paths.
+			if (nodes == 0) return;
+
+			s_gateDone = true;
+			if (mode == 0)
+			{
+				DebugLogFile("[%s linkgate] VERDICT frame=%d: the boot network check ran with "
+					"LINK ID = 0 (SINGLE), so FUN_00093DB4 returned before printing anything. "
+					"No network status screen is drawn - by the ROM's design, not by a loss. "
+					"Host LINK ID at this instant: work=%u nvram=%u src=%u (applied=%d, "
+					"wanted=%u).\n",
+					gGeneral.GetGameTag(), s_gateFrame, work, nvram, source,
+					static_cast<int>(s_applied), s_desired.linkId);
+			}
+			else
+			{
+				DebugLogFile("[%s linkgate] VERDICT frame=%d: the boot network check ran as %s "
+					"(LINK ID = %u) and settled on id=%u nodes=%u, net=0x%02X fail=0x%02X -> %s. "
+					"The screen's text path WAS reached, so anything missing from here is "
+					"downstream of the ROM.\n",
+					gGeneral.GetGameTag(), s_gateFrame, name(mode), mode, nodeId, nodes,
+					netFlags, failMark,
+					(netFlags & 0x20) == 0 ? "\"NETWORK BOARD NOT PRESENT\""
+					: (netFlags & 0x40) == 0 ? "\"NETWORK BOARD HAS ANY PROBLEM\""
+					: failMark == 0xFE ? "the failure/cancel tail (an error was printed)"
+					: "agreed on a ring");
+			}
 		}
 	}
 }
