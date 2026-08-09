@@ -1,9 +1,21 @@
 #include "HostUI.h"
 
 #include "../imgui/imgui.h"
+#include "../YAMPGeneral.h"
+#include "../YAMPSettings.h"
 
 namespace m2ftg
 {
+	void PollAspectSetting(RenderWindow& window)
+	{
+		static uint32_t s_lastAspect = UINT32_MAX;
+		if (gGeneral.GetSettings()->m_m2Aspect != s_lastAspect)
+		{
+			s_lastAspect = gGeneral.GetSettings()->m_m2Aspect;
+			ApplyAspectSetting(window, s_lastAspect);
+		}
+	}
+
 	void ApplyAspectSetting(RenderWindow& window, uint32_t mode)
 	{
 		switch (mode)

@@ -44,6 +44,10 @@ unsigned int ModuleDrawLimitNow();
 // namespace because that is where they were first needed, but neither touches anything m2ftg —
 // see m2ftg/HostUI.h.
 #include "../../m2ftg/HostUI.h"
+// The shared cabinet front-panel helpers (Esc pause toggle, coin-binding edge detect). Only the
+// game-agnostic pieces are used from here - the coin/start dance, assign table and pad routing
+// in there are the m2ftg module contract, which this family does not speak.
+#include "../../m2ftg/Cabinet/Cabinet.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
 #include "../../DebugLog.h"
@@ -729,9 +733,7 @@ namespace pre3
 	bool pre3::GameLoop(const ModuleEntries& entries, RenderWindow& window)
 	{
 		static csl_pad s_pads[2];
-		static bool s_startScreen = false;
-		static bool s_coinPending = false;
-		static bool s_startToggle = false;
+		static m2ftg::Cabinet::CoinStart s_coinStart;
 
 		// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
 		// routing and the input suppression below all see the same answer for the whole frame.
@@ -761,14 +763,7 @@ namespace pre3
 
 		const auto* settings = gGeneral.GetSettings();
 
-		{
-			static uint32_t s_lastAspect = UINT32_MAX;
-			if (settings->m_m2Aspect != s_lastAspect)
-			{
-				s_lastAspect = settings->m_m2Aspect;
-				m2ftg::ApplyAspectSetting(window, s_lastAspect);
-			}
-		}
+		m2ftg::PollAspectSetting(window);
 
 		// PERSISTENT across frames, exactly as on the m2ftg path — the module keeps state in it,
 		// including the save-data region it writes at +0x660.
@@ -778,34 +773,19 @@ namespace pre3
 		execute_info.status = 0;
 		execute_info.output_texid = 0;
 		execute_info.result = 0x80004005;
-		execute_info.sound_volume =
-			static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
+		execute_info.sound_volume = m2ftg::Cabinet::VolumeFraction();
 		// The two per-channel scalars the frame callback multiplies sound_volume by. The host is
 		// the only thing that ever writes them and the module reads them raw, so a zero here is
 		// silence on all six channels — unity is what "the master volume alone decides" means.
 		execute_info.volume_channel5 = 1.0f;
 		execute_info.volume_channels0_4 = 1.0f;
 
-		static bool s_pauseMenuOpen = false;
-		{
-			// DISABLED DURING NETPLAY. Pausing is host->module input like any other: status bit0
-			// stops the emulated board, and stopping it on one machine only desyncs the pair. It
-			// also suppresses the per-frame submit and the upload-stamp advance below, so an "only
-			// cosmetic" pause would still change how much work this side does. There is no
-			// per-player pause in an arcade match.
-			if (netplayLocked)
-			{
-				s_pauseMenuOpen = false;   // close it if a session started while it was open
-			}
-
-			static bool s_escWasDown = false;
-			const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-			if (escDown && !s_escWasDown && !netplayLocked)
-			{
-				s_pauseMenuOpen = !s_pauseMenuOpen;
-			}
-			s_escWasDown = escDown;
-		}
+		// DISABLED DURING NETPLAY - the shared rationale is with m2ftg::Cabinet::PauseMenu;
+		// pre3's extra wrinkle is that a pause also suppresses the per-frame submit and the
+		// upload-stamp advance below, so an "only cosmetic" pause would still change how much
+		// work this side does.
+		static m2ftg::Cabinet::PauseMenu s_pause;
+		s_pause.Poll(netplayLocked);
 		// The module's own pause: module_main freezes the board, pauses all six audio channels
 		// and records nothing, so the submit below is skipped too and the last completed frame
 		// keeps being presented. That is what Like a Dragon Gaiden does.
@@ -816,7 +796,7 @@ namespace pre3
 		// nothing to record - a PIX capture taken in that mode contained three draws and none of
 		// the module's scene. Its own pause bit records nothing either, so there is no way through
 		// this module's interface to re-draw a frozen frame. Sweep with the game running.
-		if (s_pauseMenuOpen)
+		if (s_pause.open)
 		{
 			execute_info.status |= 1;
 		}
@@ -886,20 +866,14 @@ namespace pre3
 		// the dip switches say - the board's own input test shows it, and with free play on the
 		// ROM simply does not credit it. Still swallowed while the pause menu is open, like every
 		// other input.
+		// (m2ftg::Cabinet::CoinBinding is game-agnostic - it only reads Input. NOTE no freeplay
+		// term in the suppression, unlike the m2ftg hosts: the cabinet's coin switch is wired
+		// whatever the dips say, and with free play on the ROM simply does not credit it.)
 		{
-			static bool s_coinWasDown[2] = {};
-			for (int p = 0; p < 2; p++)
+			static m2ftg::Cabinet::CoinBinding s_coinButton;
+			if (s_coinButton.Pressed(s_pause.open || roundLocked))
 			{
-				const bool down = Input::ActionDown(p, Input::Action_Coin);
-				// Not transmitted, so it cannot be honoured during netplay without desyncing: it
-				// would raise the coin status bit on one machine only. A round starts from the
-				// board's VS start state, which is already credited, so there is nothing it would
-				// buy either.
-				if (down && !s_coinWasDown[p] && !s_pauseMenuOpen && !roundLocked)
-				{
-					execute_info.status |= 0x20;
-				}
-				s_coinWasDown[p] = down;
+				execute_info.status |= 0x20;
 			}
 		}
 
@@ -914,7 +888,7 @@ namespace pre3
 			// (or feed it a service credit) while the other carried on playing.
 			bool test = false;
 			bool service = false;
-			if (!s_pauseMenuOpen && !netplayLocked)
+			if (!s_pause.open && !netplayLocked)
 			{
 				for (int p = 0; p < 2; p++)
 				{
@@ -934,54 +908,33 @@ namespace pre3
 			float steer = 0.0f;
 			float throttle = 0.0f;
 			float brake = 0.0f;
-			if (!s_pauseMenuOpen)
+			if (!s_pause.open)
 			{
 				Input::DrivingAxes(0, steer, throttle, brake);
 			}
 			SetDrivingAxes(steer, throttle, brake);
 		}
 
-		// The arcade coin/start protocol, same shape as m2ftg's: while the module reports the
-		// start screen (status bit6), a START press becomes a coin insert and START is then
-		// injected on alternating frames until the module leaves that screen. Only meaningful
-		// with the freeplay dip switch off.
+		// The arcade coin/start protocol - the same m2ftg::Cabinet::CoinStart the m2ftg hosts
+		// run (this module speaks the same status-word dialect: bit5 coin in, bit6 start screen
+		// out).
 		//
-		// OFF FOR THE WHOLE OF A NETPLAY SESSION, and unlike the m2ftg path it is not re-run after
-		// step() either. It both reads and writes pad[0] and raises the coin status bit from what
-		// it finds, which on m2ftg had to be moved after the pads were synchronised or it desynced
-		// them. Here it has nothing to do: a round starts from the board's own VS start savestate,
-		// which is past the credit screen by construction, so the honest behaviour is for the
-		// protocol simply not to run.
-		if (!settings->m_m2Freeplay && !s_pauseMenuOpen && !roundLocked)
+		// OFF FOR THE WHOLE OF A NETPLAY SESSION, and unlike the m2ftg path it is not re-run
+		// after step() either. It both reads and writes pad[0] and raises the coin status bit
+		// from what it finds, which on m2ftg had to be moved after the pads were synchronised or
+		// it desynced them. Here it has nothing to do: a round starts from the board's own VS
+		// start savestate, which is past the credit screen by construction, so the honest
+		// behaviour is for the protocol simply not to run.
+		if (!settings->m_m2Freeplay && !s_pause.open && !roundLocked)
 		{
-			if (s_coinPending && s_startScreen)
-			{
-				if (!s_startToggle)
-				{
-					execute_info.pad[0].m_now |= 0x100;
-					execute_info.pad[0].m_push |= 0x100;
-				}
-				s_startToggle = !s_startToggle;
-			}
-			else
-			{
-				s_coinPending = false;
-				if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
-				{
-					execute_info.status |= 0x20;
-					execute_info.pad[0].m_now &= ~0x100u;
-					execute_info.pad[0].m_push &= ~0x100u;
-					s_coinPending = true;
-					s_startToggle = false;
-				}
-			}
+			s_coinStart.Run(execute_info.pad[0], execute_info.status);
 		}
 
 		window.BeginFrame();
 		window.NewImGuiFrame();
-		if (s_pauseMenuOpen)
+		if (s_pause.open)
 		{
-			if (!m2ftg::DrawPauseMenu(window, s_pauseMenuOpen))
+			if (!m2ftg::DrawPauseMenu(window, s_pause.open))
 			{
 				return false; // Quit picked
 			}
@@ -1141,7 +1094,7 @@ namespace pre3
 			execute_info.output_texid = s_lastOutputTexId;
 		}
 
-		s_startScreen = (execute_info.status & 0x40) != 0;
+		s_coinStart.NoteStatus(execute_info.status);
 
 		// The netplay groundwork's own health line - see LogBoardStateOnce. Deliberately outside
 		// any netplay condition: its whole value is that an ordinary run reports whether a round
@@ -1201,14 +1154,14 @@ namespace pre3
 
 		if (funcResult != 0) return false;
 
-		if (!s_pauseMenuOpen) SubmitModuleFrameListNow();
+		if (!s_pause.open) SubmitModuleFrameListNow();
 		if (ModuleExecDisabledNow())
 		{
 			DebugLog("[%s::Run] submit hang/device-removed -> stopping loop (see [DRED])\n",
 				gGeneral.GetGameTag());
 			return false;
 		}
-		if (!s_pauseMenuOpen) AdvanceFrameStampNow();
+		if (!s_pause.open) AdvanceFrameStampNow();
 
 		cgs_tex* display_tex = (execute_info.output_texid != 0)
 			? gs::handle_tex().get(execute_info.output_texid)

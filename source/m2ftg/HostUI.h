@@ -15,6 +15,11 @@ namespace m2ftg
 	// and re-applied live from the game loops whenever the setting changes.
 	void ApplyAspectSetting(RenderWindow& window, uint32_t mode);
 
+	// The live-apply poll around it, once per frame from the game loop: the ImGui Apply button
+	// only writes the settings struct (YAMPSettings::m_m2Aspect), and this change-detect is
+	// what makes the new value take effect without a restart.
+	void PollAspectSetting(RenderWindow& window);
+
 	// The Escape pause menu, mirroring Lost Judgment's: the host draws the menu shell while the
 	// module's own pause path (execute_info status bit0) freezes the emulation. Returns false
 	// when the player picks Quit. (RE notes on LJ's menu shell live in LJ/LJHost.cpp.)

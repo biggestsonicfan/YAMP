@@ -35,7 +35,8 @@
 #include "../DisplayModes.h"
 #include "../../pxd/Imports.h"
 #include "../ImportSymbols.h"
-#include "../HostUI.h" // ApplyAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
+#include "../HostUI.h" // PollAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
+#include "../Cabinet/Cabinet.h"
 #include "../../input/Input.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
@@ -384,9 +385,9 @@ namespace m2ftg
 			// Persistent across frames — the module keeps state in the work block (see m2ftg.h).
 			static m2ftg_execute_info_t execute_info{};
 			static csl_pad s_pads[2];
-			static bool s_startScreen = false;
-			static bool s_coinPending = false;
-			static bool s_startToggle = false;
+			static Cabinet::CoinStart s_coinStart;
+			static Cabinet::PauseMenu s_pause;
+			static Cabinet::CoinBinding s_coinButton;
 
 			// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
 			// routing and the coin protocol see one stable answer for the whole frame. The order
@@ -424,47 +425,20 @@ namespace m2ftg
 			*reinterpret_cast<void**>(s_deviceContext + 0x28) = s_cbPool;
 			*reinterpret_cast<void**>(s_deviceContext + 0x30) = s_upPool;
 
-			// Live-apply the aspect-ratio setting (same poll as m2ftg::GameLoop; the ImGui
-			// Apply button only writes the settings struct).
-			{
-				static uint32_t s_lastAspect = UINT32_MAX;
-				if (gGeneral.GetSettings()->m_m2Aspect != s_lastAspect)
-				{
-					s_lastAspect = gGeneral.GetSettings()->m_m2Aspect;
-					ApplyAspectSetting(window, s_lastAspect);
-				}
-			}
+			PollAspectSetting(window);
 
 			execute_info.size_of_struct = sizeof(execute_info);
 			execute_info.p_device_context = reinterpret_cast<cgs_device_context*>(s_deviceContext);
 			execute_info.status = 0;
 			execute_info.output_texid = 0;
 			execute_info.result = 0x80004005;
-			// Master volume: the module's own field, so its mixer does the attenuation (see
-			// YAMPSettings::m_volumePercent). 100% = 1.0f, exactly what this host passed before.
-			execute_info.sound_volume =
-				static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
+			execute_info.sound_volume = Cabinet::VolumeFraction();
 
 			// Escape toggles the pause menu; while it is open, drive the MODULE'S OWN pause
 			// path (status bit0 — same m2ftg protocol as StF/FV, see StF.cpp's RE notes).
-			static bool s_pauseMenuOpen = false;
-			{
-				// DISABLED DURING NETPLAY, exactly as in the LJ host: the module's pause path
-				// stops the emulated board, and stopping it on one machine only desyncs the pair.
-				// There is no per-player pause in an arcade match.
-				if (netplayLocked)
-				{
-					s_pauseMenuOpen = false;   // close it if a session started while it was open
-				}
-				static bool s_escWasDown = false;
-				const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-				if (escDown && !s_escWasDown && !netplayLocked)
-				{
-					s_pauseMenuOpen = !s_pauseMenuOpen;
-				}
-				s_escWasDown = escDown;
-			}
-			if (s_pauseMenuOpen)
+			// Locked during netplay - rationale with Cabinet::PauseMenu.
+			s_pause.Poll(netplayLocked);
+			if (s_pause.open)
 			{
 				execute_info.status |= 1;
 			}
@@ -472,21 +446,7 @@ namespace m2ftg
 			// Input: refresh the shared XInput snapshot, then evaluate each player's bindings
 			// via csl_pad (Input, set up on the YAMP Controls page — shared with StF/FV).
 			Input::PollPads();
-			if (netplayMatch && netplayLocalPad >= 0)
-			{
-				// ONLINE, YOU ALWAYS PLAY AS PLAYER 1 LOCALLY. The guest occupies pad slot 1 in
-				// the match, but they are the only person at that keyboard and have their own
-				// Player 1 bindings - making them remap to Player 2 just to play online would be
-				// absurd. The other slot is filled from P2 only to keep it well-formed: Step()
-				// overwrites BOTH pads from the transmitted inputs before module_main sees them.
-				s_pads[netplayLocalPad].set_state(0);
-				s_pads[1 - netplayLocalPad].set_state(1);
-			}
-			else
-			{
-				s_pads[0].set_state(0);
-				s_pads[1].set_state(1);
-			}
+			Cabinet::RoutePads(s_pads, netplayMatch, netplayLocalPad);
 			for (int i = 0; i < 2; i++)
 			{
 				memcpy(&execute_info.pad[i], &s_pads[i], 0xE0);
@@ -495,35 +455,15 @@ namespace m2ftg
 				execute_info.pad[i].m_is_connected = true;
 			}
 
-			// Button assignments: the FIXED module-facing table (slot order A, B, Y, X, LT, LB,
-			// RT, RB). Remapping happens host-side in csl_pad::set_state, which routes each
-			// player's bound inputs onto the button bit carrying the wanted combo — so this must
-			// be Input::MODULE_ASSIGN, the table those routes assume (the old raw template
-			// here shifted every combo button by one slot).
-			for (int p = 0; p < 2; p++)
-			{
-				for (int i = 0; i < 8; i++)
-				{
-					execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
-				}
-			}
+			// Button assignments: the fixed module-facing table - see Cabinet::FillAssignTable
+			// (the one-slot-shift bug it guards against was found in THIS host).
+			Cabinet::FillAssignTable(execute_info);
 
-			// Dedicated coin binding: a press becomes the coin status bit (host->module bit5),
-			// as in StF/FV. Meaningless in freeplay, swallowed while the pause menu is open.
+			// Dedicated coin binding -> the coin status bit (host->module bit5), as in StF/FV.
+			// Suppression rationale is with Cabinet::CoinBinding.
+			if (s_coinButton.Pressed(g_isFreeplay || s_pause.open || netplayLocked))
 			{
-				static bool s_coinWasDown[2] = {};
-				for (int p = 0; p < 2; p++)
-				{
-					const bool down = Input::ActionDown(p, Input::Action_Coin);
-					// Not transmitted, so it cannot be honoured during a session without
-					// desyncing - the coin bit would be raised on one machine only.
-					if (down && !s_coinWasDown[p] && !g_isFreeplay && !s_pauseMenuOpen
-						&& !netplayLocked)
-					{
-						execute_info.status |= 0x20;
-					}
-					s_coinWasDown[p] = down;
-				}
+				execute_info.status |= 0x20;
 			}
 
 			// Cabinet TEST / SERVICE. Suppressed while paused, and for the whole of a netplay
@@ -551,47 +491,14 @@ namespace m2ftg
 			// the ROM's counter restarts. If it does, the DLL's board init never re-ran, and the
 			// fix is to notice the counter going backwards and rebuild whatever this host sets up
 			// at boot. Reproduces headlessly in ~3 minutes by scripting two short TEST presses.
-			{
-				bool test = false;
-				bool service = false;
-				if (!s_pauseMenuOpen && !netplayLocked)
-				{
-					for (int p = 0; p < 2; p++)
-					{
-						test = test || Input::ActionDown(p, Input::Action_Test);
-						service = service || Input::ActionDown(p, Input::Action_Service);
-					}
-				}
-				SetSystemSwitches(test, service);
-			}
+			Cabinet::PollSystemSwitches(s_pause.open || netplayLocked);
 
-			// Arcade coin/start dance (see StF.cpp / YLAD method_pre_render for the reference
-			// logic). ONLY meaningful with the freeplay dip switch OFF — with is_freeplay=1 the
-			// module takes START directly and there is no coin to insert; the dance would just
-			// swallow the player's first press.
-			if (!g_isFreeplay && !s_pauseMenuOpen && !netplayMatch)
+			// Arcade coin/start dance - Cabinet::CoinStart (see StF.cpp / YLAD method_pre_render
+			// for the reference logic; the full write-up is with the class). During a netplay
+			// round it runs AFTER Step() instead - see below.
+			if (!g_isFreeplay && !s_pause.open && !netplayMatch)
 			{
-				if (s_coinPending && s_startScreen)
-				{
-					if (!s_startToggle)
-					{
-						execute_info.pad[0].m_now |= 0x100;
-						execute_info.pad[0].m_push |= 0x100;
-					}
-					s_startToggle = !s_startToggle;
-				}
-				else
-				{
-					s_coinPending = false;
-					if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
-					{
-						execute_info.status |= 0x20;
-						execute_info.pad[0].m_now &= ~0x100u;
-						execute_info.pad[0].m_push &= ~0x100u;
-						s_coinPending = true;
-						s_startToggle = false;
-					}
-				}
+				s_coinStart.Run(execute_info.pad[0], execute_info.status);
 			}
 
 			// (2) Poll the plugin and run the round-start state machine, then (3) decide whether
@@ -605,34 +512,14 @@ namespace m2ftg
 			// identical on both machines now, so the coin bit it raises is identical too.
 			if (netplayMatch && !g_isFreeplay)
 			{
-				if (s_coinPending && s_startScreen)
-				{
-					if (!s_startToggle)
-					{
-						execute_info.pad[0].m_now |= 0x100;
-						execute_info.pad[0].m_push |= 0x100;
-					}
-					s_startToggle = !s_startToggle;
-				}
-				else
-				{
-					s_coinPending = false;
-					if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
-					{
-						execute_info.status |= 0x20;
-						execute_info.pad[0].m_now &= ~0x100u;
-						execute_info.pad[0].m_push &= ~0x100u;
-						s_coinPending = true;
-						s_startToggle = false;
-					}
-				}
+				s_coinStart.Run(execute_info.pad[0], execute_info.status);
 			}
 
 			window.BeginFrame();
 			window.NewImGuiFrame();
-			if (s_pauseMenuOpen)
+			if (s_pause.open)
 			{
-				if (!DrawPauseMenu(window, s_pauseMenuOpen))
+				if (!DrawPauseMenu(window, s_pause.open))
 				{
 					return false; // Quit picked
 				}
@@ -658,7 +545,7 @@ namespace m2ftg
 				execute_info.output_texid = s_lastOutputTexId;
 			}
 
-			s_startScreen = (execute_info.status & 0x40) != 0;
+			s_coinStart.NoteStatus(execute_info.status);
 
 			const int interesting = (execute_info.status & ~0x20) | (execute_info.work_kind << 16);
 			if (interesting != s_lastLogged && s_frame < 5000)

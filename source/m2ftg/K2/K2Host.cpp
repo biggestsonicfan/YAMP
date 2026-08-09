@@ -20,6 +20,7 @@
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
 #include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
 #include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
+#include "../Cabinet/Cabinet.h"       // the shared cabinet front panel (pause/coin/assign/switches)
 #include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
 #include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
 #include "../ModuleArgs.h"
@@ -2229,8 +2230,7 @@ namespace m2ftg
 			execute_info.status = 0;
 			execute_info.result = 0x80004005;   // the module writes S_OK over this on success
 			execute_info.output_texid = 0;
-			execute_info.sound_volume =
-				static_cast<float>(gGeneral.GetSettings()->m_volumePercent) / 100.0f;
+			execute_info.sound_volume = Cabinet::VolumeFraction();
 
 			// NETWORKING IS DELIBERATELY ABSENT FROM THIS HOST. A full VON netplay stack was
 			// built here (lockstep rounds, a handshake-as-barrier round start, host-forced HLE
@@ -2240,14 +2240,13 @@ namespace m2ftg
 			// "fresh start" notes (one board per machine, the link over the wire), not from
 			// code archaeology here.
 
-			static bool s_pauseMenuOpen = false;
-			{
-				static bool s_escWasDown = false;
-				const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-				if (escDown && !s_escWasDown) s_pauseMenuOpen = !s_pauseMenuOpen;
-				s_escWasDown = escDown;
-			}
-			if (s_pauseMenuOpen) execute_info.status |= 1;
+			// Locked while a cabinet link is live - NEW with the Cabinet adoption: this host had
+			// no pause lock at all, and pausing a linked Virtual On cabinet mid-ring stops the
+			// board and trips the peer's link watchdog (the ROM's own error accounting) within
+			// seconds, exactly the reason MrLink locks the LJ host's pause.
+			static Cabinet::PauseMenu s_pause;
+			s_pause.Poll(LinkIsLive());
+			if (s_pause.open) execute_info.status |= 1;
 
 			// Input: refresh the shared XInput snapshot, then evaluate each player's bindings via
 			// csl_pad — the same Controls page every other m2ftg host uses. This generation embeds
@@ -2255,8 +2254,7 @@ namespace m2ftg
 			// 0xE0 prefix.
 			Input::PollPads();
 			static pxd::csl_pad s_pads[2];
-			s_pads[0].set_state(0);
-			s_pads[1].set_state(1);
+			Cabinet::RoutePads(s_pads, false, -1);   // no netplay on this host - no slot swap
 			for (int p = 0; p < 2; p++)
 			{
 				execute_info.pad[p] = s_pads[p];
@@ -2265,15 +2263,8 @@ namespace m2ftg
 				execute_info.pad[p].m_is_connected = true;
 			}
 
-			// The FIXED module-facing assignment table (slot order A, B, Y, X, LT, LB, RT, RB).
-			// Remapping happens host-side in csl_pad::set_state, which routes each player's bound
-			// inputs onto the bit carrying the wanted combo, so this must be Input::MODULE_ASSIGN —
-			// the table those routes assume. Using the raw template instead shifts every combo
-			// button by one slot (the bug that was found and fixed in the YLAD VF2 host).
-			for (int p = 0; p < 2; p++)
-			{
-				for (int i = 0; i < 8; i++) execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
-			}
+			// The fixed module-facing assignment table - see Cabinet::FillAssignTable.
+			Cabinet::FillAssignTable(execute_info);
 
 			// VIRTUAL ON DOES NOT USE assign[0][4] AS A BUTTON ASSIGNMENT. It reads that one byte -
 			// execute_info + 0x15E4 - as an INDEX into its own control-mapping table, and that is
@@ -2331,55 +2322,24 @@ namespace m2ftg
 				}
 			}
 
-			// Dedicated coin binding -> the coin status bit (host->module bit5). Meaningless in
-			// freeplay and swallowed while the pause menu is open.
+			// Dedicated coin binding -> the coin status bit (host->module bit5). See
+			// Cabinet::CoinBinding.
+			static Cabinet::CoinBinding s_coinButton;
+			if (s_coinButton.Pressed(s_isFreeplay || s_pause.open))
 			{
-				static bool s_coinWasDown[2] = {};
-				for (int p = 0; p < 2; p++)
-				{
-					const bool down = Input::ActionDown(p, Input::Action_Coin);
-					if (down && !s_coinWasDown[p] && !s_isFreeplay && !s_pauseMenuOpen)
-					{
-						execute_info.status |= 0x20;
-					}
-					s_coinWasDown[p] = down;
-				}
+				execute_info.status |= 0x20;
 			}
 
-			// The arcade coin/start dance. ONLY meaningful with the freeplay dip switch OFF: with
-			// is_freeplay = 1 the module takes START directly and there is no coin to insert, so
-			// running the dance would just swallow the player's first press.
-			static bool s_startScreen = false;
-			static bool s_coinPending = false;
-			static bool s_startToggle = false;
-			if (!s_isFreeplay && !s_pauseMenuOpen)
+			// The arcade coin/start dance - Cabinet::CoinStart (the write-up is with the class).
+			static Cabinet::CoinStart s_coinStart;
+			if (!s_isFreeplay && !s_pause.open)
 			{
-				if (s_coinPending && s_startScreen)
-				{
-					if (!s_startToggle)
-					{
-						execute_info.pad[0].m_now |= 0x100;
-						execute_info.pad[0].m_push |= 0x100;
-					}
-					s_startToggle = !s_startToggle;
-				}
-				else
-				{
-					s_coinPending = false;
-					if (s_startScreen && (execute_info.pad[0].m_now & 0x100) != 0)
-					{
-						execute_info.status |= 0x20;
-						execute_info.pad[0].m_now &= ~0x100u;
-						execute_info.pad[0].m_push &= ~0x100u;
-						s_coinPending = true;
-						s_startToggle = false;
-					}
-				}
+				s_coinStart.Run(execute_info.pad[0], execute_info.status);
 			}
 
 			window.BeginFrame();
 			window.NewImGuiFrame();
-			if (s_pauseMenuOpen && !DrawPauseMenu(window, s_pauseMenuOpen))
+			if (s_pause.open && !DrawPauseMenu(window, s_pause.open))
 			{
 				return false;   // Quit picked
 			}
@@ -2395,25 +2355,10 @@ namespace m2ftg
 			// Which cabinet the render draws - a debug flag only (-von-render1).
 			SetRenderBoard(WantRenderBoard1() ? 1 : 0);
 
-			// Cabinet service panel: TEST opens the board's own service menu - the operator's input
-			// test, which is how you find out which controls the ROM actually sees - and SERVICE is
-			// the credit / navigate button beside it. Held lines; the ROM decides what latches.
-			{
-				bool test = false;
-				bool service = false;
-				if (!s_pauseMenuOpen)
-				{
-					for (int p = 0; p < 2; p++)
-					{
-						test = test || Input::ActionDown(p, Input::Action_Test);
-						service = service || Input::ActionDown(p, Input::Action_Service);
-					}
-				}
-				// A role change drives TEST itself - see SoftResetIntoRole. ORed in rather than
-				// overriding, so a user holding the real switch is never fought.
-				test = test || DriveRoleResetSwitch();
-				SetSystemSwitches(test, service);
-			}
+			// Cabinet service panel - see Cabinet::PollSystemSwitches. A role change drives TEST
+			// itself (SoftResetIntoRole), passed as forceTest so a user holding the real switch
+			// is never fought and the reset is never suppressed by the pause menu.
+			Cabinet::PollSystemSwitches(s_pause.open, DriveRoleResetSwitch());
 
 			// Input-routing probe: hold a pattern on pad[1] and nothing on pad[0]. If player N's
 			// input reaches board N, the two boards' I/O bytes have to diverge; if both boards read
@@ -2491,7 +2436,7 @@ namespace m2ftg
 			LogLinkState(s_frame);
 			s_frame++;
 			// status bit6 = the attract/insert-coin screen, the state the coin dance needs.
-			s_startScreen = (execute_info.status & 0x40) != 0;
+			s_coinStart.NoteStatus(execute_info.status);
 
 			// Display blit. execute_info.output_texid is a 1-BASED index into the FIRST instance
 			// table (gs+0x1808, capacity at gs+0x181C) — the same table the render-target setter
