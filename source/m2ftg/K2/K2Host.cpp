@@ -20,7 +20,7 @@
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
 #include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
 #include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
-#include "../Cabinet/Cabinet.h"       // the shared cabinet front panel (pause/coin/assign/switches)
+#include "../../cabinet/Cabinet.h"    // the shared cabinet front panel (pause/coin/assign/switches)
 #include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
 #include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
 #include "../ModuleArgs.h"
@@ -2358,7 +2358,7 @@ namespace m2ftg
 			// Cabinet service panel - see Cabinet::PollSystemSwitches. A role change drives TEST
 			// itself (SoftResetIntoRole), passed as forceTest so a user holding the real switch
 			// is never fought and the reset is never suppressed by the pause menu.
-			Cabinet::PollSystemSwitches(s_pause.open, DriveRoleResetSwitch());
+			Cabinet::PollSystemSwitches(s_pause.open, SetSystemSwitches, DriveRoleResetSwitch());
 
 			// Input-routing probe: hold a pattern on pad[1] and nothing on pad[0]. If player N's
 			// input reaches board N, the two boards' I/O bytes have to diverge; if both boards read

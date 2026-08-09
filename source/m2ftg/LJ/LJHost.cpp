@@ -32,7 +32,7 @@ void AdvanceFrameStampNow();
 #include "../Debug/HleHooks.h"
 #include "../Debug/DebugWindows.h"
 #include "../NetSession.h"
-#include "../Cabinet/Cabinet.h"
+#include "../../cabinet/Cabinet.h"
 #include "../SystemSwitches.h"
 #include "../ELF/CharRamFix.h"
 #include "MrLink.h"
@@ -599,7 +599,7 @@ namespace m2ftg
             }
 
             // Cabinet service panel - see Cabinet::PollSystemSwitches and InstallSystemSwitches.
-            Cabinet::PollSystemSwitches(s_pause.open || netplayLocked);
+            Cabinet::PollSystemSwitches(s_pause.open || netplayLocked, SetSystemSwitches);
 
             // Arcade coin/start protocol - Cabinet::CoinStart (LJ FUN_142494450; the write-up is
             // with the class). Follows the same setting Run passed to module_start as

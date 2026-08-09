@@ -44,10 +44,9 @@ unsigned int ModuleDrawLimitNow();
 // namespace because that is where they were first needed, but neither touches anything m2ftg —
 // see m2ftg/HostUI.h.
 #include "../../m2ftg/HostUI.h"
-// The shared cabinet front-panel helpers (Esc pause toggle, coin-binding edge detect). Only the
-// game-agnostic pieces are used from here - the coin/start dance, assign table and pad routing
-// in there are the m2ftg module contract, which this family does not speak.
-#include "../../m2ftg/Cabinet/Cabinet.h"
+// The shared cabinet front-panel helpers (Esc pause toggle, coin binding, coin/start dance,
+// TEST/SERVICE poll) - this module speaks the same status-word dialect as the m2ftg family.
+#include "../../cabinet/Cabinet.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
 #include "../../DebugLog.h"
@@ -733,7 +732,7 @@ namespace pre3
 	bool pre3::GameLoop(const ModuleEntries& entries, RenderWindow& window)
 	{
 		static csl_pad s_pads[2];
-		static m2ftg::Cabinet::CoinStart s_coinStart;
+		static Cabinet::CoinStart s_coinStart;
 
 		// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
 		// routing and the input suppression below all see the same answer for the whole frame.
@@ -773,18 +772,18 @@ namespace pre3
 		execute_info.status = 0;
 		execute_info.output_texid = 0;
 		execute_info.result = 0x80004005;
-		execute_info.sound_volume = m2ftg::Cabinet::VolumeFraction();
+		execute_info.sound_volume = Cabinet::VolumeFraction();
 		// The two per-channel scalars the frame callback multiplies sound_volume by. The host is
 		// the only thing that ever writes them and the module reads them raw, so a zero here is
 		// silence on all six channels — unity is what "the master volume alone decides" means.
 		execute_info.volume_channel5 = 1.0f;
 		execute_info.volume_channels0_4 = 1.0f;
 
-		// DISABLED DURING NETPLAY - the shared rationale is with m2ftg::Cabinet::PauseMenu;
-		// pre3's extra wrinkle is that a pause also suppresses the per-frame submit and the
+		// DISABLED DURING NETPLAY - the shared rationale is with Cabinet::PauseMenu; pre3's
+		// extra wrinkle is that a pause also suppresses the per-frame submit and the
 		// upload-stamp advance below, so an "only cosmetic" pause would still change how much
 		// work this side does.
-		static m2ftg::Cabinet::PauseMenu s_pause;
+		static Cabinet::PauseMenu s_pause;
 		s_pause.Poll(netplayLocked);
 		// The module's own pause: module_main freezes the board, pauses all six audio channels
 		// and records nothing, so the submit below is skipped too and the last completed frame
@@ -866,37 +865,21 @@ namespace pre3
 		// the dip switches say - the board's own input test shows it, and with free play on the
 		// ROM simply does not credit it. Still swallowed while the pause menu is open, like every
 		// other input.
-		// (m2ftg::Cabinet::CoinBinding is game-agnostic - it only reads Input. NOTE no freeplay
-		// term in the suppression, unlike the m2ftg hosts: the cabinet's coin switch is wired
-		// whatever the dips say, and with free play on the ROM simply does not credit it.)
+		// (NOTE no freeplay term in the suppression, unlike the m2ftg hosts: this cabinet's
+		// coin switch is wired whatever the dips say, and with free play on the ROM simply
+		// does not credit it.)
 		{
-			static m2ftg::Cabinet::CoinBinding s_coinButton;
+			static Cabinet::CoinBinding s_coinButton;
 			if (s_coinButton.Pressed(s_pause.open || roundLocked))
 			{
 				execute_info.status |= 0x20;
 			}
 		}
 
-		// Cabinet service panel (see InstallSystemSwitches): TEST opens the board's own service
-		// menu - the operator's input test, which is how the panel wiring gets checked - and
-		// SERVICE is the credit / navigate button beside it. Held lines, like the panel; the ROM
-		// decides what latches. Either player's binding closes the one switch, and both are
-		// suppressed while paused so a menu keystroke cannot reach the board.
+		// Cabinet service panel - see Cabinet::PollSystemSwitches and this family's own
+		// InstallSystemSwitches (pre3's switch plumbing, passed as the setter).
 		{
-			// Suppressed while paused, and for the whole of a netplay session: neither is in the
-			// transmitted pad, so honouring them would drop one machine into the operator's menu
-			// (or feed it a service credit) while the other carried on playing.
-			bool test = false;
-			bool service = false;
-			if (!s_pause.open && !netplayLocked)
-			{
-				for (int p = 0; p < 2; p++)
-				{
-					test = test || Input::ActionDown(p, Input::Action_Test);
-					service = service || Input::ActionDown(p, Input::Action_Service);
-				}
-			}
-			SetSystemSwitches(test, service);
+			Cabinet::PollSystemSwitches(s_pause.open || netplayLocked, SetSystemSwitches);
 		}
 
 		// THE WHEEL AND PEDALS, from this cabinet's own player 1. Not suppressed during a netplay
@@ -915,8 +898,8 @@ namespace pre3
 			SetDrivingAxes(steer, throttle, brake);
 		}
 
-		// The arcade coin/start protocol - the same m2ftg::Cabinet::CoinStart the m2ftg hosts
-		// run (this module speaks the same status-word dialect: bit5 coin in, bit6 start screen
+		// The arcade coin/start protocol - the same Cabinet::CoinStart the m2ftg hosts run
+		// (this module speaks the same status-word dialect: bit5 coin in, bit6 start screen
 		// out).
 		//
 		// OFF FOR THE WHOLE OF A NETPLAY SESSION, and unlike the m2ftg path it is not re-run

@@ -36,7 +36,7 @@
 #include "../../pxd/Imports.h"
 #include "../ImportSymbols.h"
 #include "../HostUI.h" // PollAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
-#include "../Cabinet/Cabinet.h"
+#include "../../cabinet/Cabinet.h"
 #include "../../input/Input.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
@@ -491,7 +491,7 @@ namespace m2ftg
 			// the ROM's counter restarts. If it does, the DLL's board init never re-ran, and the
 			// fix is to notice the counter going backwards and rebuild whatever this host sets up
 			// at boot. Reproduces headlessly in ~3 minutes by scripting two short TEST presses.
-			Cabinet::PollSystemSwitches(s_pause.open || netplayLocked);
+			Cabinet::PollSystemSwitches(s_pause.open || netplayLocked, SetSystemSwitches);
 
 			// Arcade coin/start dance - Cabinet::CoinStart (see StF.cpp / YLAD method_pre_render
 			// for the reference logic; the full write-up is with the class). During a netplay
