@@ -1,112 +1,50 @@
-# Sega Racing Classic 2 — the TEST switch soft-resets instead of opening the service menu
+# Sega Racing Classic 2 — the TEST switch soft-reset regression
 
-**OPEN. Not fixed. Handed off 2026-08-08.**
+**RESOLVED 2026-08-08.** Root cause: `DefaultDisableMask` bit 3, introduced by `cee1bb0`. Fix:
+hook 3 moved into `SRC2_BOOT_CRITICAL` (`{1, 2, 3, 5}`) and removed from the default disable mask
+(`0x3F6008` → `0x3F6000`) in `source/pre3/HleHooks.cpp`. Verified on a build of `b53294b` + fix:
+TEST opens the game's TEST MENU directly, SERVICE/TEST navigate it, and the boot network check
+still runs — nothing else about the mask (scalars, boot presentation, netplay oracle) changed.
 
-Pressing TEST on SRC2 shows a screen identical to a soft reset instead of the board's service
-menu. This is a REGRESSION: it works in a Release build from 2026-08-06 and fails at `b53294b`.
+## What the symptom actually was
 
-The value of this document is mostly **negative results**. A long session eliminated most of the
-obvious surface; repeating any of it is wasted time.
+Pressing TEST looked like a soft reset. It was one: with hook 3 disabled, the per-frame
+`bla 0x55D800` in the game's main loop (guest 0x09A3FC) is restored, but hooks 1 and 2 — which are
+boot-critical and stay enabled — excise the *loader* of the overlay it calls, so 0x55D800 is all
+zeros. Attract and races never take the branch; TEST-menu entry does. The guest crash-reboots into
+the MODEL3 SYSTEM PROGRAM status screen ("PRESS START OR TEST BUTTON TO CONTINUE" — the string that
+named this screen; it is the BIOS's, which is why it is not in the game-ROM Ghidra db). Pressing
+TEST there continues into a boot that hangs in the IRQ-ack spin at guest 0x1E78 — the same
+reused-device-table failure hook 1's diagnosis in `HleHooks.cpp` describes — with the CPU register
+file and RAM checksums bit-frozen while the module's frame pump keeps running.
 
-## The two reference points
+## Why the first hunt (2026-08-08, earlier session) missed it
 
-| | build | behaviour |
-|---|---|---|
-| GOOD | `build/bin/Win64/Release/YAMP-known-good-0806.exe` (built 2026-08-06 12:37, so a commit at or
-before `7415d0d`, 08-04) | TEST opens the service menu |
-| BAD | `b53294b`, both Debug and Release | TEST shows the reset screen |
+Documented because each is a reusable trap:
 
-The known-good binary was recovered from `YAMP - Cryo.zip` in that folder after being overwritten.
-**Do not rebuild over it** — keep it, it is the only known-good artifact.
+* **The kill-switch matrix was never wired.** `src2_menu_test.cmd` set `YAMP_SRC2_NO*` environment
+  variables that no code reads, so every "eliminated via env kill-switch" row in the earlier
+  version of this document was void. Only `YAMP_PRE3_TILEMAP` and `YAMP_PRE3_BOOTRENDER` exist —
+  both re-verified innocent at HEAD.
+* **"All SRC2 HLE hooks disabled" cannot exonerate the mask.** `FFFF…` and the default mask both
+  have bit 3 set, so that experiment reproduced the bug's precondition instead of removing it. The
+  discriminating run was mask `0` (everything enabled), which fixed TEST on the first try.
+* **The classifier judged the wrong symptom.** "The reset screen still appears" was used to mark
+  commits BAD, but the informative signal was the *hang after continuing* — measurable as the guest
+  master frame counter (0x737978) pinned at 0/1 with a frozen CPU checksum, or as the tilemap name
+  tables (bare ASCII at shadow 0xF8000+, swizzle `offset ^ 2`) reading "TEST MENU" vs the SYSTEM
+  PROGRAM banner. With that classifier the bisect converged in five builds:
+  455eb62 GOOD → 62c6251 GOOD → 5df70cb GOOD → d1d979e GOOD → cee1bb0 BAD.
+* **The per-frame sweep's "fine" verdicts only cover attract.** Hook 3 measured 658 draws / no
+  effect over 400 frames because nothing on the attract path calls the overlay. A verdict for a
+  hook that guards an operator path needs the operator path exercised.
 
-27 commits separate `7415d0d` from `b53294b`.
+## The instrument that closed it
 
-## What the board actually does (measured)
-
-TEST *is* reaching the board — it is not an input or gating problem:
-
-* `switches: TEST=1 SERVICE=0 (paused=0 netplayLocked=0)` — the switch arrives ungated
-* the board responds: the tilemap control register gains a layer, `0x1F00 -> 0x3F00`
-* the guest's master frame counter at `0x737978` **freezes, and in a manual run went to 0**
-* `execute_info.status` loses bit 6 (the start-screen bit): `0x40 -> 0x0`
-* the 3D draw count collapses `~180 -> 8` and stays there
-* the scroll buffer keeps uploading every frame, and TILEMAP writes continue
-
-So the board leaves attract, something new is enabled, and then it sits in a state drawing almost
-nothing. Whether that state is "the menu, unrendered" or "the boot sequence, restarted" is **not
-settled** — the user reads the screen as a reset.
-
-## ELIMINATED — do not re-test these
-
-Each was disabled at `b53294b` and the reset still happened.
-
-| ruled out | how |
-|---|---|
-| `CommBoard::DriveRoomRole` / `RestoreResetSnapshot` (this session's soft-reset work) | a log inside `RestoreResetSnapshot` itself fired **0 times**; also broken at `92ef242` and `5df70cb`, which predate it |
-| `ArcadeSettings` writes (working copy + NVRAM) | env kill-switch |
-| `SecurityBoard` install | env kill-switch |
-| `execute_info.src2_scalars` (the 1.0f motion/bonus write) | env kill-switch |
-| `InstallBootRender` | env kill-switch AND `YAMP_PRE3_BOOTRENDER=0`; byte-identical behaviour either way |
-| ADC serving on port `0x3C` | env kill-switch (pass-through to the module's own accessor) |
-| **all five of the above at once** | still resets |
-| **every SRC2 HLE hook** | `DisabledHleHooksLo/Hi.SRC2 = FFFFFFFFFFFFFFFF` in `settings.ini` — still resets |
-| the SYSTEM-port bit being wrong | forcing each bit in turn; `0x04` and `0x40` both reset on screen |
-
-### The bit map does NOT transfer from FV2, which is worth knowing anyway
-
-`SystemSwitches.cpp` documents `BIT_TEST = 0x04` as measured on a headless `-fv2` run, keyed on
-`execute_info`'s game-mode pair moving to `14/00` / `15/01`. **On SRC2 the mode pair never leaves
-`00/00` for any bit**, so that readout does not transfer. Forcing each bit on SRC2 gives three
-groups by draw count:
-
-```
-0x01 0x02 0x08 0x20   attract continues, draws climb 179 -> 237
-0x04 0x80             draws collapse to 8 and stay
-0x10 0x40             collapse to 8, then recover to ~100-118 and hold
-```
-
-The `0x10`/`0x40` group looked like a live screen and is **not** — the user confirmed `0x40` is
-also a reset on screen. The bit assignment is unchanged between the good and bad builds, so a wrong
-bit cannot be *this* regression, but the FV2-derived mapping is unverified on SRC2 regardless.
-
-## NOT yet eliminated — start here
-
-Everything above is reachable by a runtime switch. What is not:
-
-1. **The `pre3_config_t` block passed to `module_start`.** Read before any hook exists, so no
-   kill-switch can reach it. The SRC2-specific difficulty fold is NEW in the range:
-   `SRC2_TO_BOARD[4] = { 0, 2, 3, 4 }` (`Pre3Host.cpp`), which turns settings Difficulty=1 into
-   board byte 2 where it used to pass 1. Also new: `link_node_id` / `link_peer_count`.
-   The module's own injector folds these into the board's NVRAM, and the service menu is what edits
-   that NVRAM.
-2. **`Determinism`'s clock redirect**, installed on vtable slot 17 for *every* game (pinned only for
-   FV2). Inert in principle - it tail-calls the original - but it is a vtable patch.
-3. **`BoardVtables` / `ImportSymbols`** pattern-based resolution, changed by `2df9408`.
-4. **The rest of `Patch.cpp`** (+615 lines in the range) beyond `InstallBootRender`.
-5. **Anything outside `source/pre3`.** The kill-switches only covered pre3.
-
-## Tooling notes that cost hours
-
-* **`DebugLogFile` compiles away outside Debug** (`DebugLog.h` gates on `DEBUG || _DEBUG`). Release
-  runs therefore produce **no `d3d12_debug.log` at all**. The known-good reference is a RELEASE
-  build, so any probe used to compare against it must be raw `fopen`/`fprintf`, not `DebugLogFile`.
-  Four rebuilds were spent bisecting Debug before this was noticed.
-* **`git checkout <sha> -- source` is not enough** to build an old commit: it restores the files
-  that existed then but leaves every file added since, so a newer `.cpp` compiles against an older
-  header. A clean bisect must also delete anything under `source/` not in that commit (leaving
-  `source/Utils`, a submodule, alone) and then re-run `premake5.exe vs2022`, because the generated
-  vcxproj lists HEAD's file set.
-* **A fixed-frame automated TEST press does not work across commits** - older builds have not
-  started drawing by then, so the "before" sample is already 0 draws. Trigger on the board actually
-  drawing (`draws > 100`) and press N frames later.
-
-A working Release bisect harness with the adaptive trigger got as far as classifying `b53294b`
-correctly (`before=404 after=8 -> BAD`) but `7415d0d` never reaches 100 draws, so the oldest end of
-the range needs a different criterion before the bisect can close.
-
-## Suggested next step
-
-Bisect the 27 commits in Release with the adaptive-trigger harness, from the NEWEST end where
-`draws > 100` is reachable, and find the first BAD. If the range bottoms out in commits that never
-draw the attract, fall back to the config block in (1) above - force the difficulty byte back to the
-pre-fold value and re-test, which is a two-line change and the single most suspicious item left.
+A ~30-line temporary probe in `Pre3Host.cpp` (see git history of this doc's session, not shipped):
+arms when `ModuleDrawsLastFrameNow() > 100`, holds TEST for 12 frames, presses again at +150, and
+logs — per 16 frames — draws, `execute_info.status`, guest 0x737978, `StateCheckParts` CPU/RAM
+checksums, machine phase/request words, and on snapshot frames dumps all four tilemap name tables
+as ASCII plus the PPC register file (cpu object at DLL+0x62AA90, regs at +8; the hang showed
+PC 0x1EBC/0x1EC0). Reading the screen text from the shadow is what let a headless `-frames` run be
+classified without a human watching the window.

@@ -540,6 +540,23 @@ namespace net
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
         st.pre3_vs_start =
             (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
+        {
+            const uint32_t flags = s_api->get_room_flags(s_session);
+            st.src2.present = (flags & YAMPNET_ROOM_SRC2_PRESENT) != 0;
+            if (st.src2.present)
+            {
+                st.src2.cabinetType = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_CABINET_SHIFT) & YAMPNET_ROOM_SRC2_CABINET_MASK);
+                st.src2.difficulty = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_DIFF_SHIFT) & YAMPNET_ROOM_SRC2_DIFF_MASK);
+                st.src2.gameMode = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_MODE_SHIFT) & YAMPNET_ROOM_SRC2_MODE_MASK);
+                st.src2.motorPower = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_MOTOR_SHIFT) & YAMPNET_ROOM_SRC2_MOTOR_MASK);
+                st.src2.ranking = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_RANKING_SHIFT) & YAMPNET_ROOM_SRC2_RANKING_MASK);
+            }
+        }
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
         if (s_api->get_desync(s_session, &dFrame, &dLocal, &dRemote) != 0)
@@ -625,7 +642,7 @@ namespace net
     }
 
     bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
-                  bool pre3VsStart)
+                  bool pre3VsStart, const Src2Assignments* src2)
     {
         if (!UiMayAct())
             return false;
@@ -641,6 +658,23 @@ namespace net
                         | (vf2Version20 ? YAMPNET_ROOM_FLAG_VF2_VERSION20 : 0u)
                         | (vsMode ? YAMPNET_ROOM_FLAG_VS_MODE : 0u)
                         | (pre3VsStart ? YAMPNET_ROOM_FLAG_PRE3_VS_START : 0u);
+        // The five SRC2 GAME ASSIGNMENTS fields, when the caller has them. Masked on the way in
+        // even though the reader clamps too: a stray high bit here would land in another field
+        // (or an SCE-owned one) and advertise a room that does not exist.
+        if (src2 != nullptr && src2->present)
+        {
+            rcfg.game_flags |= YAMPNET_ROOM_SRC2_PRESENT
+                | (uint32_t(src2->cabinetType & YAMPNET_ROOM_SRC2_CABINET_MASK)
+                    << YAMPNET_ROOM_SRC2_CABINET_SHIFT)
+                | (uint32_t(src2->difficulty & YAMPNET_ROOM_SRC2_DIFF_MASK)
+                    << YAMPNET_ROOM_SRC2_DIFF_SHIFT)
+                | (uint32_t(src2->gameMode & YAMPNET_ROOM_SRC2_MODE_MASK)
+                    << YAMPNET_ROOM_SRC2_MODE_SHIFT)
+                | (uint32_t(src2->motorPower & YAMPNET_ROOM_SRC2_MOTOR_MASK)
+                    << YAMPNET_ROOM_SRC2_MOTOR_SHIFT)
+                | (uint32_t(src2->ranking & YAMPNET_ROOM_SRC2_RANKING_MASK)
+                    << YAMPNET_ROOM_SRC2_RANKING_SHIFT);
+        }
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
         {
@@ -715,6 +749,21 @@ namespace net
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_VS_MODE) != 0;
             out[i].pre3_vs_start =
                 (rooms[i].game_flags & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
+            const uint32_t flags = rooms[i].game_flags;
+            out[i].src2.present = (flags & YAMPNET_ROOM_SRC2_PRESENT) != 0;
+            if (out[i].src2.present)
+            {
+                out[i].src2.cabinetType = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_CABINET_SHIFT) & YAMPNET_ROOM_SRC2_CABINET_MASK);
+                out[i].src2.difficulty = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_DIFF_SHIFT) & YAMPNET_ROOM_SRC2_DIFF_MASK);
+                out[i].src2.gameMode = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_MODE_SHIFT) & YAMPNET_ROOM_SRC2_MODE_MASK);
+                out[i].src2.motorPower = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_MOTOR_SHIFT) & YAMPNET_ROOM_SRC2_MOTOR_MASK);
+                out[i].src2.ranking = uint8_t(
+                    (flags >> YAMPNET_ROOM_SRC2_RANKING_SHIFT) & YAMPNET_ROOM_SRC2_RANKING_MASK);
+            }
         }
         return n;
     }

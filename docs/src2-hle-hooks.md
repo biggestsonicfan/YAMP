@@ -181,33 +181,48 @@ SRC2 was drivable at all (the ADC ring had never been filled; see `pre3::SetDriv
 | behaviour | hooks | mask | how established |
 |---|---|---|---|
 | **CPU car AI** | 13 | `0x0000000000002000` | **MEASURED.** Isolated: hook 13 disabled, all 25 others shipped -> the AI drives. |
-| **Start-up WARNING screen** | 16 | `0x0000000000010000` | Inferred - see below |
-| **Daytona 2 TITLE logo** | 17, 18, 19, 20 | `0x00000000001E0000` | Inferred - see below |
-| the boot presentation together | 16-21 | `0x00000000003F0000` | **MEASURED as a group** - both screens appeared |
-| everything above | 13, 16-21 | `0x00000000003F2000` | |
+| **Start-up WARNING screen** | **6** | `0x0000000000000040` | **MEASURED** (2026-08-08, cold-boot bisection) - see the correction below |
+| ~~boot presentation via 16-21~~ | 16-21 | `0x00000000003F0000` | **RETRACTED** - no visible effect alone; see below |
 
-**What is measured and what is not.** Disabling 16-21 as a group brought back both the warning
-screen and the title logo, user-confirmed. Which hook belongs to which screen is NOT yet measured -
-it is read off the two routines they sit in:
+### CORRECTION (2026-08-08): the warning screen is hook 6, and the 16-21 attribution is retracted
 
-* `FUN_00091600` holds **hook 16**. It draws two things through `FUN_0000BF3C` (message ids `0x1BC`
-  and `0x5A8`) at `locate(0, 10, 2)` and `locate(0x38, 0x11, 2)`, gated on the screen timer at
-  `r15+6` passing `0x11C` and `0x54`. Two text draws on a timer reads as the warning screen.
-* `FUN_000917C0` holds **hooks 17-20**. It walks a table of position triples through `FUN_0000CEB0`
-  / `FUN_0000F574`, then draws ids `0x6D6` and `0x6D7`, and indexes a 32-entry table by
-  `0x1F - (timer - 0x55)` clamped to 0..0x1F with a `(0x55 - timer) * 0x2000` fade underneath. An
-  animated 3D sequence with a 32-step curve reads as the title logo.
-* **Hook 21** (`FUN_0006A4B4`) belongs to the same cluster but its role is unread. The screen
-  sequencer calls it at `0x91560`, immediately before setting the timer to -1 and incrementing the
-  screen index at `r15+4` — i.e. at the end of a screen — so it is plausibly the skip/advance check.
+The earlier claim - "disabling 16-21 as a group brought back both the warning screen and the title
+logo, user-confirmed" - was measured under a **wider mask** (everything off bar the boot-critical
+strip), and the effect belonged to a bit outside the group. Re-measured by cold-boot observation,
+one mask per launch:
 
-Splitting 16 from 17-20 is two runs with the two masks above; nobody has spent them yet.
+* `16` alone, `17-20` alone, `21` alone, `16-21` together, with and without bit 3, country JAPAN
+  and USA, free play on and off: **no warning screen, ever**. The boot walks the presentation
+  screens in a one-frame cascade regardless.
+* everything-off (`FFFF…`, boot-criticals stripped back on): **warning screen shows**.
+* halving the difference: `{22-25}` no, `{0,4,6-12,15}` yes, `{6}` alone **yes** - and without
+  16-21 still **yes**.
 
-**These should become SRC2's `DefaultDisableMask`**, on exactly the argument
-`HleHooks.cpp` already makes for Fighting Vipers 2's hooks 7 and 10: Gaiden wants the boot sequence
-gone because the emulator is a minigame inside a menu, and YAMP is the cabinet, so the board's own
-power-up sequence is the authentic behaviour. Hook 13 is different in kind — it is a defect, not a
-preference, and the better fix is the 1.0f scalar above rather than a mask entry.
+**The mechanism, read off the ROM at the hook's own site:** hook 6 patches guest `0x1922C`, which
+is `cmpwi r3, 1` on the byte the boot chain just loaded from **guest `0x100198` = the settings
+working copy `+0x18` = COUNTRY**. `COUNTRY == 1` (JAPAN) is the ROM's own condition for drawing the
+start-up warning screen; the hook forces `r3 = 0` (INTERNATIONAL) so the compare always fails.
+Two corollaries: with a non-JAPAN COUNTRY the ROM skips the screen natively - so the warning is
+only recoverable at all under the default JAPAN assignment - and the screen is not "restored" by
+any of 16-21, whose routines are pieces of the composite presentation handler at `0x91598`
+(message mutes, the 3D walker) that today's runs could not surface. Hook 21's routine, also
+disassembled on the way: not a skip/advance check but a conditional draw of message ids `0x2FE`
+and `3`, gated on the one-hot current-screen word at guest `0x105000` having bits `0x03000000`.
+
+What 16-21 visibly do therefore remains **unmeasured**; they stay in the default mask as
+original-ROM behaviour, not as a screen switch. The Daytona 2 title-logo attribution is likewise
+back to unknown as a single bit — but the full presentation is confirmed working under the
+shipping default: a cold boot of `0x3F6040` shows the warning screen, the Daytona 2 logo, the
+network boot check AND a working TEST menu, all user-verified on screen (2026-08-08). Whichever
+bit(s) gate the logo, they are among the ones that mask already clears.
+
+**These are SRC2's `DefaultDisableMask`** — `0x3F6040` (hooks 6, 13, 14, 16-21) — on exactly the
+argument `HleHooks.cpp` already makes for Fighting Vipers 2's hooks 7 and 10: Gaiden wants the boot
+sequence gone because the emulator is a minigame inside a menu, and YAMP is the cabinet, so the
+board's own power-up sequence is the authentic behaviour. Hook 13 is different in kind — it is a
+defect, not a preference, and the better fix is the 1.0f scalar above rather than a mask entry.
+Hooks 1, 2, 3 and 5 can never join the mask: they are `SRC2_BOOT_CRITICAL` and the persisted-mask
+strip forces them back on (hook 3's story is in the sweep correction further down).
 
 ## Which hooks are load-bearing: exactly three (1, 2 and 5)
 
@@ -225,6 +240,19 @@ frames for the three that failed, because a short window cannot tell "has not ad
 | 6–25 | Patch/Host/Removed | — | 637–667 | fine |
 
 The healthy spread of 637–694 is host/guest pacing noise around the 676 baseline.
+
+**CORRECTION (2026-08-08): hook 3's "fine" is a false negative, and it is now boot-critical.** The
+sweep measures the attract path, and on the attract path disabling hook 3 really is invisible — the
+board boots, attracts and races. What the sweep cannot see is the **TEST switch**: hook 3 deletes
+the per-frame `bla 0x55D800` in the game's main loop, the third call into the security overlay that
+hooks 1 and 2 excise the *loader* of, so with hook 3 disabled the restored call lands in memory that
+is all zeros. TEST-menu entry reaches it, the guest crash-reboots into the MODEL3 SYSTEM PROGRAM
+status screen ("PRESS START OR TEST BUTTON TO CONTINUE"), and continuing from there hangs in the
+same reused-device-table status spin at guest 0x1E78 that hook 1's diagnosis describes. Found by
+bisecting the service-menu regression this bit caused when it briefly shipped in
+`DefaultDisableMask`; the full hunt is docs/src2-service-menu-regression.md. `SRC2_BOOT_CRITICAL`
+is therefore `{1, 2, 3, 5}`, and the persisted-mask strip keeps hook 3 enabled even against a stale
+settings.ini.
 
 **The `Kind` column is not a risk ranking on this board, and is very nearly inverted.** Hook 0 is
 the only `Core` hook and it is the *safest* in the table — disabling it yields 694 draws, more than

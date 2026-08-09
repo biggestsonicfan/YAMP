@@ -95,5 +95,53 @@ namespace pre3
 
 		// Resets the latch. Call when the board restarts.
 		void Reset();
+
+		// THE FIVE ROWS A LINKED RACE IS PLAYED UNDER, read live out of the working settings copy
+		// so they include everything - the injector's values, this file's writes AND any edit the
+		// operator made in the service menu since. Published as room metadata when an SRC2 room is
+		// hosted (net::Src2Assignments), which is the whole reason the read exists: the browser
+		// lists what a race IS before anyone joins it.
+		//
+		// Offsets and option counts are from the service menu's own row table at guest 0x0E5548,
+		// same provenance as the header comment's table:
+		//
+		//   +0x20  CABINET TYPE  DELUXE / TWIN / SPECIAL
+		//   +0x21  DIFFICULTY    EASY / NORMAL / HARD / HARDEST
+		//   +0x23  GAME MODE     NORMAL(SPRINT) / GRAND PRIX / 100..500 MILES
+		//   +0x26  MOTOR POWER   50% .. 100%
+		//   +0x28  RANKING MODE  NORMAL / CAMPAIGN / INTERNET
+		//
+		// Values are clamped to those ranges on the way out - a mid-boot read can catch the block
+		// before the injector has filled it, and a garbage index published to a room browser would
+		// be indistinguishable from a real configuration.
+		struct LiveAssignments
+		{
+			uint8_t cabinetType;   // 0..2
+			uint8_t difficulty;    // 0..3
+			uint8_t gameMode;      // 0..6
+			uint8_t motorPower;    // 0..5
+			uint8_t ranking;       // 0..2
+		};
+		// False when the board (or its validated guest RAM) is not up yet.
+		bool ReadLiveAssignments(LiveAssignments& out);
+
+		// THE ROOM'S ASSIGNMENTS, FORCED. A netplay room publishes the host's five rows (see
+		// ReadLiveAssignments) and every cabinet in the room must RUN them, not just read about
+		// them: GAME MODE decides the race being driven and DIFFICULTY what the AI does, so two
+		// cabinets disagreeing are in different races that happen to share a link.
+		//
+		// Armed by CommBoard::DriveRoomRole at the same moment it reboots the board into its
+		// cabinet role, because that reboot is what makes adoption possible at all: the restore
+		// wipes guest RAM, ArcadeSettings::Reset() re-arms the latch, and the next Update() runs
+		// AFTER the module's own injector (the coin-byte wait) - so the room's values land last
+		// and win, exactly as this file's own writes always have. While armed, Update() writes
+		// these five rows (and the override's cabinet type instead of the local preference);
+		// DIFFICULTY - deliberately absent from Desired because the local value travels the
+		// injector's own path - IS written here, since the room's value arrives mid-session where
+		// no config field can carry it.
+		//
+		// Cleared when the room dissolves; the standalone reboot then restores the local values.
+		void SetRoomAssignments(const LiveAssignments& assignments);
+		void ClearRoomAssignments();
 	}
 }

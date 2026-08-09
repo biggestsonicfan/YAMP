@@ -137,7 +137,7 @@ static bool NetplayBoardBooted()
 // were all shown a Damage column that means nothing to them. DAMAGE is Sonic the Fighters' alone
 // (m2ftg::UpdateDamageAssignment no-ops for every other game), and the Model 3 boards publish
 // something else entirely: which state a round starts from.
-enum class RoomSetting { None, Damage, Vf2Version, Pre3Start };
+enum class RoomSetting { None, Damage, Vf2Version, Pre3Start, Src2Assign };
 
 static RoomSetting CurrentRoomSetting()
 {
@@ -146,11 +146,25 @@ static RoomSetting CurrentRoomSetting()
 	case YAMPGeneral::GameId::StF:     return RoomSetting::Damage;
 	case YAMPGeneral::GameId::VF2:
 	case YAMPGeneral::GameId::VF2_K2:  return RoomSetting::Vf2Version;
-	case YAMPGeneral::GameId::FV2:
-	case YAMPGeneral::GameId::SRC2:    return RoomSetting::Pre3Start;
+	case YAMPGeneral::GameId::FV2:     return RoomSetting::Pre3Start;
+	// NOT Pre3Start, though SRC2 is a pre3 board: a linked-cabinet session never starts a round,
+	// so the round-start state is a control that decides nothing there - the same reasoning that
+	// keeps the Start-match barrier off its lobby. What an SRC2 room publishes instead is its
+	// GAME ASSIGNMENTS: the five rows the race is played under.
+	case YAMPGeneral::GameId::SRC2:    return RoomSetting::Src2Assign;
 	default:                           return RoomSetting::None;
 	}
 }
+
+// The browser's words for the five SRC2 assignment fields - the board's own option lists, read
+// out of its service-menu row table (see pre3::ArcadeSettings::ReadLiveAssignments). Indexed by
+// the room's published value, which the decode already masked to each field's range.
+static const char* const SRC2_CABINET_NAMES[] = { "Deluxe", "Twin", "Special" };
+static const char* const SRC2_DIFFICULTY_NAMES[] = { "Easy", "Normal", "Hard", "Hardest" };
+static const char* const SRC2_MODE_NAMES[] =
+	{ "Sprint", "Grand Prix", "100 miles", "200 miles", "300 miles", "400 miles", "500 miles" };
+static const char* const SRC2_MOTOR_NAMES[] = { "50%", "60%", "70%", "80%", "90%", "100%" };
+static const char* const SRC2_RANKING_NAMES[] = { "Normal", "Campaign", "Internet" };
 
 // VS mode is an m2ftg config byte all three of those games read at boot. The Model 3 round-start
 // reset restores a whole saved machine over the top of it, so publishing it there would claim an
@@ -2359,8 +2373,10 @@ void YAMPUserInterface::DrawStfHleHooks()
 void YAMPUserInterface::DrawNetplay()
 {
 	ImGui::PushTextWrapPos();
-	ImGui::TextColored(WARNING_COLOUR, "Netplay is experimental. It plays Sonic the Fighters against one "
-		"other machine over an RPCN server using delay-based lockstep, the same scheme the PS3 port used.");
+	ImGui::TextColored(WARNING_COLOUR, "Netplay is experimental. It plays against one other machine "
+		"over an RPCN server - delay-based lockstep for the fighting games (the scheme Sonic the "
+		"Fighters' PS3 port used), and the game's own linked-cabinet protocol for Virtual On and "
+		"Sega Racing Classic 2.");
 	ImGui::PopTextWrapPos();
 	ImGui::Separator();
 
@@ -2391,16 +2407,37 @@ void YAMPUserInterface::DrawNetplay()
 	// on, and does not otherwise - an idle second cabinet is a peer the ROM waits for, and the
 	// operator's menu deadlocks against it. Neither direction can be done to a running board, so
 	// this takes effect on the next launch rather than immediately.
+	//
+	// TWO LINKED-CABINET STORIES, and the text has to match the game that is running. Virtual On
+	// is two boards in ONE process, strapped by the operator before boot - hence the manual
+	// cabinet combo and the restart warnings. Sega Racing Classic 2 is one board per MACHINE and
+	// the ROOM decides which cabinet each machine is (host = MASTER, guest = SLAVE), with the
+	// board rebooted into its role when the room forms - see CommBoard::DriveRoomRole. Showing
+	// Virtual On's strapping UI during an SRC2 session therefore described a mechanism the game
+	// does not have, in another game's name.
+	const bool src2Running = gGeneral.GetGameId() == YAMPGeneral::GameId::SRC2;
 	{
 		if (ImGui::Checkbox("Enable netplay for this game (restart required)", &m_netEnabled))
 		{
 			m_pageModified = true;
 		}
 		ImGui::PushTextWrapPos();
-		ImGui::TextDisabled("Virtual On is a LINKED-CABINET game: with this off it runs a single "
-			"cabinet, which is what local play and the operator's Test menu need. Turning it on "
-			"brings the second board up from boot, which is required for a match and cannot be "
-			"done to a board that is already running.");
+		if (src2Running)
+		{
+			ImGui::TextDisabled("Sega Racing Classic 2 is a LINKED-CABINET game: each machine runs "
+				"one cabinet and the game's own comm-board protocol links them over the room. The "
+				"room decides which cabinet this machine is - hosting makes it the MASTER, joining "
+				"makes it the SLAVE - and the board reboots itself into that role when the room "
+				"forms, exactly as if the operator had re-strapped a real cabinet and power-cycled "
+				"it. There is nothing to configure here beforehand.");
+		}
+		else
+		{
+			ImGui::TextDisabled("Virtual On is a LINKED-CABINET game: with this off it runs a single "
+				"cabinet, which is what local play and the operator's Test menu need. Turning it on "
+				"brings the second board up from boot, which is required for a match and cannot be "
+				"done to a board that is already running.");
+		}
 		if (m_netEnabled != net::WantsNetplayBoards())
 		{
 			ImGui::TextColored(WARNING_COLOUR, "Restart YAMP for this to take effect - the board "
@@ -2412,7 +2449,11 @@ void YAMPUserInterface::DrawNetplay()
 		//
 		// Deliberately NOT hidden when another game is running: it is a property of this MACHINE,
 		// not of the running session, and hiding it would mean it could only be set while Virtual
-		// On was already up - i.e. only after the boot that reads it.
+		// On was already up - i.e. only after the boot that reads it. The ONE exception is a
+		// running SRC2 session: its role comes from the room (above), every control in this block
+		// is consumed by Virtual On's host alone, and a MASTER/SLAVE combo under another game's
+		// name next to "the room decides" reads as a contradiction, not a preset.
+		if (!src2Running)
 		{
 			static const char* const labels[] = { "No link (standalone)", "MASTER", "SLAVE" };
 			if (m_vonCabinetRole >= std::size(labels))
@@ -2660,15 +2701,40 @@ void YAMPUserInterface::DrawNetplay()
 			// settings, not the Game page's edit buffer: an unapplied combo change would
 			// otherwise publish a value the local emulator is not running under.
 			const YAMPSettings* set = gGeneral.GetSettings();
+			// SRC2's five GAME ASSIGNMENTS come from the BOARD's working copy, not from any
+			// settings buffer: it is the one place that already folds together the injector,
+			// YAMP's writes and the operator's own service-menu edits. present stays false when
+			// the board is not up (or the game is not SRC2), which publishes nothing.
+			net::Src2Assignments src2 = {};
+			pre3::ArcadeSettings::LiveAssignments live = {};
+			if (pre3::ArcadeSettings::ReadLiveAssignments(live))
+			{
+				src2.present = true;
+				src2.cabinetType = live.cabinetType;
+				src2.difficulty = live.difficulty;
+				src2.gameMode = live.gameMode;
+				src2.motorPower = live.motorPower;
+				src2.ranking = live.ranking;
+			}
 			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage,
 				set != nullptr && set->m_vf2Version20,
 				set != nullptr && set->m_m2VersusMode,
-				set != nullptr && set->m_netPre3VsStart);
+				set != nullptr && set->m_netPre3VsStart,
+				&src2);
 		}
 		if (ImGui::IsItemHovered())
 		{
-			ImGui::SetTooltip("The room is created with your current Damage setting (Game page),\n"
-				"and everyone who joins plays under it. It cannot be changed once the room exists.");
+			if (CurrentRoomSetting() == RoomSetting::Src2Assign)
+			{
+				ImGui::SetTooltip("The room is created with this cabinet's current GAME ASSIGNMENTS\n"
+					"(difficulty, game mode, motor power, cabinet type, ranking mode) so the room\n"
+					"list shows what the race is. Set them in the service menu before hosting.");
+			}
+			else
+			{
+				ImGui::SetTooltip("The room is created with your current Damage setting (Game page),\n"
+					"and everyone who joins plays under it. It cannot be changed once the room exists.");
+			}
 		}
 		ImGui::SameLine();
 		ImGui::PushItemWidth(160.0f);
@@ -2699,13 +2765,29 @@ void YAMPUserInterface::DrawNetplay()
 		// Damage column that nothing on either side reads.
 		const RoomSetting roomSetting = CurrentRoomSetting();
 		const bool showVs = RoomHasVsMode();
-		const int roomColumns = 4 + (roomSetting != RoomSetting::None ? 1 : 0) + (showVs ? 1 : 0);
+		// SRC2 publishes five assignment fields where the other games publish one setting.
+		const int settingColumns = roomSetting == RoomSetting::Src2Assign ? 5
+			: roomSetting != RoomSetting::None ? 1 : 0;
+		const int roomColumns = 4 + settingColumns + (showVs ? 1 : 0);
 
+		// SRC2's five assignment columns overflow the page width; a horizontal scroll keeps every
+		// column readable where the default sizing would squeeze them all illegible. ScrollX and
+		// stretch columns fight each other (a stretch column absorbs exactly the width the scroll
+		// exists to provide), so the Host column goes fixed on the wide table.
+		const bool wideTable = roomSetting == RoomSetting::Src2Assign;
 		if (ImGui::BeginTable("##rooms", roomColumns,
-			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
+				| (wideTable ? ImGuiTableFlags_ScrollX : 0),
 			{ 0.0f, 130.0f }))
 		{
-			ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
+			if (wideTable)
+			{
+				ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+			}
+			else
+			{
+				ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch);
+			}
 			ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 60.0f);
 			switch (roomSetting)
 			{
@@ -2717,6 +2799,13 @@ void YAMPUserInterface::DrawNetplay()
 				break;
 			case RoomSetting::Pre3Start:
 				ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+				break;
+			case RoomSetting::Src2Assign:
+				ImGui::TableSetupColumn("Difficulty", ImGuiTableColumnFlags_WidthFixed, 65.0f);
+				ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+				ImGui::TableSetupColumn("Motor", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+				ImGui::TableSetupColumn("Cabinet", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				ImGui::TableSetupColumn("Ranking", ImGuiTableColumnFlags_WidthFixed, 65.0f);
 				break;
 			case RoomSetting::None:
 				break;
@@ -2756,6 +2845,43 @@ void YAMPUserInterface::DrawNetplay()
 					// 2.0 and 2.1 are mechanically different games, not a tuning option.
 					ImGui::TableSetColumnIndex(col++);
 					ImGui::TextUnformatted(rooms[i].vf2_version20 ? "2.0" : "2.1");
+					break;
+				case RoomSetting::Src2Assign:
+					// Older hosts publish no assignments; "?" says so rather than showing the
+					// all-zero decode as a real Deluxe/Easy/Sprint room. The bounds check exists
+					// because the wire fields are 2-3 BITS and two of the option lists have fewer
+					// entries than the field can express - a hand-crafted flagAttr must degrade to
+					// "?", not index past a label table.
+					if (rooms[i].src2.present)
+					{
+						const auto name = [](const char* const* names, size_t count, uint8_t v)
+						{
+							return v < count ? names[v] : "?";
+						};
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(name(SRC2_DIFFICULTY_NAMES,
+							std::size(SRC2_DIFFICULTY_NAMES), rooms[i].src2.difficulty));
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(name(SRC2_MODE_NAMES,
+							std::size(SRC2_MODE_NAMES), rooms[i].src2.gameMode));
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(name(SRC2_MOTOR_NAMES,
+							std::size(SRC2_MOTOR_NAMES), rooms[i].src2.motorPower));
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(name(SRC2_CABINET_NAMES,
+							std::size(SRC2_CABINET_NAMES), rooms[i].src2.cabinetType));
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(name(SRC2_RANKING_NAMES,
+							std::size(SRC2_RANKING_NAMES), rooms[i].src2.ranking));
+					}
+					else
+					{
+						for (int field = 0; field < 5; field++)
+						{
+							ImGui::TableSetColumnIndex(col++);
+							ImGui::TextDisabled("?");
+						}
+					}
 					break;
 				case RoomSetting::Pre3Start:
 					ImGui::TableSetColumnIndex(col++);
@@ -2838,6 +2964,26 @@ void YAMPUserInterface::DrawNetplay()
 		case RoomSetting::Pre3Start:
 			ImGui::Text("Rounds start: %s%s",
 				status.pre3_vs_start ? "in a versus match" : "at power-on", bySetter);
+			break;
+		case RoomSetting::Src2Assign:
+			// The room's GAME ASSIGNMENTS, one line - the same fields the browser lists, stated
+			// for whoever is actually in the room. Absent for a room hosted by an older build.
+			if (status.src2.present)
+			{
+				const auto name = [](const char* const* names, size_t count, uint8_t v)
+				{
+					return v < count ? names[v] : "?";
+				};
+				ImGui::Text("Assignments: %s, %s, motor %s, %s cabinet, ranking %s%s",
+					name(SRC2_DIFFICULTY_NAMES, std::size(SRC2_DIFFICULTY_NAMES),
+						status.src2.difficulty),
+					name(SRC2_MODE_NAMES, std::size(SRC2_MODE_NAMES), status.src2.gameMode),
+					name(SRC2_MOTOR_NAMES, std::size(SRC2_MOTOR_NAMES), status.src2.motorPower),
+					name(SRC2_CABINET_NAMES, std::size(SRC2_CABINET_NAMES),
+						status.src2.cabinetType),
+					name(SRC2_RANKING_NAMES, std::size(SRC2_RANKING_NAMES), status.src2.ranking),
+					bySetter);
+			}
 			break;
 		case RoomSetting::None:
 			break;

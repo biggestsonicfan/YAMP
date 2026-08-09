@@ -177,10 +177,10 @@ namespace pre3
 			// Read the two together; docs/src2-hle-hooks.md has the full disassembly.
 			{ 0x0189EC, 0x01DC0, Kind::Removed, "deletes `bl 0x07BA18` in the board's init chain - the LOADER that XOR-0x98 deobfuscates a 464-byte overlay from 0x0D98DC to 0x55D000 and relocates it to 0x55D800. BOOT-CRITICAL: disable this alone and the board never reaches frame 1" },
 			{ 0x018B28, 0x01DC0, Kind::Removed, "deletes `bla 0x55D800` - the call INTO that overlay. Load-bearing only because hook 1 removed the loader, so 0x55D800 is all zeros: disable this alone and the board calls into empty memory and freezes on its 8th draw (still exactly 8 at frames 600, 1200 and 1800)" },
-			{ 0x09A3FC, 0x01DC0, Kind::Removed, "deletes the PER-FRAME `bla 0x55D800` in the game's main loop (FUN_0009A39C) - the third call into the same security overlay hooks 1 and 2 excise. Harmless to disable, unlike that pair, and confirmed so: decrypting the 464-byte blob shows a pure device-transfer routine (byte-swapped stores to 0xFE180000, status poll at 0xFE1A001C) that holds no game state" },
+			{ 0x09A3FC, 0x01DC0, Kind::Removed, "deletes the PER-FRAME `bla 0x55D800` in the game's main loop (FUN_0009A39C) - the third call into the same security overlay hooks 1 and 2 excise. NOT harmless to disable, despite the blob decrypting to a stateless device-transfer routine: attract and races run, but the TEST switch crash-reboots the board into the MODEL3 SYSTEM PROGRAM screen and the menu never opens (measured 2026-08-08 - it cost the service menu for a day). BOOT-CRITICAL like its pair: the overlay it calls is never loaded" },
 			{ 0x006754, 0x267E0, Kind::Host,    "whole routine replaced: appends r3 to a growable u32 array on the ROM object (data at rom+0x488, capacity +0x490, count +0x494), then returns to the link register. Same handler FV2 uses at its three sites" },
 			{ 0x007480, 0x2C6A0, Kind::Host,    "arcade settings injection: writes the coin setting (free play -> 0x1B), region, difficulty and the linked-cabinet fields from the YAMP config into game RAM at 0x72629C, runs the original instruction (`lis r16, 0x73`), then stores 50.0f to guest 0xC4550, 0xC4590 and 0xC4610. BOOT-CRITICAL: disable it and the board never reaches frame 1 - SRC2 does not merely prefer configured settings, it will not start without them" },
-			{ 0x01922C, 0x2C6E0, Kind::Patch,   "forces r3 = 0, then runs the original instruction" },
+			{ 0x01922C, 0x2C6E0, Kind::Patch,   "forces r3 = 0, then runs the original instruction - and that instruction is `cmpwi r3, 1` on the COUNTRY byte the boot chain just read from the settings working copy (guest 0x100198 = 0x100180+0x18). COUNTRY == 1 (JAPAN) is what makes the ROM draw the START-UP WARNING SCREEN, so forcing 0 (INTERNATIONAL) suppresses it. THE warning-screen switch, measured 2026-08-08 by cold-boot bisection: disabling this hook ALONE brings the screen back; disabling 16-21 without it does nothing. With a non-JAPAN COUNTRY the ROM skips the screen natively, hook or no hook" },
 			{ 0x073CC4, 0x2C720, Kind::Patch,   "f0 += 0.05, f1 -= 0.05, then runs the original instruction" },
 			{ 0x073CFC, 0x2C780, Kind::Patch,   "f0 += 0.02, f1 += 0.0, then runs the original instruction" },
 			{ 0x073D70, 0x2C7E0, Kind::Patch,   "f0 += 0.16, f1 -= 0.1, then runs the original instruction" },
@@ -210,7 +210,7 @@ namespace pre3
 		};
 		static_assert(sizeof(SRC2_HOOKS) / sizeof(SRC2_HOOKS[0]) <= MAX_COUNT);
 
-		// The three SRC2 hooks the board cannot start without, from the one-at-a-time sweep
+		// The SRC2 hooks the board cannot run without, from the one-at-a-time sweep
 		// (400 frames each against a 676-draw baseline, the failures re-confirmed at 2000):
 		//
 		//   1  deletes `bl 0x07BA18`  - never reaches frame 1. Diagnosed: re-enabling this call
@@ -219,12 +219,20 @@ namespace pre3
 		//                               been reused, so it kicks a bogus address and spins on a
 		//                               status bit that can never clear.
 		//   2  deletes `bla 0x55D800` - freezes on its 8th draw, calling into empty memory.
+		//   3  deletes the third call into the same overlay - and unlike 1 and 2 the board BOOTS
+		//      with it disabled, which is how it briefly landed in the default disable mask and
+		//      broke the TEST switch (2026-08-08, bisected): attract and races run untouched, but
+		//      TEST-menu entry reaches the restored `bla 0x55D800`, lands in the overlay hooks 1
+		//      and 2 never let load, and the guest crash-reboots into the MODEL3 SYSTEM PROGRAM
+		//      screen. Continuing from there hangs in the 0x001E78 status spin above - the same
+		//      reused-table failure as hook 1, arrived at through the menu instead of the boot.
+		//      "Boot-critical" here means the CRASH-REBOOTED boot it causes, not the first one.
 		//   5  arcade settings         - never reaches frame 1. SRC2 will not start without its
 		//                               settings written into game RAM.
 		//
 		// FV2 has NO entry here on purpose: the sweep has not been run on it, and guessing from
 		// SRC2's indices would be the same class of error as handing FV2's default mask to SRC2.
-		static constexpr size_t SRC2_BOOT_CRITICAL[] = { 1, 2, 5 };
+		static constexpr size_t SRC2_BOOT_CRITICAL[] = { 1, 2, 3, 5 };
 
 		static const Info* CurrentTable(size_t& count)
 		{
@@ -619,10 +627,12 @@ namespace pre3
 				// been filled; see pre3::SetDrivingAxes). Three groups, all user-confirmed on
 				// screen:
 				//
-				//   3       the per-frame `bla 0x55D800` into the security overlay. Hooks 1 and 2
-				//           already excise that overlay's loader and boot call and are BOOT-
-				//           CRITICAL, so the third call has to go with them - left enabled it
-				//           calls into memory the loader never filled.
+				//   6       THE START-UP WARNING SCREEN. The hook zeroes the COUNTRY byte at the
+				//           boot chain's `cmpwi r3, 1` (guest 0x1922C), and COUNTRY == JAPAN is
+				//           what makes the ROM draw the screen. MEASURED by cold-boot bisection:
+				//           this bit alone brings the screen back; the 16-21 group without it
+				//           changes nothing visible. Same argument as the rest of this mask -
+				//           YAMP is the cabinet, so the board's own power-up sequence plays.
 				//   13, 14  the two `rom+0x374` / `+0x378` multiplies. Hook 13 zeroes the board's
 				//           MOTION-INTEGRATION SCALAR (guest 0x1051E4), which is what froze every
 				//           CPU car a few seconds into a race; 14 does the same to a bonus-time
@@ -630,19 +640,30 @@ namespace pre3
 				//           fields (pre3_execute_info_t::src2_scalars) - the two are behaviourally
 				//           identical, and both are kept because the scalar is the right VALUE
 				//           whatever the mask says, and the mask is the thing a match agrees on.
-				//   16-21   the boot presentation: the start-up WARNING screen and the Daytona 2
-				//           title logo. Same argument as FV2's pair below - Gaiden hides them
-				//           because its emulator is a minigame inside a menu, and YAMP is the
-				//           cabinet.
+				//   16-21   pieces of the composite boot-presentation handler (the 0x91598 screen:
+				//           message mutes at 0x91660 / 0x6A4B4, the 3D walker in FUN_000917C0).
+				//           The original claim that disabling this group "brought back the warning
+				//           screen and the title logo" is RETRACTED - that measurement ran under a
+				//           wider everything-off mask and the effect belonged to hook 6. Disabling
+				//           16-21 alone shows no visible boot difference; they stay in the mask as
+				//           original-ROM behaviour, not as a measured screen switch.
 				//
-				// NOT hooks 1, 2 or 5: those three are the ones the board cannot start without.
+				// NOT hooks 1, 2, 3 or 5 - SRC2_BOOT_CRITICAL, the hooks the board cannot run
+				// without. Hook 3 was in this mask for one day on the reasoning "hooks 1 and 2
+				// excise the overlay's loader, so the third call should go with them" - which is
+				// backwards: BECAUSE the loader is excised, the call into the overlay must stay
+				// excised too. Disabled, the board still boots and races (which is why the sweep
+				// missed it), but the TEST switch crash-reboots into the MODEL3 SYSTEM PROGRAM
+				// instead of opening the service menu. Bisected and measured on screen; the full
+				// story is in SRC2_BOOT_CRITICAL's comment and
+				// docs/src2-service-menu-regression.md.
 				static constexpr uint64_t SRC2_DEFAULT[2] = {
-					(1ull << 3) | (1ull << 13) | (1ull << 14)
+					(1ull << 6) | (1ull << 13) | (1ull << 14)
 					| (1ull << 16) | (1ull << 17) | (1ull << 18)
 					| (1ull << 19) | (1ull << 20) | (1ull << 21),
 					0
 				};
-				static_assert(SRC2_DEFAULT[0] == 0x3F6008);
+				static_assert(SRC2_DEFAULT[0] == 0x3F6040);
 				return SRC2_DEFAULT;
 			}
 

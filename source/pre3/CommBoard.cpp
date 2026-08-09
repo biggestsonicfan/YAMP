@@ -622,6 +622,34 @@ namespace pre3
 		if (s_mode != Mode::Off) EnsureBuffers();
 		ForgetLinkState();
 
+		// ADOPT THE ROOM'S GAME ASSIGNMENTS, at the one moment adoption can work: the reboot below
+		// wipes guest RAM and re-runs the module's injector, and ArcadeSettings' re-armed Update()
+		// writes after it - so the room's five rows land last on BOTH cabinets. The host published
+		// its own board's values, so this is a no-op for it; the guest is the one being brought
+		// onto the same race. A room without the fields (an older host) forces nothing, and a
+		// dissolving room disarms so the standalone reboot restores the local settings.
+		{
+			const net::Status roomStatus = net::GetStatus();
+			if (wanted != Role::Standalone && roomStatus.src2.present)
+			{
+				ArcadeSettings::LiveAssignments adopt = {};
+				adopt.cabinetType = roomStatus.src2.cabinetType;
+				adopt.difficulty = roomStatus.src2.difficulty;
+				adopt.gameMode = roomStatus.src2.gameMode;
+				adopt.motorPower = roomStatus.src2.motorPower;
+				adopt.ranking = roomStatus.src2.ranking;
+				ArcadeSettings::SetRoomAssignments(adopt);
+				DebugLogFile("[%s link] adopting the room's assignments: diff=%u mode=%u motor=%u "
+					"cabinet=%u ranking=%u\n",
+					gGeneral.GetGameTag(), adopt.difficulty, adopt.gameMode, adopt.motorPower,
+					adopt.cabinetType, adopt.ranking);
+			}
+			else
+			{
+				ArcadeSettings::ClearRoomAssignments();
+			}
+		}
+
 		// RE-ARM THE SETTINGS LATCH. ArcadeSettings writes the board's LINK ID row once and then
 		// latches, leaving the row to the game's own service menu; the restore is about to wipe the
 		// guest RAM both copies live in, so without this the rebooted board would read back the

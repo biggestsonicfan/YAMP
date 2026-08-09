@@ -92,6 +92,21 @@ namespace net
     // explicit control, one click at a time. Both paths share one session, so only one may be in
     // use at a time - the UI refuses to act while Config().enabled is set.
 
+    // Sega Racing Classic 2's five GAME ASSIGNMENTS rows, flattened out of the room's game_flags
+    // (see the YAMPNET_ROOM_SRC2_* fields). Values are the board's own option indices. `present`
+    // is false for a room whose host predates the fields - all-zero would otherwise read as a
+    // real (DELUXE / EASY / SPRINT) configuration. One type serves the room browser (RoomRow),
+    // the in-room view (Status) and the host publish (HostRoom).
+    struct Src2Assignments
+    {
+        bool present = false;
+        unsigned char cabinetType = 0;   // 0..2  DELUXE / TWIN / SPECIAL
+        unsigned char difficulty = 0;    // 0..3  EASY .. HARDEST
+        unsigned char gameMode = 0;      // 0..6  SPRINT / GRAND PRIX / 100..500 MILES
+        unsigned char motorPower = 0;    // 0..5  50% .. 100%
+        unsigned char ranking = 0;       // 0..2  NORMAL / CAMPAIGN / INTERNET
+    };
+
     // Everything the lobby renders, snapshotted so the UI never touches the plugin ABI directly.
     struct Status
     {
@@ -126,6 +141,9 @@ namespace net
         // set, and from its power-on state when clear. Not a cabinet setting - it selects which
         // of the module's two reset mechanisms the round uses. See YAMPNET_ROOM_FLAG_PRE3_VS_START.
         bool pre3_vs_start = false;
+        // SRC2 only: the GAME ASSIGNMENTS the current room was created with, so the in-room view
+        // can state them for both players.
+        Src2Assignments src2;
     };
     Status GetStatus();
 
@@ -135,9 +153,11 @@ namespace net
                  const char* fingerprint, const char* comId);
     void Disconnect();
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
-    // joins plays under it - see EffectiveRealDamage.
+    // joins plays under it - see EffectiveRealDamage. `src2` is the linked-cabinet equivalent:
+    // the host's live GAME ASSIGNMENTS, published so the browser can list what the race IS.
+    // Null (or present == false) publishes nothing, which is every game but SRC2.
     bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
-                  bool pre3VsStart);
+                  bool pre3VsStart, const Src2Assignments* src2 = nullptr);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -158,6 +178,9 @@ namespace net
         // The host's pre3 round-start choice, shown for the same reason: it decides whether a
         // round begins at power-on or already in a match.
         bool pre3_vs_start = false;
+        // The host's SRC2 GAME ASSIGNMENTS, shown for the same reason as every field above: they
+        // are how that race plays, not a preference the joiner keeps.
+        Src2Assignments src2;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();

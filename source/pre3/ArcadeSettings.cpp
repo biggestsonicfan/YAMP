@@ -30,6 +30,13 @@ namespace pre3
 		inline constexpr uint32_t OFF_LINK_ID = 0x1E;
 		inline constexpr uint32_t OFF_CAR_NUMBER = 0x1F;
 		inline constexpr uint32_t OFF_CABINET_TYPE = 0x20;
+		// The rows ReadLiveAssignments publishes; see the header for the option lists. DIFFICULTY
+		// (+0x21) is already named in the header comment's table; these three were read out of the
+		// same service-menu row table at 0x0E5548 on 2026-08-08.
+		inline constexpr uint32_t OFF_DIFFICULTY = 0x21;
+		inline constexpr uint32_t OFF_GAME_MODE = 0x23;
+		inline constexpr uint32_t OFF_MOTOR_POWER = 0x26;
+		inline constexpr uint32_t OFF_RANKING_MODE = 0x28;
 
 		// The ROM globals LogLinkGate reads. Guest addresses, byte-swizzled like everything else
 		// here; each one is named by the routine that writes it rather than by a guess.
@@ -75,6 +82,11 @@ namespace pre3
 
 		static Desired s_desired{};
 		static bool s_applied = false;
+		// The room override - see the header. Separate from s_desired on purpose: the local
+		// preferences must survive the session untouched, so leaving a room is just disarming
+		// this and letting the next reboot re-apply what was always there.
+		static LiveAssignments s_room{};
+		static bool s_roomArmed = false;
 
 		static const uint8_t* ModuleBase()
 		{
@@ -140,25 +152,38 @@ namespace pre3
 			const uint8_t coin = *BytePtr(ram, BASE_NVRAM + OFF_COIN);
 			if (coin == 0) return;
 
-			struct { uint32_t offset; uint8_t value; const char* name; } writes[] = {
+			struct Row { uint32_t offset; uint8_t value; const char* name; };
+			Row writes[9] = {
 				{ OFF_COUNTRY,      s_desired.country,     "COUNTRY" },
 				{ OFF_CABINET_TYPE, s_desired.cabinetType, "CABINET TYPE" },
 				{ OFF_LINK_ID,      s_desired.linkId,      "LINK ID" },
 				{ OFF_CAR_NUMBER,   s_desired.carNumber,   "CAR NUMBER" },
 			};
-			for (const auto& write : writes)
+			size_t writeCount = 4;
+			// The room's assignments, when a session armed them: the override's cabinet type
+			// replaces the local preference, and the other four rows join the write set. The
+			// injector has already run (the coin gate above), so these land last and win.
+			if (s_roomArmed)
 			{
-				*BytePtr(ram, BASE_NVRAM + write.offset) = write.value;
-				*BytePtr(ram, BASE_WORK + write.offset) = write.value;
+				writes[1].value = s_room.cabinetType;
+				writes[writeCount++] = { OFF_DIFFICULTY,   s_room.difficulty, "DIFFICULTY" };
+				writes[writeCount++] = { OFF_GAME_MODE,    s_room.gameMode,   "GAME MODE" };
+				writes[writeCount++] = { OFF_MOTOR_POWER,  s_room.motorPower, "MOTOR POWER" };
+				writes[writeCount++] = { OFF_RANKING_MODE, s_room.ranking,    "RANKING MODE" };
+			}
+			for (size_t i = 0; i < writeCount; i++)
+			{
+				*BytePtr(ram, BASE_NVRAM + writes[i].offset) = writes[i].value;
+				*BytePtr(ram, BASE_WORK + writes[i].offset) = writes[i].value;
 			}
 
 			// Only latch once the working copy reads back what was asked for. If the board is
 			// still mid-copy the write lands and is then undone, and retrying next frame costs
 			// nothing - whereas latching optimistically would leave the setting silently ignored.
 			bool settled = true;
-			for (const auto& write : writes)
+			for (size_t i = 0; i < writeCount; i++)
 			{
-				settled = settled && *BytePtr(ram, BASE_WORK + write.offset) == write.value;
+				settled = settled && *BytePtr(ram, BASE_WORK + writes[i].offset) == writes[i].value;
 			}
 			if (!settled) return;
 
@@ -167,9 +192,45 @@ namespace pre3
 			// whether it lands before or after the boot network check, and that comparison is
 			// only meaningful if both are stamped by the same clock.
 			DebugLogFile("[%s] game assignments applied (frame=%d): country=%u cabinet=%u link=%u "
-				"car=%u\n",
-				gGeneral.GetGameTag(), s_gateFrame, s_desired.country, s_desired.cabinetType,
-				s_desired.linkId, s_desired.carNumber);
+				"car=%u%s\n",
+				gGeneral.GetGameTag(), s_gateFrame, s_desired.country,
+				s_roomArmed ? s_room.cabinetType : s_desired.cabinetType,
+				s_desired.linkId, s_desired.carNumber,
+				s_roomArmed ? " + the room's difficulty/mode/motor/ranking" : "");
+		}
+
+		void SetRoomAssignments(const LiveAssignments& assignments)
+		{
+			s_room = assignments;
+			s_roomArmed = true;
+		}
+
+		void ClearRoomAssignments()
+		{
+			s_roomArmed = false;
+		}
+
+		bool ReadLiveAssignments(LiveAssignments& out)
+		{
+			out = {};
+			if (gGeneral.GetGameId() != YAMPGeneral::GameId::SRC2) return false;
+
+			// The VALIDATED base, same reasoning as LogLinkGate: a plausible base that reads
+			// zeroes everywhere would publish a DELUXE / EASY / SPRINT room with total confidence.
+			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
+			if (ram == nullptr) return false;
+
+			const auto row = [&](uint32_t offset, uint8_t maxIndex)
+			{
+				const uint8_t value = GuestByte(ram, BASE_WORK + offset);
+				return value <= maxIndex ? value : uint8_t{ 0 };
+			};
+			out.cabinetType = row(OFF_CABINET_TYPE, 2);
+			out.difficulty = row(OFF_DIFFICULTY, 3);
+			out.gameMode = row(OFF_GAME_MODE, 6);
+			out.motorPower = row(OFF_MOTOR_POWER, 5);
+			out.ranking = row(OFF_RANKING_MODE, 2);
+			return true;
 		}
 
 		void LogLinkGate()

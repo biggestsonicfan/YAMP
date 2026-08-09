@@ -228,8 +228,34 @@ typedef struct yampnet_rpcn_config
 // A room property rather than a preference because the two peers must restore the SAME state:
 // the whole point of the round-start reset is that both boards begin from identical bytes.
 #define YAMPNET_ROOM_FLAG_PRE3_VS_START 0x00000008u
+// Sega Racing Classic 2's GAME ASSIGNMENTS - the five rows a linked race is actually played
+// under, packed as small FIELDS rather than single bits because none of them is a boolean. The
+// values are the board's own option indices, read from the working settings copy (guest
+// 0x100180 + row offset; every offset and option count below is from the service menu's own row
+// table at guest 0x0E5548) and shown per room in the browser so a race can be judged before it
+// is joined. The PRESENT bit exists because a room made by an older build carries all-zero
+// fields, and without it those would be misread as a DELUXE / EASY / SPRINT room instead of as
+// "not published".
+//
+//   CABINET  +0x20  DELUXE / TWIN / SPECIAL
+//   DIFF     +0x21  EASY / NORMAL / HARD / HARDEST
+//   MODE     +0x23  NORMAL(SPRINT) / GRAND PRIX / 100..500 MILES
+//   MOTOR    +0x26  50% .. 100%  (feedback motor power)
+//   RANKING  +0x28  NORMAL / CAMPAIGN / INTERNET
+#define YAMPNET_ROOM_SRC2_CABINET_SHIFT   4u   // 2 bits, 0..2
+#define YAMPNET_ROOM_SRC2_CABINET_MASK    0x3u
+#define YAMPNET_ROOM_SRC2_DIFF_SHIFT      6u   // 2 bits, 0..3
+#define YAMPNET_ROOM_SRC2_DIFF_MASK       0x3u
+#define YAMPNET_ROOM_SRC2_MODE_SHIFT      8u   // 3 bits, 0..6
+#define YAMPNET_ROOM_SRC2_MODE_MASK       0x7u
+#define YAMPNET_ROOM_SRC2_MOTOR_SHIFT     11u  // 3 bits, 0..5
+#define YAMPNET_ROOM_SRC2_MOTOR_MASK      0x7u
+#define YAMPNET_ROOM_SRC2_RANKING_SHIFT   14u  // 2 bits, 0..2
+#define YAMPNET_ROOM_SRC2_RANKING_MASK    0x3u
+#define YAMPNET_ROOM_SRC2_PRESENT         0x00010000u
 // Adding a bit here needs no ABI bump and no plugin rebuild: the plugin carries game_flags
-// verbatim between the room and its peers and never interprets it.
+// verbatim between the room and its peers and never interprets it. The SRC2 fields above lean on
+// exactly that property, and they stay well below the SCE-owned top nibbles.
 
 typedef struct yampnet_room_config
 {
