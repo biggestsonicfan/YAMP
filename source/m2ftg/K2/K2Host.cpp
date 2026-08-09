@@ -319,6 +319,30 @@ namespace m2ftg
 			// byte the ROM-level proof that the link is carrying data.
 			constexpr uint8_t  PKT_STATE_NONET = 0xFE;
 			constexpr uint8_t  PKT_STATE_NOPKT = 0xFF;
+			// THE REST OF THE PACKET, decoded 2026-08-09 - full field map with per-field i960
+			// evidence in docs/von-comm-packet.md. Everything rides the 0x700 window YAMP already
+			// carries verbatim, so none of it needs handling here; this is so the next
+			// stage-desync or missing-event hunt starts from names instead of raw offsets.
+			//   +0x0C          own character id (published by InitWaitChallenger, adopted by
+			//                  WaitChallenger into 0x503A9C)
+			//   +0x0E/+0x10    the game clock pair - the MASTER runs it, the slave adopts
+			//   +0x14/+0x18    time limit / round-count setting (InitGame, from backup RAM)
+			//   +0x1A..+0x20   round trio + match counter
+			//   +0x22          sound-cue byte (sendBB): one byte per frame to the local sound
+			//                  port, mirrored here; the peer EDGE-DETECTS it when its own queue
+			//                  is empty - that is how both cabinets' announcers stay in step
+			//   +0x28..+0x114  robot state marshal (loose-code writer at i960 0x26980)
+			//   +0x514/+0x515  P1/P2 robot ids - comfire adopts them on the non-master, slot
+			//                  picked by comm-flag bit0 (the Advertize scan's memo; if char
+			//                  select ever misbehaves in linked play, look there first)
+			//   +0x516..+0x52C spawn block (position xyz + heading)
+			//   +0x530..+0x540 SendNetRobot's ONE-SHOT event block - the sender CLEARS the
+			//                  source after a single transmission, which is the ROM-side reason
+			//                  the receive path queues packets in order instead of overwriting
+			//   +0x542..+0x555 operator-settings mirror (memcpy of backup 0x1D00016, 0x14 bytes,
+			//                  every GameMain frame; the SLAVE adopts the master's time/rounds -
+			//                  settings authority belongs to the master cabinet)
+			//   +0x556         the stamp check (PKT_CHECK above); +0x558.. unused
 		}
 
 		// Native address of an i960 global in a given board's work RAM.
