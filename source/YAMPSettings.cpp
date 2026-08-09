@@ -4,7 +4,7 @@
 #include "m2ftg/DisplayModes.h"
 
 #include "m2ftg/Debug/HleHooks.h"
-#include "pre3/HleHooks.h"
+#include "pre3/Debug/HleHooks.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>

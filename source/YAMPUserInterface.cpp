@@ -10,7 +10,7 @@
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
 #include "m2ftg/LJ/MrLink.h"   // Motor Raid's linked cabinet, same questions
-#include "pre3/HleHooks.h"
+#include "pre3/Debug/HleHooks.h"
 #include "pre3/ArcadeSettings.h"
 #include "pre3/CommBoard.h"
 #include "pre3/Determinism.h"
