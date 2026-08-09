@@ -122,6 +122,10 @@ namespace m2ftg
         {
         case YAMPGeneral::GameId::FV: return GAME_FV;
         case YAMPGeneral::GameId::MR: return GAME_MR;
+        // Gaiden's Motor Raid is the same GameDesc (same file name, kind and ROM list); which
+        // BUILD loaded is resolved by SetCurrentModuleBuild like Gaiden StF. Bring-up of that
+        // build is its own project - this routing just lets it load and identify itself.
+        case YAMPGeneral::GameId::MR_GAIDEN: return GAME_MR;
         default: return GAME_STF;
         }
     }

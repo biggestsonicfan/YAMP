@@ -85,10 +85,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     const bool runFV2 = wcsstr(cmdLine, L"-fv2") != nullptr;
     const bool runSRC2 = wcsstr(cmdLine, L"-src2") != nullptr;
     const bool runFV = !runVF2 && !runFV2 && wcsstr(cmdLine, L"-fv") != nullptr;
-    const bool runMR = !runVF2 && !runFV && wcsstr(cmdLine, L"-mr") != nullptr;
+    // "-mr-gaiden" must be tested BEFORE "-mr", which is a prefix of it (same trap as -fv2/-fv):
+    // Like a Dragon Gaiden ships its own 2023 rebuild of the Motor Raid module under the same
+    // file name, and the two builds need distinct GameIds so the launcher can tell them apart.
+    const bool runMR_GAIDEN = wcsstr(cmdLine, L"-mr-gaiden") != nullptr;
+    const bool runMR = !runVF2 && !runFV && !runMR_GAIDEN && wcsstr(cmdLine, L"-mr") != nullptr;
     // Test the LJ and YLAD switches first: both contain "-vf5fs" as a prefix, so the Y6 test
     // must exclude them.
-    const bool runVF5FS_LJ = !runVF2 && !runFV && !runMR && wcsstr(cmdLine, L"-vf5fs-lj") != nullptr;
+    const bool runVF5FS_LJ = !runVF2 && !runFV && !runMR && !runMR_GAIDEN && wcsstr(cmdLine, L"-vf5fs-lj") != nullptr;
     const bool runVF5FS_YLAD = !runVF2 && !runFV && !runMR && !runVF5FS_LJ
         && wcsstr(cmdLine, L"-vf5fs-ylad") != nullptr;
     const bool runVF5FS = !runVF2 && !runFV && !runMR && !runVF5FS_LJ && !runVF5FS_YLAD
@@ -104,7 +108,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         gGeneral.SetFrameLimit(static_cast<uint32_t>(_wtoi(framesArg + 8)));
     }
 
-    const bool anyGameArg = runVF2 || runVF2_K2 || runVON_K2 || runFV || runMR || runVF5FS || runVF5FS_LJ || runVF5FS_YLAD
+    const bool anyGameArg = runVF2 || runVF2_K2 || runVON_K2 || runFV || runMR || runMR_GAIDEN
+        || runVF5FS || runVF5FS_LJ || runVF5FS_YLAD
         || runFV2 || runSRC2 || wcsstr(cmdLine, L"-stf") != nullptr;
     if (!anyGameArg) {
         Launcher::Run(hInstance, nShowCmd);
@@ -252,6 +257,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         // m2ftg::GameDesc (m2ftg/LJ/LJHost.h).
         gGeneral.SetGameId(runFV ? YAMPGeneral::GameId::FV
             : runMR ? YAMPGeneral::GameId::MR
+            : runMR_GAIDEN ? YAMPGeneral::GameId::MR_GAIDEN
             : YAMPGeneral::GameId::StF);
         HMODULE stfDll = m2ftg::LoadDLL();  // stf- / fv- / mr-pxd-w64-d3d12_retail.dll
 

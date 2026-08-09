@@ -9,6 +9,7 @@
 #include "m2ftg/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
+#include "m2ftg/LJ/MrLink.h"   // Motor Raid's linked cabinet, same questions
 #include "pre3/HleHooks.h"
 #include "pre3/ArcadeSettings.h"
 #include "pre3/CommBoard.h"
@@ -41,7 +42,8 @@ static bool IsLJm2ftgGame()
 	const auto id = gGeneral.GetGameId();
 	return id == YAMPGeneral::GameId::StF
 		|| id == YAMPGeneral::GameId::FV
-		|| id == YAMPGeneral::GameId::MR;
+		|| id == YAMPGeneral::GameId::MR
+		|| id == YAMPGeneral::GameId::MR_GAIDEN;
 }
 
 // ...as do the Yakuza Kiwami 2 modules, which share the K2 host the same way. Kiwami 2 ships two
@@ -98,7 +100,8 @@ static bool IsNetplayGame()
 	// Netplay page and no overlay at all while its link worked perfectly, which is the same gap
 	// Virtual On had on the m2ftg side before `GetLinkedCabinet` existed.
 	return m2ftg::NetplaySupported() || pre3::NetplaySupported()
-		|| pre3::CommBoard::LinkedCabinetSupported();
+		|| pre3::CommBoard::LinkedCabinetSupported()
+		|| m2ftg::MrLink::LinkedCabinetSupported();
 }
 
 // The linked-cabinet report, whichever emulator is running. Both games answer the same questions
@@ -107,6 +110,16 @@ static bool GetLinkedCabinetStatus(pre3::CommBoard::CabinetStatus& out)
 {
 	if (pre3::CommBoard::GetLinkedCabinet(out))
 	{
+		return true;
+	}
+	m2ftg::MrLink::LinkedCabinet mr = {};
+	if (m2ftg::MrLink::GetLinkedCabinet(mr))
+	{
+		out.role = mr.role;
+		out.ringUp = mr.ringUp;
+		out.nodeId = mr.nodeId;
+		out.nodes = mr.nodes;
+		out.checkDone = mr.checkDone;
 		return true;
 	}
 	m2ftg::K2::LinkedCabinet von = {};

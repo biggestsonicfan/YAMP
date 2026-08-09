@@ -98,6 +98,29 @@ namespace pxd
                 }
             }
 
+            // MOTOR RAID IS A MOTORCYCLE CABINET, and its module reads ANALOGUE fields no
+            // fighting game touches: the per-frame input translator (mr DLL FUN_180068e90)
+            // takes m_x1/m_y1 and the LB/RB pressure bytes (m_buttons[4]/[5]) out of the pad
+            // block and its own default assignment template maps them onto the board's three
+            // ADC channels (ch0 accel / ch1 brake / ch2 handlebar - the ROM's _ReadIO, see
+            // docs/mr-comm-packet.md). So the wiring is the pad fill, not the module: feed the
+            // driving axes (pad stick + triggers, ramped keyboard - the same merged source
+            // Sega Racing Classic 2 uses) into the fields the module already consumes.
+            if (gGeneral.GetGameId() == YAMPGeneral::GameId::MR
+                || gGeneral.GetGameId() == YAMPGeneral::GameId::MR_GAIDEN)
+            {
+                float steer = 0.0f, throttle = 0.0f, brake = 0.0f;
+                Input::DrivingAxes(player, steer, throttle, brake);
+                if (steer != 0.0f)
+                {
+                    m_x1 = steer;   // bound digital movement above still wins when held
+                }
+                // Trigger pressure bytes. Which slot the module's template reads as gas and
+                // which as brake was settled with the -mr-iotest harness (MrLink.cpp).
+                m_buttons[sl::BUTTON_RB] = static_cast<uint8_t>(throttle * 255.0f);
+                m_buttons[sl::BUTTON_LB] = static_cast<uint8_t>(brake * 255.0f);
+            }
+
             m_push = ~m_prev & m_now;
             m_pull = m_prev & ~m_now;
         }

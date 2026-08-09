@@ -45,6 +45,6 @@ namespace m2ftg
 
 	bool IsGaidenBuild()
 	{
-		return g_currentBuild == build::GAIDEN_STF;
+		return g_currentBuild == build::GAIDEN_STF || g_currentBuild == build::GAIDEN_MR;
 	}
 }

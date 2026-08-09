@@ -121,6 +121,13 @@ namespace Launcher
 				FV_CANDIDATES, std::size(FV_CANDIDATES) },
 			{ YAMPGeneral::GameId::MR, "Motor Raid", "Lost Judgment", L"-mr",
 				MR_CANDIDATES, std::size(MR_CANDIDATES) },
+			// Gaiden's own rebuild of the module, same file name at the same relative path — a
+			// SEPARATE entry so each build verifies against its own table. Without it, whichever
+			// install the search found first decided the one "Motor Raid" verdict, and a Gaiden
+			// copy blocked the Lost Judgment one as an unknown build (the per-entry search below
+			// prefers the copy that verifies, which is what actually tells them apart).
+			{ YAMPGeneral::GameId::MR_GAIDEN, "Motor Raid", "Like a Dragon Gaiden", L"-mr-gaiden",
+				MR_CANDIDATES, std::size(MR_CANDIDATES) },
 			{ YAMPGeneral::GameId::VF2, "Virtua Fighter 2", "Yakuza: Like a Dragon", L"-vf2",
 				VF2_CANDIDATES, std::size(VF2_CANDIDATES) },
 			{ YAMPGeneral::GameId::VF5FS, "Virtua Fighter 5: Final Showdown", "Yakuza 6: The Song of Life", L"-vf5fs",
@@ -216,29 +223,44 @@ namespace Launcher
 			{
 				FoundGame result;
 				result.info = &info;
+				// The nearest copy is only a FALLBACK: several games ship the same DLL file name
+				// in more than one title (Motor Raid exists in Lost Judgment AND Like a Dragon
+				// Gaiden at the same runtime/media path), so the search keeps looking until it
+				// finds a copy whose build verifies FOR THIS ENTRY. A first-found copy that does
+				// not verify is remembered and used only if nothing else does — the same rule
+				// CheckParentGame applies to a second install of the parent title.
 				for (const SearchRoot& root : roots)
 				{
-					for (size_t c = 0; c < info.candidateCount && !result.found; c++)
+					bool foundHere = false;
+					FoundGame candidate;
+					candidate.info = &info;
+					for (size_t c = 0; c < info.candidateCount && !foundHere; c++)
 					{
 						std::error_code ec;
 						fs::path dll = root.path / info.candidates[c].dll;
 						if (!fs::is_regular_file(dll, ec) || ec) continue;
 
-						result.found = true;
-						result.dllPath = std::move(dll);
-						result.bootDir = fs::weakly_canonical(root.path / info.candidates[c].bootDir, ec);
-						if (ec || result.bootDir.empty()) result.bootDir = root.path;
-						result.dllPathUtf8 = WcharToUTF8(result.dllPath.wstring());
-						result.sourceLabel = root.label;
+						foundHere = true;
+						candidate.found = true;
+						candidate.dllPath = std::move(dll);
+						candidate.bootDir = fs::weakly_canonical(root.path / info.candidates[c].bootDir, ec);
+						if (ec || candidate.bootDir.empty()) candidate.bootDir = root.path;
+						candidate.dllPathUtf8 = WcharToUTF8(candidate.dllPath.wstring());
+						candidate.sourceLabel = root.label;
 					}
-					if (result.found) break;
-				}
-				if (result.found)
-				{
+					if (!foundHere) continue;
+
 					// A few megabytes per module — cheap enough to hash every scan, so the
 					// table always reflects what is on disk right now.
-					result.module = Verify::CheckModule(info.id, result.dllPath);
-					result.parent = Verify::CheckParentGame(info.id, result.dllPath.parent_path());
+					candidate.module = Verify::CheckModule(info.id, candidate.dllPath);
+					candidate.parent = Verify::CheckParentGame(info.id, candidate.dllPath.parent_path());
+					const bool verifies = candidate.module.status == Verify::ModuleStatus::Verified
+						|| candidate.module.status == Verify::ModuleStatus::NotChecked;
+					if (!result.found || verifies)
+					{
+						result = std::move(candidate);
+					}
+					if (verifies) break;
 				}
 				DebugLog("[launcher] %s: %s (module %s, parent %s)\n", info.name,
 					result.found ? result.dllPathUtf8.c_str() : "not found",

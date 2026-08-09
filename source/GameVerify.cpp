@@ -69,6 +69,17 @@ namespace Verify
 			{ "9FCBAE38DD7DC04DD2B29BF09576594FA0ED5A6089D82272E200E7A1C59A9623", 2699248, 0x637B1190,
 				"Lost Judgment (2022-11-21)" },
 		};
+		// Like a Dragon Gaiden's own rebuild of the Motor Raid module — same file name at the
+		// same runtime/media/m2ftg path, so it needs its OWN GameId and table: with both titles
+		// installed, whichever copy the launcher's search found first used to decide the one
+		// "Motor Raid" verdict, and a Gaiden copy blocked the Lost Judgment one as an unknown
+		// build. Identified here so the entry lists and verifies; BRING-UP OF THIS BUILD IS
+		// SEPARATE WORK (Gaiden pxd layout applies — IsGaidenBuild covers the timestamp — but
+		// nothing MR-specific has been checked against it yet).
+		constexpr KnownModuleBuild MR_GAIDEN_BUILDS[] = {
+			{ "75A61F1C0A756393282C470C89F3B6BE645E9EF4917A56E390F5D539E02781DC", 2745328, 0x65647C81,
+				"Like a Dragon Gaiden (2023-11-27)" },
+		};
 		constexpr KnownModuleBuild VF5FS_LJ_BUILDS[] = {
 			{ "2A83D302768D7AFA5F2EF0B0D0481CF281F081FCE1D9CCFF3CA34EE94358E36B", 6152688, 0x637B1259,
 				"Lost Judgment (2022-11-21)" },
@@ -133,6 +144,8 @@ namespace Verify
 			{ YAMPGeneral::GameId::FV, FV_BUILDS, std::size(FV_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
 			{ YAMPGeneral::GameId::MR, MR_BUILDS, std::size(MR_BUILDS),
+				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
+			{ YAMPGeneral::GameId::MR_GAIDEN, MR_GAIDEN_BUILDS, std::size(MR_GAIDEN_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
 			{ YAMPGeneral::GameId::VF5FS_LJ, VF5FS_LJ_BUILDS, std::size(VF5FS_LJ_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
@@ -221,8 +234,8 @@ namespace Verify
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
 		};
-		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), and MR's Gaiden build
-		// has not been brought up yet, so both stay Lost-Judgment-only.
+		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), so it stays
+		// Lost-Judgment-only. MR's Gaiden build is its own entry (MR_GAIDEN) now.
 		constexpr ParentTitle LJ_TITLES[] = {
 			{ L"LostJudgment.exe", "LostJudgment.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
@@ -246,6 +259,7 @@ namespace Verify
 			{ YAMPGeneral::GameId::StF, STF_TITLES, std::size(STF_TITLES) },
 			{ YAMPGeneral::GameId::FV, LJ_TITLES, std::size(LJ_TITLES) },
 			{ YAMPGeneral::GameId::MR, LJ_TITLES, std::size(LJ_TITLES) },
+			{ YAMPGeneral::GameId::MR_GAIDEN, GAIDEN_TITLES, std::size(GAIDEN_TITLES) },
 			{ YAMPGeneral::GameId::VF5FS_LJ, LJ_TITLES, std::size(LJ_TITLES) },
 			{ YAMPGeneral::GameId::VF2, YLAD_TITLES, std::size(YLAD_TITLES) },
 			{ YAMPGeneral::GameId::VF5FS_YLAD, YLAD_TITLES, std::size(YLAD_TITLES) },

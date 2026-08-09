@@ -20,7 +20,8 @@ const char* YAMPGeneral::GetArcadeGameName() const
 	{
 	case GameId::StF: return "Sonic the Fighters";
 	case GameId::FV: return "Fighting Vipers";
-	case GameId::MR: return "Motor Raid";
+	case GameId::MR:
+	case GameId::MR_GAIDEN: return "Motor Raid";
 	case GameId::VF2:
 	case GameId::VF2_K2: return "Virtua Fighter 2";
 	case GameId::VON_K2: return "Virtual On";
@@ -38,6 +39,7 @@ const char* YAMPGeneral::GetGameTag() const
 	case GameId::StF: return "StF";
 	case GameId::FV: return "FV";
 	case GameId::MR: return "MR";
+	case GameId::MR_GAIDEN: return "MR-Gaiden";
 	case GameId::VF2: return "VF2";
 	case GameId::VF2_K2: return "VF2-K2";
 	case GameId::VON_K2: return "VON-K2";
@@ -57,6 +59,7 @@ bool YAMPGeneral::IsModel2ArcadeGame() const
 	case GameId::StF:
 	case GameId::FV:
 	case GameId::MR:
+	case GameId::MR_GAIDEN:
 	case GameId::VF2:
 	case GameId::VF2_K2:
 	case GameId::VON_K2:
@@ -86,7 +89,8 @@ const char* YAMPGeneral::GetParentGameName() const
 	case GameId::VF2_K2:
 	case GameId::VON_K2: return "Yakuza Kiwami 2";
 	case GameId::FV2:
-	case GameId::SRC2: return "Like a Dragon Gaiden";
+	case GameId::SRC2:
+	case GameId::MR_GAIDEN: return "Like a Dragon Gaiden";
 	case GameId::Launcher: return "the supported Yakuza games";
 	default: return "Yakuza 6: The Song of Life";
 	}

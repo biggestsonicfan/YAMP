@@ -33,8 +33,9 @@ namespace m2ftg
 		inline constexpr uint32_t LJ_FV  = 0x637B119D;
 		inline constexpr uint32_t LJ_MR  = 0x637B1190;
 
-		// Like a Dragon Gaiden, modules built 2023-11-27. Ships stf/vf2/mr; this is the stf one.
+		// Like a Dragon Gaiden, modules built 2023-11-27. Ships stf/vf2/mr.
 		inline constexpr uint32_t GAIDEN_STF = 0x65647FB5;
+		inline constexpr uint32_t GAIDEN_MR  = 0x65647C81;
 
 		// Yakuza: Like a Dragon, 2021-02-01. vf2.
 		inline constexpr uint32_t YLAD_VF2 = 0x601763D1;

@@ -507,10 +507,35 @@ namespace
 		nullptr, 0, // no homebrew convention sites
 	};
 
+#include "MrHooks.inc"
+
+	// Motor Raid, enumerated 2026-08-09 alongside the linked-cabinet work (docs/
+	// mr-comm-packet.md). RVAs from the module's own installer, FUN_180052680: the trap loop is
+	//     uVar10 = *(uint *)(&DAT_180276d80 + i * 0x10);                      <- table (0x40)
+	//     (&DAT_180727490)[i] = *(u64 *)(&DAT_180eb6310 + uVar10);            <- savedWords, romBase
+	//     *(uint *)(&DAT_180eb6310 + uVar10) = i * 4 | 0x4000000;
+	// guarded by `if (uVar10 < 0x200000)` — the overlay-targeting records never install (see
+	// MrHooks.inc). The boot state is the installer's own stage counter DAT_180741e30, which
+	// reaches 2 in the stage that stamps the traps and stays there — the same contract
+	// rvaBootState documents.
+	constexpr HookBuild MR_BUILDS[] = {
+		{ m2ftg::build::LJ_MR, 0x276D80, 0x727490, 0xEB6310, 0x741E30 },
+	};
+
+	constexpr GameHooks GAME_MR = {
+		L"mr-pxd-w64-d3d12_retail.dll",
+		GameHooks::Disable::RomWord, 0,
+		MR_HOOKS, std::size(MR_HOOKS),
+		MR_BUILDS, std::size(MR_BUILDS),
+		{ 0, 0 },   // nothing to disable by default
+		nullptr, 0, // no homebrew convention sites
+	};
+
 	static_assert(std::size(VON_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(STF_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(FV_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 	static_assert(std::size(VF2_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
+	static_assert(std::size(MR_HOOKS) <= m2ftg::HleHooks::MAX_COUNT, "raise MAX_COUNT");
 
 	const GameHooks* CurrentHooks()
 	{
@@ -520,6 +545,7 @@ namespace
 		case YAMPGeneral::GameId::FV:  return &GAME_FV;
 		case YAMPGeneral::GameId::VF2: return &GAME_VF2;
 		case YAMPGeneral::GameId::VON_K2: return &GAME_VON;
+		case YAMPGeneral::GameId::MR:  return &GAME_MR;
 		default:                       return nullptr;
 		}
 	}

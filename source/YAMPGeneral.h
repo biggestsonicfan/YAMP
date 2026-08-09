@@ -65,6 +65,11 @@ public:
 		            // Dragon Gaiden's pre3 module (source/pre3). Unlike every entry above, these
 		            // two share ONE DLL: pre3 emulates six Model 3 games and picks between them
 		            // with a config byte, so the GameId is the only thing that differs.
+		MR_GAIDEN,  // Motor Raid again, from Like a Dragon Gaiden's own mr module (a 2023
+		            // rebuild, same file name as Lost Judgment's). A separate id so the
+		            // launcher can tell the two builds apart — without it, whichever install
+		            // the search found first decided the "Motor Raid" verdict, and a Gaiden
+		            // copy blocked the Lost Judgment one as an unknown build.
 		Launcher,
 	};
 

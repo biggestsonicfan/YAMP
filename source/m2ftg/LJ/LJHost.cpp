@@ -34,6 +34,7 @@ void AdvanceFrameStampNow();
 #include "../NetSession.h"
 #include "../SystemSwitches.h"
 #include "../ELF/CharRamFix.h"
+#include "MrLink.h"
 #include "../ELF/ElfRom.h"
 #include "../../input/Input.h"
 #include "../HostUI.h"
@@ -194,7 +195,26 @@ namespace m2ftg
                 InstallRamExecFetch(dll, symbolMap);
                 // Cabinet Test / Service switches on the emulated I/O board's system port,
                 // which is what makes the board's own service menu reachable.
-                InstallSystemSwitches(dll, symbolMap);
+                //
+                // MOTOR RAID does not share the StF/FV I/O core the pattern install finds — its
+                // refresh is FUN_180054c00, and the two calls to it live in the frame driver
+                // FUN_18005c030 (which IS the retail driver: its gate DLL+0x741CB7 reads as
+                // "machine running", not "linked mode" — settled 2026-08-09 when the io probe
+                // showed the refresh rebuilding io[9] every module_main). Same io[9] bits 2/3,
+                // same post-refresh hook; only the addresses differ, hardcoded here because
+                // GameVerify pins this exact build. NOT multiplexed: MR's second bank (io[0xA])
+                // is the DIP byte, like the other Lost Judgment modules.
+                if (CurrentModuleBuild() == build::LJ_MR)
+                {
+                    uint8_t* const base = static_cast<uint8_t*>(dll);
+                    InstallSystemSwitchesAt(dll, base + 0x5C386, base + 0x5C3A3,
+                        reinterpret_cast<uint8_t* const*>(base + 0x75A0A8),
+                        /*multiplexedSystemPort=*/false);
+                }
+                else
+                {
+                    InstallSystemSwitches(dll, symbolMap);
+                }
                 // ...and one bad byte in the backup RAM the module injects, which hangs the
                 // board as soon as that menu's GAME ASSIGNMENTS page is drawn.
                 FixBackupRamTimeIndex(dll);
@@ -299,6 +319,14 @@ namespace m2ftg
             }
             DebugLog("[%s::Run] patches installed OK\n", gGeneral.GetGameTag());
 
+            // Motor Raid's linked-cabinet link (MrLink.h). Latches only for the MR module build
+            // its RVAs were reversed from; every other game leaves it inert.
+            if (gGeneral.GetGameId() == YAMPGeneral::GameId::MR
+                || gGeneral.GetGameId() == YAMPGeneral::GameId::MR_GAIDEN)
+            {
+                MrLink::Configure(reinterpret_cast<uint8_t*>(gameDll.get()));
+            }
+
             // Initialize Criware stub and module stubs
             Cri criware;
             // Gaiden's module was built against a newer CRIWARE whose icri has one more virtual,
@@ -371,18 +399,13 @@ namespace m2ftg
             // Set up a FPS limiter
             // TODO: Do more gracefully
             int64_t frameTimeTicks;
+            int64_t sixtyHzTicks;
             {
+                LARGE_INTEGER frequency;
+                QueryPerformanceFrequency(&frequency);
+                sixtyHzTicks = (frequency.QuadPart * 50) / 3;
                 // We want to enforce 60 FPS, unless the cap is disabled in Debug
-                if (!settings->m_enableFpsCap)
-                {
-                    frameTimeTicks = 0;
-                }
-                else
-                {
-                    LARGE_INTEGER frequency;
-                    QueryPerformanceFrequency(&frequency);
-                    frameTimeTicks = (frequency.QuadPart * 50) / 3;
-                }
+                frameTimeTicks = settings->m_enableFpsCap ? sixtyHzTicks : 0;
             }
 
             ApplyAspectSetting(window, settings->m_m2Aspect);
@@ -464,11 +487,19 @@ namespace m2ftg
                     }
 
                     // TODO: Waitable timer
+                    //
+                    // GAME SPEED IS A COMPETITIVE ADVANTAGE for a linked pair, and the single-
+                    // frame handshake states in Motor Raid's ring protocol are only safe between
+                    // boards running at the same rate (the Virtual On stage-desync lesson). So a
+                    // live cabinet link forces the 60 Hz cap even when the Debug setting turned
+                    // it off; solo play keeps the configured policy.
+                    const int64_t waitTicks =
+                        (frameTimeTicks == 0 && MrLink::LinkActive()) ? sixtyHzTicks : frameTimeTicks;
                     LARGE_INTEGER currentTime;
                     do
                     {
                         QueryPerformanceCounter(&currentTime);
-                    } while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < frameTimeTicks);
+                    } while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
                     lastTime = currentTime;
                 }
 
@@ -550,14 +581,17 @@ namespace m2ftg
                 // the upload-stamp advance below, so an "only cosmetic" pause would still change
                 // how much work this side does. There is no per-player pause in an arcade match;
                 // the honest behaviour is for Escape to do nothing while a session is up.
-                if (netplayLocked)
+                // A linked cabinet may not pause either: stopping this board mid-ring trips the
+                // peer's link watchdog (the ROM's own error accounting) within seconds.
+                const bool pauseLocked = netplayLocked || MrLink::LinkActive();
+                if (pauseLocked)
                 {
                     s_pauseMenuOpen = false;   // close it if a session started while it was open
                 }
 
                 static bool s_escWasDown = false;
                 const bool escDown = gGeneral.GetPressedKeys()[VK_ESCAPE];
-                if (escDown && !s_escWasDown && !netplayLocked)
+                if (escDown && !s_escWasDown && !pauseLocked)
                 {
                     s_pauseMenuOpen = !s_pauseMenuOpen;
                 }
@@ -610,6 +644,9 @@ namespace m2ftg
                     execute_info.assign[p][i] = Input::MODULE_ASSIGN[i];
                 }
             }
+
+            // Motor Raid analogue-mapping harness (see MrLink.h). Inert without -mr-iotest.
+            MrLink::IoTest(execute_info);
 
             // Dedicated coin binding: a press becomes the coin status bit (host->module bit5,
             // same bit LJ's start/coin protocol below injects). Meaningless in freeplay, and
@@ -717,6 +754,12 @@ namespace m2ftg
             // deliberately last frame's answer, so the frame on which a barrier releases still
             // routes its pads and runs its coin protocol against a stable view.
             net_.Drive();
+
+            // Motor Raid's linked-cabinet comm board (MrLink.h). After Drive() so the room state
+            // it reads (which decides the cabinet role) is this frame's, and before module_main
+            // so the peer's packet and the firmware status are resident when the ROM reads the
+            // comm window. Inert for every other game and for Motor Raid outside a room.
+            MrLink::PreFrame();
 
             // Step() also overwrites BOTH pads in execute_info with the transmitted inputs, which
             // is why it runs after the local pad fill above: whatever csl_pad produced is a local
