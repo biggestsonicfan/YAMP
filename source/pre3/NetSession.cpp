@@ -52,49 +52,27 @@ pre3::NetSession& pre3::NetplaySession()
 
 pre3::NetSession::Status pre3::NetSession::GetStatus() const
 {
-	Status st = {};
-	st.inMatch = net::IsAvailable() && m_frame != UINT32_MAX;
-	st.localPad = net::IsAvailable() ? net::Api()->get_local_player(net::Session()) : -1;
-	st.locked = net::SessionInProgress();
-	return st;
+	return m_round.GetStatus();
 }
 
 void pre3::NetSession::EndRound(const char* why)
 {
-	// Un-pin the clock. It was pinned as part of a round that is not happening any more, and a
-	// stand-alone session has no reason to be told it is permanently 2000-01-01.
-	SetDeterministicClock(false);
-	net::ClearStartRequest();
-	if (net::IsAvailable())
-	{
-		net::Api()->end_round(net::Session());
-	}
-	m_frame = UINT32_MAX;
-	// end_round leaves us IN_ROOM, so re-arm the request flag or Start match would never open a
-	// second barrier.
-	m_roundRequested = false;
+	// The un-pin is the clock: it was pinned as part of a round that is not happening any more,
+	// and a stand-alone session has no reason to be told it is permanently 2000-01-01.
+	m_round.End([] { SetDeterministicClock(false); }, why);
 	m_prep = Prep::Idle;
 	m_resetFrames = 0;
-	if (why != nullptr)
-	{
-		net::Logf("%s", why);
-	}
 }
 
 void pre3::NetSession::Drive()
 {
-	m_hold = false;
-	if (!net::IsAvailable())
+	yampnet_state ns = YAMPNET_STATE_IDLE;
+	if (!m_round.Poll(ns))
 	{
 		return;
 	}
-
 	const yampnet_api* api = net::Api();
 	yampnet_session* sess = net::Session();
-	api->poll(sess);
-	net::DriveSession();   // connect -> discovery -> host/join (idempotent)
-
-	const yampnet_state ns = api->get_state(sess);
 
 	// Room is up, but only announce when we are allowed to: the command-line harness auto-starts,
 	// a UI session waits for the host's Start button.
@@ -104,27 +82,15 @@ void pre3::NetSession::Drive()
 	// long before its board is up, and every determinism call this driver makes is a no-op until it
 	// is. Because each peer gates its own announce, the barrier comes to mean "both boards are
 	// ready", which is what it was always supposed to mean.
-	if (ns == YAMPNET_STATE_IN_ROOM && !m_roundRequested && NetplaySupported()
+	if (ns == YAMPNET_STATE_IN_ROOM && !m_round.Requested() && NetplaySupported()
 		&& net::ShouldStartRound() && IsBoardBooted())
 	{
-		const YAMPSettings* settings = gGeneral.GetSettings();
-		yampnet_match_config mc = {};
-		mc.frame_delay = static_cast<uint8_t>(
-			settings != nullptr && settings->m_netFrameDelay > 0 ? settings->m_netFrameDelay : 3);
-		mc.input_redundancy = 10;
-		mc.stall_timeout_ms = 10000;
-		// The canary is a HASH, so the peers' values must match exactly - the plugin's other mode
-		// baselines the difference between them, which only means anything for a counter. See
-		// yampnet_match_config::state_check_exact.
-		mc.state_check_exact = 1;
-		// Round number: counts up per round so late packets from the PREVIOUS round cannot poison
-		// this one. The plugin makes the HOST authoritative and a guest adopts whatever round the
-		// host announces, exactly as it adopts the seed.
-		++m_roundNumber;
-		if (api->begin_round(sess, m_roundNumber, &mc) == YAMPNET_OK)
+		// exactCheck = true: the canary is a HASH, so the peers' values must match exactly -
+		// the plugin's other mode baselines the difference between them, which only means
+		// anything for a counter. See net::Round::Begin.
+		if (m_round.Begin(true))
 		{
 			m_prep = Prep::Announced;
-			m_roundRequested = true;
 			net::Logf("barrier opened, emulator held until the peer arrives");
 		}
 	}
@@ -135,7 +101,8 @@ void pre3::NetSession::Drive()
 	// There, holding is about keeping an anchor meaningful. Here it is about not letting this
 	// machine run frames the peer does not, in a window that ends with both boards being restored
 	// from the same file anyway - so the freeze is belt and braces rather than the mechanism.
-	m_hold = (m_prep == Prep::Announced && ns != YAMPNET_STATE_IN_MATCH && m_frame == UINT32_MAX);
+	m_round.SetHold(m_prep == Prep::Announced && ns != YAMPNET_STATE_IN_MATCH
+		&& !m_round.InRound());
 
 	// Barrier released. THIS is where the determinism work happens, and doing it here rather than
 	// before the barrier is the whole reason this driver is not a copy of m2ftg's: the match seed
@@ -198,7 +165,7 @@ void pre3::NetSession::Drive()
 		if (!BoardRestorePending())
 		{
 			m_prep = Prep::Live;
-			m_frame = 0;
+			m_round.BeginFrameZero();
 			net::Logf("board restored after %u frame(s); frame 0 starts now", m_resetFrames);
 		}
 		else if (++m_resetFrames > RESET_FRAME_BUDGET)
@@ -209,16 +176,10 @@ void pre3::NetSession::Drive()
 	}
 
 	// Back to a state with no round in it - the session ended, or the lobby left the room.
-	if (ns == YAMPNET_STATE_IDLE || ns == YAMPNET_STATE_FAILED || ns == YAMPNET_STATE_ONLINE)
+	// The shell re-arms (see net::Round::DriveTeardown); the prep machine is ours to reset.
+	if (m_round.DriveTeardown(ns, m_prep != Prep::Idle, [] { SetDeterministicClock(false); }))
 	{
-		if (m_roundRequested || m_prep != Prep::Idle)
-		{
-			net::ClearStartRequest();
-			SetDeterministicClock(false);
-		}
-		m_roundRequested = false;
 		m_prep = Prep::Idle;
-		m_frame = UINT32_MAX;
 		m_resetFrames = 0;
 	}
 }
@@ -232,7 +193,7 @@ bool pre3::NetSession::Step(pre3_execute_info_t& info)
 	// pre3::WaitForEmulatedFrame for what goes wrong without it.
 	m_frameMarker = BoardFrameMarker();
 
-	bool advanceFrame = !m_hold;
+	const bool advanceFrame = !m_round.Hold();
 	if (!net::IsAvailable())
 	{
 		return advanceFrame;
@@ -252,44 +213,29 @@ bool pre3::NetSession::Step(pre3_execute_info_t& info)
 		return advanceFrame;
 	}
 
-	if (m_frame == UINT32_MAX)
+	if (!m_round.InRound())
 	{
 		return advanceFrame;
 	}
 
-	const yampnet_step st = net::Api()->step(net::Session(), m_frame, &info);
-	advanceFrame = (st == YAMPNET_STEP_READY);
-
-	if (st == YAMPNET_STEP_TIMEOUT || st == YAMPNET_STEP_DISCONNECTED)
+	// The step/timeout/desync handling is the shared shell - see net::Round::Step. Only the
+	// EndRound reaction is ours, because it un-pins this family's deterministic clock.
+	switch (m_round.Step(&info))
 	{
-		net::Logf("round ended (step=%d); returning to local play", static_cast<int>(st));
-		// Tell the player. Both ends of a lost match see this: the peer that went away is gone,
-		// and the one still running would otherwise find itself back in attract mode with no
-		// explanation.
-		net::NotePeerLost(st == YAMPNET_STEP_TIMEOUT
-		                      ? "The other player stopped responding."
-		                      : "The other player disconnected.");
+	case net::Round::StepVerdict::Stalled:
+		return false;
+	case net::Round::StepVerdict::RoundOver:
 		EndRound(nullptr);
-		advanceFrame = true;
+		return true;
+	case net::Round::StepVerdict::Ready:
+	default:
+		return true;
 	}
-
-	// Divergence detected. Stop AT the divergence rather than playing on: both screens then hold
-	// the last frame the two machines still agreed on, and the frame number in the log is the one
-	// to investigate.
-	uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
-	if (net::Api()->get_desync(net::Session(), &dFrame, &dLocal, &dRemote) != 0)
-	{
-		net::Logf("DESYNC at frame %u (local=0x%08X, peer=0x%08X) - ending the round; the two "
-		          "emulators stopped agreeing here", dFrame, dLocal, dRemote);
-		EndRound(nullptr);
-		advanceFrame = true;
-	}
-	return advanceFrame;
 }
 
 void pre3::NetSession::EndFrame(const pre3_execute_info_t& info)
 {
-	if (m_frame == UINT32_MAX)
+	if (!m_round.InRound())
 	{
 		return;
 	}
@@ -342,7 +288,7 @@ void pre3::NetSession::EndFrame(const pre3_execute_info_t& info)
 			// equal f=, so nothing here may be conditional on anything host-local.
 			net::Logf("pre3 f=%u chk=0x%08X cpu=0x%08X ram=0x%08X mode=%02X/%02X "
 			          "p0=0x%06X p1=0x%06X status=0x%X settled=%d",
-			          m_frame, check, cpu, ram, info.game_mode, info.game_sub_mode,
+			          m_round.Frame(), check, cpu, ram, info.game_mode, info.game_sub_mode,
 			          info.pad[0].m_now, info.pad[1].m_now, info.status,
 			          static_cast<int>(settled));
 		}
@@ -350,7 +296,7 @@ void pre3::NetSession::EndFrame(const pre3_execute_info_t& info)
 
 	if (check != 0)
 	{
-		net::Api()->submit_state_check(net::Session(), m_frame, check);
+		m_round.SubmitCheck(check);
 	}
 	else
 	{
@@ -367,5 +313,5 @@ void pre3::NetSession::EndFrame(const pre3_execute_info_t& info)
 			                  : "the emulator thread did not finish its frame in time");
 		}
 	}
-	++m_frame;
+	m_round.AdvanceFrame();
 }

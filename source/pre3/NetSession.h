@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "pre3.h"
+#include "../net/Round.h"
 
 namespace pre3
 {
@@ -71,23 +72,11 @@ namespace pre3
 	class NetSession
 	{
 	public:
-		struct Status
-		{
-			// A session is up - NOT merely "a round is live". Every host->module input that is
-			// not part of the transmitted pad has to be dead for the whole session: coin,
-			// TEST/SERVICE, the pause menu, the HLE hook mask. The window between pressing Start
-			// and frame 0 is the dangerous one, because the board is about to be restored and one
-			// stray input in there changes this machine's state on the frame that is supposed to
-			// be identical on both.
-			bool locked;
-			// A round is live: inputs are being exchanged and the pads are authoritative.
-			bool inMatch;
-			// Which pad slot this machine drives on the wire: 0 = host, 1 = guest, -1 = local.
-			int32_t localPad;
-		};
-
-		// Named GetStatus, not Status: a member function with the same name as the nested type
-		// hides that type at every call site.
+		// The shared shape (net/Round.h). The pre3 wrinkle on `locked`: the window between
+		// pressing Start and frame 0 is dangerous here because the board is about to be
+		// restored, and one stray input in there changes this machine's state on the frame
+		// that is supposed to be identical on both.
+		using Status = net::Round::Status;
 		Status GetStatus() const;
 
 		// Polls the plugin and runs the round-start state machine. Safe to call every frame
@@ -124,13 +113,10 @@ namespace pre3
 
 		void EndRound(const char* why);
 
-		// UINT32_MAX means "not in a netplay round"; anything else is the frame the lockstep
-		// engine keys inputs by.
-		uint32_t m_frame = UINT32_MAX;
+		// The plugin-facing shell (frame numbering, round bookkeeping, step/desync handling)
+		// lives in net::Round, shared with m2ftg's driver.
+		net::Round m_round;
 		Prep m_prep = Prep::Idle;
-		uint32_t m_roundNumber = 0;
-		bool m_roundRequested = false;
-		bool m_hold = false;
 		// How many frames the restore has been outstanding. It should land on the first one; this
 		// is here so a request the module silently drops ends the round with a diagnosis instead
 		// of hanging both machines at a black screen.

@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "m2ftg.h"
+#include "../net/Round.h"
 
 namespace m2ftg
 {
@@ -53,24 +54,11 @@ namespace m2ftg
 	class NetSession
 	{
 	public:
-		struct Status
-		{
-			// A session is up - NOT merely "a round is live". Every host->module input that is
-			// not part of the transmitted pad has to be dead for the whole session: coin,
-			// TEST/SERVICE, pause, the debug windows, the HLE mask. The window between pressing
-			// Start and frame 0 is the dangerous one, because the board is reset and then runs
-			// FREELY until it reaches the anchor - so an input pressed in there changes this
-			// machine's state before the round begins, and the anchor only aligns the ROM's
-			// frame counter, not the rest of the board.
-			bool locked;
-			// A round is live: inputs are being exchanged and the pads are authoritative.
-			bool inMatch;
-			// Which pad slot this machine drives on the wire: 0 = host, 1 = guest, -1 = local.
-			int32_t localPad;
-		};
-
-		// Named GetStatus, not Status: a member function with the same name as the nested type
-		// hides that type at every call site.
+		// The shared shape (net/Round.h). The m2ftg wrinkle on `locked`: the window between
+		// pressing Start and frame 0 is dangerous here because the board is reset and then runs
+		// FREELY until it reaches the anchor - the anchor only aligns the ROM's frame counter,
+		// not the rest of the board.
+		using Status = net::Round::Status;
 		Status GetStatus() const;
 
 		// Polls the plugin and runs the round-start state machine. Safe to call every frame
@@ -104,15 +92,13 @@ namespace m2ftg
 
 		void EndRound(const char* why);
 
-		// UINT32_MAX means "not in a netplay round"; anything else is the frame the lockstep
-		// engine keys inputs by. It advances ONLY on frames the emulator actually ran, which is
-		// why EndFrame() is a separate call rather than part of Step().
-		uint32_t m_frame = UINT32_MAX;
+		// The plugin-facing shell (frame numbering, round bookkeeping, step/desync handling)
+		// lives in net::Round, shared with pre3's driver. The frame advances ONLY on frames the
+		// emulator actually ran, which is why EndFrame() is a separate call rather than part of
+		// Step().
+		net::Round m_round;
 		Prep m_prep = Prep::Idle;
 		uint32_t m_anchor = 0;
-		uint32_t m_roundNumber = 0;
-		bool m_roundRequested = false;
-		bool m_hold = false;
 		// Previous frame's canary value, for the "did the emulator actually advance?" test in
 		// EndFrame. Kept across the whole session (not just a round) so frame 0 has a baseline.
 		uint32_t m_lastCheck = 0;

@@ -134,48 +134,26 @@ m2ftg::NetSession& m2ftg::NetplaySession()
 
 m2ftg::NetSession::Status m2ftg::NetSession::GetStatus() const
 {
-	Status st = {};
-	st.inMatch = net::IsAvailable() && m_frame != UINT32_MAX;
-	st.localPad = net::IsAvailable() ? net::Api()->get_local_player(net::Session()) : -1;
-	st.locked = net::SessionInProgress();
-	return st;
+	return m_round.GetStatus();
 }
 
 void m2ftg::NetSession::EndRound(const char* why)
 {
-	// Un-pin the budget: it was pinned as part of a round that is not happening any more, and
-	// leaving it on would slow local play for no reason.
-	SetTextureBudgetDeterministic(false);
-	net::ClearStartRequest();
-	if (net::IsAvailable())
-	{
-		net::Api()->end_round(net::Session());
-	}
-	m_frame = UINT32_MAX;
-	// end_round leaves us IN_ROOM, so re-arm the request flag or Start match would never open a
-	// second barrier.
-	m_roundRequested = false;
+	// The un-pin is the texture budget: it was pinned as part of a round that is not happening
+	// any more, and leaving it on would slow local play for no reason.
+	m_round.End([] { SetTextureBudgetDeterministic(false); }, why);
 	m_prep = Prep::Idle;
-	if (why != nullptr)
-	{
-		net::Logf("%s", why);
-	}
 }
 
 void m2ftg::NetSession::Drive()
 {
-	m_hold = false;
-	if (!net::IsAvailable())
+	yampnet_state ns = YAMPNET_STATE_IDLE;
+	if (!m_round.Poll(ns))
 	{
 		return;
 	}
-
 	const yampnet_api* api = net::Api();
 	yampnet_session* sess = net::Session();
-	api->poll(sess);
-	net::DriveSession();   // connect -> discovery -> host/join (idempotent)
-
-	const yampnet_state ns = api->get_state(sess);
 
 	// Netplay needs the whole determinism set - reset, RNG seeding, texture-budget pin and the
 	// ROM frame counter. The counter is the one that is per-game DATA rather than code, so it
@@ -210,7 +188,7 @@ void m2ftg::NetSession::Drive()
 	const uint32_t sharedSeed = api->get_match_seed(sess);
 	const bool haveSeed = sharedSeed != 0;
 
-	if (ns == YAMPNET_STATE_IN_ROOM && !m_roundRequested
+	if (ns == YAMPNET_STATE_IN_ROOM && !m_round.Requested()
 		&& netplayPossible && net::ShouldStartRound() && IsBoardBooted()
 		&& (haveSeed || m_prep != Prep::Idle))
 	{
@@ -297,31 +275,14 @@ void m2ftg::NetSession::Drive()
 
 		if (m_prep == Prep::Settling && haveRomFrame && romFrame >= NETPLAY_ANCHOR)
 		{
-			const YAMPSettings* settings = gGeneral.GetSettings();
-			yampnet_match_config mc = {};
-			mc.frame_delay = static_cast<uint8_t>(
-				settings != nullptr && settings->m_netFrameDelay > 0
-					? settings->m_netFrameDelay : 3);
-			mc.input_redundancy = 10;
-			mc.stall_timeout_ms = 10000;
-			// How the canary is to be compared, which depends on WHAT this game submits: StF and
-			// FV send the ROM's frame counter (a constant offset between peers is harmless), VF2
-			// sends a hash of work RAM (only equality means anything). See
-			// yampnet_match_config::state_check_exact - before it existed, the plugin applied the
-			// counter rule to VF2's hash as well.
-			mc.state_check_exact = StateCheckIsHash() ? 1 : 0;
-			// Round number: counts up per round so late packets from the PREVIOUS round cannot
-			// poison this one. A guest's count would drift from the host's (neither knows how
-			// many rounds the other played), so the plugin makes the HOST authoritative - a
-			// guest adopts whatever round the host announces, exactly as it adopts the seed.
-			// Wraps at 32 (5 bits on the wire), which is harmless: adoption keeps both sides on
-			// the same value.
-			++m_roundNumber;
-			if (api->begin_round(sess, m_roundNumber, &mc) == YAMPNET_OK)
+			// exactCheck depends on WHAT this game submits: StF and FV send the ROM's frame
+			// counter (a constant offset between peers is harmless), VF2 sends a hash of work
+			// RAM (only equality means anything). See net::Round::Begin - before
+			// state_check_exact existed, the plugin applied the counter rule to VF2's hash too.
+			if (m_round.Begin(StateCheckIsHash()))
 			{
 				m_prep = Prep::Announced;
 				m_anchor = romFrame;
-				m_roundRequested = true;
 				net::Logf("anchored at ROM frame_counter=%u; barrier opened, emulator held "
 				          "until the peer arrives", romFrame);
 			}
@@ -331,7 +292,7 @@ void m2ftg::NetSession::Drive()
 	// hundred milliseconds doing nothing visible, and a silent wait is indistinguishable from a
 	// Start press that was dropped - which is exactly how the previous attempt at this gate was
 	// misdiagnosed as a deadlock. Logged once per wait, not per frame.
-	else if (ns == YAMPNET_STATE_IN_ROOM && !m_roundRequested && netplayPossible
+	else if (ns == YAMPNET_STATE_IN_ROOM && !m_round.Requested() && netplayPossible
 		&& net::ShouldStartRound() && IsBoardBooted() && !haveSeed && m_prep == Prep::Idle)
 	{
 		if (!m_loggedSeedWait)
@@ -350,12 +311,13 @@ void m2ftg::NetSession::Drive()
 	// keeps running while we wait for the peer, and the anchor we just took is meaningless by
 	// the time the round actually starts - the whole point is that both machines sit at the
 	// same counter value when frame 0 begins.
-	m_hold = (m_prep == Prep::Announced && ns != YAMPNET_STATE_IN_MATCH && m_frame == UINT32_MAX);
+	m_round.SetHold(m_prep == Prep::Announced && ns != YAMPNET_STATE_IN_MATCH
+		&& !m_round.InRound());
 
 	// Barrier released: frame 0 starts now.
-	if (ns == YAMPNET_STATE_IN_MATCH && m_frame == UINT32_MAX)
+	if (ns == YAMPNET_STATE_IN_MATCH && !m_round.InRound())
 	{
-		m_frame = 0;
+		m_round.BeginFrameZero();
 		const uint32_t seed = api->get_match_seed(sess);
 		const int32_t me = api->get_local_player(sess);
 
@@ -383,18 +345,11 @@ void m2ftg::NetSession::Drive()
 	}
 
 	// Back to a state with no round in it - the session ended, or the lobby left the room.
-	// Re-arm: the next round has to announce again, and the Start press that opened the last
-	// barrier must not carry over into it.
-	if (ns == YAMPNET_STATE_IDLE || ns == YAMPNET_STATE_FAILED || ns == YAMPNET_STATE_ONLINE)
+	// The shell re-arms (see net::Round::DriveTeardown); the prep machine is ours to reset.
+	if (m_round.DriveTeardown(ns, m_prep != Prep::Idle,
+		[] { SetTextureBudgetDeterministic(false); }))
 	{
-		if (m_roundRequested || m_prep != Prep::Idle)
-		{
-			net::ClearStartRequest();
-			SetTextureBudgetDeterministic(false);
-		}
-		m_roundRequested = false;
 		m_prep = Prep::Idle;
-		m_frame = UINT32_MAX;
 	}
 }
 
@@ -412,40 +367,25 @@ bool m2ftg::NetSession::Step(m2ftg_execute_info_t& info)
 	// so the emulator runs freely until the barrier and both sides are re-initialised at match
 	// start instead; pre-barrier divergence does not matter when the board is about to be reset
 	// out from under it.
-	bool advanceFrame = !m_hold;
-	if (!net::IsAvailable() || m_frame == UINT32_MAX)
+	const bool advanceFrame = !m_round.Hold();
+	if (!net::IsAvailable() || !m_round.InRound())
 	{
 		return advanceFrame;
 	}
 
-	const yampnet_step st = net::Api()->step(net::Session(), m_frame, &info);
-	advanceFrame = (st == YAMPNET_STEP_READY);
-
-	if (st == YAMPNET_STEP_TIMEOUT || st == YAMPNET_STEP_DISCONNECTED)
+	// The step/timeout/desync handling is the shared shell - see net::Round::Step. Only the
+	// EndRound reaction is ours, because it un-pins this family's texture budget.
+	switch (m_round.Step(&info))
 	{
-		net::Logf("round ended (step=%d); returning to local play", static_cast<int>(st));
-		// Tell the player. Both ends of a lost match see this: the peer that went away is gone,
-		// and the one still running would otherwise just find itself back in attract mode with
-		// no explanation.
-		net::NotePeerLost(st == YAMPNET_STEP_TIMEOUT
-		                      ? "The other player stopped responding."
-		                      : "The other player disconnected.");
+	case net::Round::StepVerdict::Stalled:
+		return false;
+	case net::Round::StepVerdict::RoundOver:
 		EndRound(nullptr);
-		advanceFrame = true;
+		return true;
+	case net::Round::StepVerdict::Ready:
+	default:
+		return true;
 	}
-
-	// Divergence detected. Stop AT the divergence rather than playing on: both screens then
-	// hold the last frame the two machines still agreed on, and the frame number in the log is
-	// the one to investigate. Continuing would only pile consequences on top of the cause.
-	uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
-	if (net::Api()->get_desync(net::Session(), &dFrame, &dLocal, &dRemote) != 0)
-	{
-		net::Logf("DESYNC at frame %u (local=%u, peer=%u) - ending the round; the two emulators "
-		          "stopped agreeing here", dFrame, dLocal, dRemote);
-		EndRound(nullptr);
-		advanceFrame = true;
-	}
-	return advanceFrame;
 }
 
 void m2ftg::NetSession::EndFrame()
@@ -466,7 +406,7 @@ void m2ftg::NetSession::EndFrame()
 	// Trace unconditionally: it runs whether or not a round is in progress, so the
 	// instrumentation can be validated on one machine before two are booked to run it. Out of a
 	// round the frame label is "-", which is also how the log shows where the round began.
-	TraceTimers(m_frame, timers, delta, check);
+	TraceTimers(m_round.Frame(), timers, delta, check);
 
 	g_prevTimers = timers;
 	g_havePrevTimers = haveTimers;
@@ -504,11 +444,11 @@ void m2ftg::NetSession::EndFrame()
 	m_lastCheck = check;
 	m_haveLastCheck = true;
 
-	if (m_frame == UINT32_MAX || !advanced)
+	if (!m_round.InRound() || !advanced)
 	{
 		return;
 	}
 
-	net::Api()->submit_state_check(net::Session(), m_frame, check);
-	++m_frame;
+	m_round.SubmitCheck(check);
+	m_round.AdvanceFrame();
 }
