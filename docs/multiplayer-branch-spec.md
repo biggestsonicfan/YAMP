@@ -1268,7 +1268,7 @@ This is the exact opposite of Virtual On, where the module's comm firmware was a
 | slot | meaning |
 |---|---|
 | `p_work_ptr[0]` | **TX array** — the board copies its outgoing packet *into* it, at slot `[nodeId]` |
-| `p_work_ptr[1]` | **RX array** — the board copies every node's packet *out* of it, indexed by node |
+| `p_work_ptr[1]` | **RX array** — the board copies every node's packet *out* of it, indexed by node — **including this node's own**. The ingest walks sources `(me-1-i) mod count`, so `p1[me]` is read every frame into the last of the **count+1** window slots the guest programs (`0xC0020804` = size × (count+1)) — the ring handing a cabinet its packet back after a lap, which the master's comm service uses as its ring-lap timing reference. `CommBoard::Update` mirrors the slot; measured from the module disasm, no longer an open question |
 | `p_work_ptr[2]` | a **u64 rendezvous word**, shared between all cabinets |
 
 Both arrays are `nodeCount * packetSize`, and **packetSize is a register the GUEST programs** (`0xC0020808` → `comm+0x20024`; SRC2 chooses 848). The host never picks it, which is why `CommBoard`'s buffers are sized for the largest a bank can hold rather than for an expected value — the module memcpys with a length YAMP does not control.
@@ -1282,7 +1282,7 @@ Both arrays are `nodeCount * packetSize`, and **packetSize is a register the GUE
 | `nodeId+0x20` | module → host | this node answered the guest's `0xF000` ready command |
 | `nodeId+0x30` | module → host | this node has finished booting |
 
-The module never signals itself through it: it **reports** in the high groups and **waits** on the host in the low ones, because the host is what knows about the others. Setting `0x30` where the module reads `0x10` stalls the board before its running phase — 800 frames, zero draws, no other symptom. Both waits are spelled as an early return out of the frame, which is what makes this path need no lockstep, no barrier, no seed and no determinism contract.
+The module never signals itself through it: it **reports** in the high groups and **waits** on the host in the low ones, because the host is what knows about the others. Setting `0x30` where the module reads `0x10` stalls the board before its running phase — 800 frames, zero draws, no other symptom. Both waits are spelled as an early return out of the frame, which is what makes this path need no lockstep, no barrier, no seed and no determinism contract. One scope fact, measured from the transfer's disassembly: **the ready bits gate the 3→4 transition once — state 4 transfers every frame without re-reading them** — so the staleness window on the host protects a board that is *linking* (and any guest-triggered re-latch through `0xC0010180`), not one that is racing; mid-race freshness is the guest's own job, done through the per-node stamp at packet `+0x36`.
 
 #### The role comes from the ROOM, and the board is REBOOTED into it
 
@@ -1325,18 +1325,51 @@ Both held comm `state=4` for ~3500 frames with the wire up, and **both machines'
 
 > **A direct-UDP transport was built for this and then removed.** Before RPCN was wired, the same `Mode::Link` path ran over a plain address pair (a `link_direct` ABI entry driving `Transport.h`'s `UdpTransport`), two instances on one machine over loopback. It reached `state=4` for 2300+ frames and passed the ROM's check on both cabinets — and it is what caught all three defects above, which is why the RPCN run then worked first try. It is **gone**, for §14.10's reason: a second transport that nothing tests is a second set of behaviours to keep true. It had one job — separating "does the game play linked over a real wire" from "does the RPCN client bring a peer pair up" — and it did it.
 
-**A RACE HAS NOW BEEN DRIVEN, AND THE AI CARS ARE NOT SYNCED.** Two players on the two machines
-over RPCN: across the whole 8 MB work RAM at 0x40000 granularity, every region that changes on both
-cabinets agrees 0.0% of the time, and at 0x100 granularity over 1 MB around the game context 0 of
-592 dynamic blocks agree above 95% at ANY time offset from -90 to +90 guest frames. The link is not
-the reason - both cabinets' RX arrays hold byte-identical contents throughout - and the packets are
-SYMMETRIC in a race (487 and 475 non-zero bytes of 848), so each cabinet is transmitting its own car
-rather than one broadcasting a shared field. The 227-vs-45 asymmetry above is the boot handshake and
-disappears once racing starts. **The two players see each other; they each see a different CPU
-field.** Whether that is a fault or what the hardware does is NOT established - the symmetric packet
-is real evidence for "by design", since the protocol has no authority for a shared field. Full
-method, the control that makes it believable, and the honest limits: `docs/src2-netplay-recon.md`
-§8.
+**A RACE HAS BEEN DRIVEN, AND THE AI CARS APPEARED UNSYNCED** — two players on the two machines
+over RPCN: at 0x40000 and 0x100 granularity, no region of guest RAM that changes on both cabinets
+ever agreed at matched guest frames, the link itself carrying byte-identical RX arrays throughout,
+and the race packets symmetric (487 and 475 non-zero bytes of 848; the 227-vs-45 asymmetry above is
+the boot handshake). The two players see each other; they each saw a different CPU field. The
+conclusion first drawn from that — *"the protocol has no authority for a shared field, so this is
+by design"* — **was WRONG, and a static dive into the guest ROM overturned it** (2026-08-08,
+`docs/src2-netplay-recon.md` §9):
+
+**THE PROTOCOL SHARES THE AI FIELD, AND THE 848 BYTES ALREADY CARRY IT.** At race formation
+`FUN_00092f04` fills the ownership table (guest `0x72cad4`, one entry per car slot): one player car
+per linked cabinet, then **every CPU car dealt round-robin across the live cabinets as its owner**.
+Each cabinet simulates only the CPU cars it owns and broadcasts them **every frame inside the
+packet at +0xD0** (format byte, count at +0xD2, then count × 0x18-byte records; the player car
+rides at +0x60, the lobby's bulk channel — car-number grid, settings, rankings — at +0x3C/+0x48).
+The receiver applies the peer's records to its remote-owned cars, whose update function is swapped
+to a dead-reckoner. A symmetric packet is therefore what a WORKING shared field looks like. The
+block-hash probe was structurally blind to this: the apply writes absolute positions sampled at
+different wall instants, so matched-gframe hashes disagree even while the sync works. An
+instruction-level audit of the module transfer against `CommBoard` found **no wire divergence** —
+the remaining suspect for the on-screen divergence is **frame pacing** (the cabinets measured
+~2.4:1; real twins share a 57.5 Hz crystal), which lives outside the packet.
+
+**VERIFIED BY A SECOND RACE (2026-08-08, `docs/src2-netplay-recon.md` §10).** Same machines, same
+probe: the seeding ran linked on both cabinets (40 cars, `owned=19/19`, the two ownership tables
+identical with the remote flags exactly inverted), the +0xD0 broadcast carried its valid bit
+through the racing phase, and re-running the ORIGINAL matched-gframe block comparison gave
+**240 of 678 dynamic blocks bit-identical in >95% of samples** — against the first race's 0 of
+592 — including a contiguous ~27 KB per-car state table at 0x120100. The never-agreeing blocks
+are precisely the layers that cannot hash equal (both players' own cars and the applied-position
+regions). **The CPU field is shared over the link**; the first race's divergence is attributed,
+tentatively, to mismatched race configuration before the room-published game assignments landed.
+One module gap found and measured harmless: the broadcast's format/count bytes are written with
+`stb` and the comm window discards byte writes — the receiver takes both from its local ownership
+mirrors and gates only on the valid bit, which travels as a u32.
+
+A third race (recon §10a) confirmed the corrected decode end to end (`m=16` + `ai=Y` symmetric on
+every racing heartbeat) and taught the measurement lesson: **align the block comparison on race
+FORMATION, not raw gframe** — this race formed 930 gframes apart, raw-gframe read 0 strong blocks
+while formation-aligned read **492 of 688**, a plateau at ±1 sample. §8's zero is thereby fully
+explained. Frame pacing then landed (recon §10b): while a link is live both cabinets are pinned
+to 60 Hz wall time — the host loop's 60 Hz limiter is forced regardless of the FPS-cap setting,
+and `CommBoard::BoardFramesDue()` steps up to 4 catch-up board frames after a hitch (comm
+re-pumped between steps, render on the last only, debt dropped past the cap). Virtual On's
+`VirtualClock` policy minus the QPC patch pre3 does not need; deliberately not ping-coupled.
 
 > **A linked cabinet is not a "netplay game" by the lockstep definition, and two features assumed it
 > was.** `IsNetplayGame()` was `m2ftg::NetplaySupported() || pre3::NetplaySupported()` - both of
@@ -1349,7 +1382,7 @@ method, the control that makes it believable, and the honest limits: `docs/src2-
 > a linked cabinet fix both. **Carry this to Motor Raid and Sega Rally 2:** every gate spelled
 > "netplay" on this branch means "lockstep round", and a linked-cabinet game needs each one re-read.
 
-**Diagnostics.** `[SRC2 link]` lines carry the comm state machine, node id/count, the guest's packet size, sequence, the rendezvous word, wire tx/rx counters per node and the peer's board sequence — three counters rather than one because they fail separately: *nothing sent* = this cabinet is not producing; *sent but nothing received* = the wire or the far end; *received but the peer's board sequence frozen* = the peer's process is alive and its BOARD is not transferring, which no other field distinguishes. `[SRC2 linkgate]` prints the ROM's own verdict on its boot check. Both are gated to change-plus-heartbeat; the frame-boundary probe (`YAMP_PRE3_SYNCPROBE`) records to a memory ring and dumps at teardown, because a `DebugLogFile` per frame was expensive enough to **change the outcome it was measuring**.
+**Diagnostics.** `[SRC2 link]` lines carry the comm state machine, node id/count, the guest's packet size, sequence, the rendezvous word, wire tx/rx counters per node and the peer's board sequence — three counters rather than one because they fail separately: *nothing sent* = this cabinet is not producing; *sent but nothing received* = the wire or the far end; *received but the peer's board sequence frozen* = the peer's process is alive and its BOARD is not transferring, which no other field distinguishes. Each node's slot line now also **decodes the packet against the ROM's own map**: `m=` (the sender's comm mode, header word top 5 bits — the header lands at window +4, not +0), `pc=` (player-car snapshot valid, the `0x81` pair on the word at +0x64), and `ai=<valid>:<count>/<format>` (the +0xD0 CPU-car broadcast) — so "is the AI channel live" is one log line per side. Byte order matters and cost one race's readings: the bank stores guest bytes with a **halfword-lane swap** (guest packet byte `A` ↔ array byte `A^2`), not a full reversal — read single bytes at `A^2`, never LE words. The car probe (`YAMP_SRC2_CARPROBE`, its own `src2_car.log`) additionally dumps the seeding itself: `grp=`/`owned=` and `tbl=`, the per-slot ownership table with `*` marking remote-owned cars. `[SRC2 linkgate]` prints the ROM's own verdict on its boot check. All are gated to change-plus-heartbeat; the frame-boundary probe (`YAMP_PRE3_SYNCPROBE`) records to a memory ring and dumps at teardown, because a `DebugLogFile` per frame was expensive enough to **change the outcome it was measuring**.
 
 ---
 
@@ -1433,8 +1466,17 @@ Everything else described in this document is committed.
 
 **Sega Racing Classic 2 / linked-cabinet on Model 3 (§14.11), as of 2026-08-08:**
 
-- ~~**Nobody has driven a race.**~~ **Done, and it answered the CPU-car question in the negative:** the AI cars are simulated independently on each cabinet and nothing in guest RAM is kept in step. See §14.11 and `docs/src2-netplay-recon.md` §8. What is still open is whether that is a fault at all — the ROM's packet is symmetric, so there is no authority in the protocol for a shared field, and settling it needs a real twin cabinet rather than more host-side probing.
-- **The AI car array has not been located.** The analysis reaches its conclusion without it (by hashing RAM and using the player's car at guest `0x105BCC` as a control), but naming the array would turn a well-supported inference into a direct reading.
+- ~~**Nobody has driven a race.**~~ **Done** — and the first reading of it ("the AI cars are
+  simulated independently, plausibly by design") was **overturned by the ROM disassembly**: the
+  protocol seeds the CPU cars by round-robin ownership and broadcasts each cabinet's share every
+  frame at packet +0xD0, all inside the 848 bytes YAMP already relays, and the block-hash probe was
+  structurally unable to see that kind of sync. See §14.11 and `docs/src2-netplay-recon.md` §9.
+  **Open:** a live race read through the new `ai=` / `tbl=` instruments, to confirm the seeding and
+  broadcast run over our link; and **frame pacing** — the cabinets measured ~2.4:1 where real twins
+  share a crystal, which would spread the two halves of a correctly-shared field apart on screen.
+- ~~**The AI car array has not been located.**~~ Located: car list base pointer at guest
+  `0x737a7c` (stride in each record's word at +8, record 0 = the local player's via the slot swap),
+  ownership table at `0x72cad4`, car count at `0x105018`.
 - **Untested beyond a LAN**, exactly as §14.10.
 - **The lobby path is unexercised.** `DriveRoomRole` accepts a room formed at any time, so F1 → Netplay should now work as well as `-net-host` / `-net-join` does. It has only been driven from the command line.
 - **Two cabinets only.** The plugin's link channel is point-to-point, so a ring of three or more is not expressible on it. `CommBoard`'s arrays and rendezvous groups are sized for `MAX_NODES` because the MODULE's are, not because this transport can fill them.
@@ -1522,4 +1564,8 @@ Worth mirroring, because most of the facts in this document were *measured*, not
 ---
 
 *Generated from the `multiplayer` branch at `9baa02e`, 2026-08-01. Amended the same day with the
-GAME ASSIGNMENTS freeze fix (§9.3, §16) and the i960 IP-sampling method that found it (§18).*
+GAME ASSIGNMENTS freeze fix (§9.3, §16) and the i960 IP-sampling method that found it (§18).
+Amended 2026-08-08: §14.11 and §16 rewritten for the SRC2 AI-car mechanism read out of the guest
+ROM — round-robin CPU-car ownership, the +0xD0 per-frame broadcast, the measured own-echo mirror
+contract, and the retirement of the "no authority for a shared field" conclusion
+(`docs/src2-netplay-recon.md` §9).*

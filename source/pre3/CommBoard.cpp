@@ -160,12 +160,15 @@ namespace pre3
 
 		// How long a peer's packet stays "fresh" enough to hold its ready bit up.
 		//
-		// A DELIBERATE POLICY RATHER THAN A READING OF THE MODULE. Nothing in the module ever
-		// CLEARS a ready bit, so holding them all set makes the board free-run and holding them
-		// strictly per-frame makes it lockstep; the truth is whatever Gaiden's own host does, which
-		// cannot be read from here. This picks the middle: a peer's bit stays up while its packets
-		// keep arriving and drops when they stop, so jitter is absorbed and a dead peer stalls the
-		// board rather than being simulated as a silent one.
+		// SCOPE, MEASURED FROM THE DISASSEMBLY (FUN_180035BA0): the ready bits gate the state 3->4
+		// transition ONCE - state 4 transfers every frame WITHOUT re-reading them - so clearing a
+		// bit here cannot pause a running board, and "lockstep by clearing per frame" is not a
+		// policy the module offers. What the staleness window still protects is every pass through
+		// state 3: the initial link-up, and any re-latch the guest triggers by writing 0 to
+		// 0xC0010180 (which it does during boot, and would do again on a soft reset). A dead peer
+		// therefore stalls a board that is LINKING and is merely stale to one that is RACING -
+		// the racing case is the guest's own to notice, and it does, via the per-node stamp its
+		// packets carry at +0x36 (its board's transfer sequence, FUN_00094dc8's dedup key).
 		//
 		// SIX FRAMES WAS FOR SHARED MEMORY, WHERE IT COULD NEVER FIRE. Over a wire the two cabinets
 		// do not run at the same rate - a debug build with the tilemap probes on is nowhere near a
@@ -922,11 +925,13 @@ namespace pre3
 
 			// THE BUFFER IS BUILT OUTSIDE THE `__try`, and it has to be: a scope that needs object
 			// unwinding cannot contain one (C2712). So the only thing inside the guard is C.
+			// The +768 tail is the fixed part of the line: the player control, and the ownership
+			// decode (40 car slots at up to 5 chars each, plus its own labels).
 			const uint32_t blockCount = cfg.length / 0x100;
 			static std::vector<char> buffer;
-			if (buffer.size() < static_cast<size_t>(blockCount) * 5 + 256)
+			if (buffer.size() < static_cast<size_t>(blockCount) * 5 + 768)
 			{
-				buffer.assign(static_cast<size_t>(blockCount) * 5 + 256, '\0');
+				buffer.assign(static_cast<size_t>(blockCount) * 5 + 768, '\0');
 			}
 			char* const out = buffer.data();
 			const int cap = static_cast<int>(buffer.size());
@@ -955,6 +960,47 @@ namespace pre3
 					"[%s car] gframe=%u node=%u player pos=%.2f,%.2f,%.2f vel=%.3f,%.3f win=%06X+%X ",
 					gGeneral.GetGameTag(), guestFrame, nodeId, px, py, pz, vx, vz,
 					cfg.base, cfg.length);
+
+				// THE SEEDING, read straight out of the ROM's own tables (docs/src2-netplay-recon.md
+				// §9). 0x72cad4 is the per-car-slot ownership table FUN_00092f04 fills at race
+				// formation: guest byte 0 = type (1 player / 2 CPU), byte 2 = owner node (1-based),
+				// bit 0x80000 = remote-owned (FUN_00092b70). 0x72c407 + node*0x2c = how many car
+				// slots that node owns. A linked race that seeded correctly shows the CPU slots
+				// alternating owners and roughly half of them starred; a race where every slot
+				// belongs to this node is one that formed stand-alone, and THAT - not the block
+				// hashes, which cannot tell an applied absolute position from a local simulation
+				// under any rate mismatch - is the discriminating record for "are the AI cars
+				// shared".
+				{
+					uint32_t carCount = 0;
+					memcpy(&carCount, ram + 0x105018, 4);
+					const uint8_t groupSize = ram[0x737b9c ^ 3];
+					const uint8_t liveMembers = ram[0x736784 ^ 3];
+					const uint8_t remoteMembers = ram[0x736785 ^ 3];
+					at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE,
+						"grp=%u live=%u rem=%u cars=%u owned=", groupSize, liveMembers,
+						remoteMembers, carCount);
+					for (uint8_t node = 1; node <= CommBoard::MAX_NODES && at > 0 && at < cap - 8;
+						++node)
+					{
+						at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE,
+							"%u%c", ram[(0x72c407 + static_cast<size_t>(node) * 0x2c) ^ 3],
+							node == CommBoard::MAX_NODES ? ' ' : '/');
+					}
+					at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE, "tbl=");
+					const uint32_t slots = (carCount <= 40) ? carCount : 40;
+					for (uint32_t i = 0; i < slots && at > 0 && at < cap - 8; ++i)
+					{
+						uint32_t v = 0;
+						memcpy(&v, ram + 0x72cad4 + static_cast<size_t>(i) * 4, 4);
+						at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE,
+							"%u%u%s ", v >> 24, (v >> 8) & 0xFF,
+							((v >> 19) & 1) != 0 ? "*" : "");
+					}
+					// The separator is load-bearing: the window hashes that follow are also short
+					// hex tokens, and without it an empty table reads as "tbl=<first hash>".
+					at += _snprintf_s(out + at, static_cast<size_t>(cap - at), _TRUNCATE, "| ");
+				}
 
 				// 16 bits per block rather than 32: the diff only has to say SAME or DIFFERENT, and
 				// halving the width halves a log that a two-minute race fills 240 samples of.
@@ -1215,12 +1261,15 @@ namespace pre3
 				| ((header->flags & FLAG_BOOTED) != 0 ? NodeMask(BIT_LINKED, header->node) : 0);
 		}
 
-		// MIRROR OUR OWN PACKET BACK INTO OUR OWN RX SLOT. The board ingests every node including
-		// itself - the loop walks backwards from nodeId-1 and wraps, so it covers all nodeCount
-		// slots - and a real token ring does hand a cabinet's packet back to it after a lap. This
-		// is the faithful reading, but it IS a reading rather than a measurement: if it is wrong
-		// the game sees itself twice, which is visible on screen and is listed as an open question
-		// in docs/src2-netplay-recon.md.
+		// MIRROR OUR OWN PACKET BACK INTO OUR OWN RX SLOT. MEASURED, no longer a reading: the
+		// module's state-4 ingest (FUN_180035BA0, disassembled at 0x180035c8c) copies
+		// `p_work_ptr[1] + size * ((me - 1 - i) mod count)` for i = 0..count-1 into the far bank
+		// at 0x100 + (i+1)*size - a source walk that INCLUDES p1[me], landing in the LAST slot.
+		// The guest expects exactly that: FUN_00012da4 programs the board for (count+1) slots of
+		// data (register 0xC0020804 = size*(count+1)) with its RX window one packet after its TX,
+		// and the MASTER's "upstream" pointer (guest 0x737b7c = FUN_00092198(1)) resolves to its
+		// OWN echo slot - the ring-lap reference its comm service reads the frame counter from
+		// (FUN_00096f34). An empty own-slot here is a master that never times its ring.
 		if (payload > 0)
 		{
 			memcpy(s_rx.data() + static_cast<size_t>(s_nodeId) * payload,
@@ -1239,6 +1288,69 @@ namespace pre3
 		}
 
 		LogState();
+	}
+
+	bool CommBoard::LinkPacingActive()
+	{
+		// A live link means a real peer over the wire. Probe has no peer to be fair to and
+		// Shared shares one machine's clock already; both keep the solo policy. LinkReady is the
+		// address being known - the earliest moment the peer's board rate matters, and holding
+		// the rate from here rather than from "racing" means the two cabinets also boot and idle
+		// through their menus at the same rate, which is what keeps their race-formation offset
+		// (docs/src2-netplay-recon.md §10a) from growing while they sit there.
+		return s_mode == Mode::Link && net::LinkReady();
+	}
+
+	unsigned int CommBoard::BoardFramesDue()
+	{
+		// Four board frames is 1/15 s of catch-up per host frame - enough to ride out a stutter,
+		// far too little to let a two-second hitch turn into a two-second burst. Same constant,
+		// same reasoning as VirtualClock::BoardFramesDue.
+		constexpr unsigned int kMaxCatchUp = 4;
+
+		// Wall-clock reading the NEXT board frame is due at. 0 = not started, and the reset on
+		// every unlinked frame is what re-baselines the accumulator when a link forms or drops -
+		// carrying a deadline across "no link" would bill the board for time it never owed.
+		static int64_t s_boardDue = 0;
+		static int64_t s_frequency = 0;
+
+		if (!LinkPacingActive())
+		{
+			s_boardDue = 0;
+			return 1;
+		}
+
+		if (s_frequency == 0)
+		{
+			LARGE_INTEGER freq = {};
+			if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) return 1;
+			s_frequency = freq.QuadPart;
+		}
+
+		LARGE_INTEGER now = {};
+		QueryPerformanceCounter(&now);
+		const int64_t period = s_frequency / 60;
+
+		if (s_boardDue == 0)
+		{
+			s_boardDue = now.QuadPart + period;
+			return 1;
+		}
+
+		unsigned int due = 1;
+		s_boardDue += period;
+		while (s_boardDue <= now.QuadPart && due < kMaxCatchUp)
+		{
+			++due;
+			s_boardDue += period;
+		}
+		if (s_boardDue <= now.QuadPart)
+		{
+			// Past the cap: drop the outstanding debt rather than carry it into the next frame,
+			// where it would still be unpayable and would keep the board in permanent catch-up.
+			s_boardDue = now.QuadPart + period;
+		}
+		return due;
 	}
 
 	bool CommBoard::TraceEnabled()
@@ -1431,18 +1543,34 @@ namespace pre3
 		// WHAT IS ACTUALLY IN THE TX SLOT, which is the difference between "the state machine
 		// ticks" and "there is a packet to send". A board that reaches state 4 against a silent
 		// peer looks identical either way from the state fields alone.
-		// EVERY NODE'S SLOT, and how much of it MOVED since the last sample.
+		// EVERY NODE'S SLOT, how much of it MOVED since the last sample, and THE PROTOCOL DECODE.
 		//
-		// One slot's byte count answers "is there a packet", which was the question while nothing
-		// linked. It cannot answer the one a running race poses: the CPU cars are simulated by one
-		// cabinet and carried to the other, so "the master is not sending car data" and "the slave
-		// is not applying it" look identical from the master's own slot alone. Churn is the
-		// discriminator - a slot that is large but static is a stale snapshot, a slot that is
-		// small and busy is carrying inputs only.
+		// The packet's own map, read out of the ROM (docs/src2-netplay-recon.md §9). GUEST WINDOW
+		// offsets, where the array's byte 0 is window 0xC0000100:
+		//   +0x04  u32  header word 0 - the sender's comm MODE in the top 5 bits. The guest's
+		//               header copy lands at window+4 (FUN_00094d34), NOT +0 - a first decode read
+		//               +0 and printed m=0 through an entire race
+		//   +0x64  u32  first word of the sender's PLAYER-CAR snapshot; (w & 0x81) == 0x81 says
+		//               the car data is live (FUN_00096648 clears bit 7 outside a race, and the
+		//               receiver FUN_00096b5c refuses anything without both bits)
+		//   +0xD0  the CPU-CAR BROADCAST header (FUN_0009680c): +0xD0 format (2 compact / 3 full),
+		//               +0xD2 count, +0xD3 bit 0 = valid, records at +0xD4 (0x10/0x18 bytes each).
+		//               FUN_00096a14 applies these to the remote-owned cars - gated ONLY on the
+		//               valid bit; it takes count and format from its LOCAL ownership mirrors, which
+		//               is what keeps this channel alive despite the fmt/count bytes being written
+		//               with `stb` and the module's window write8 being a discard (a module gap,
+		//               measured harmless).
+		// This is the channel that seeds and carries the AI field - each cabinet owns a round-robin
+		// share of the CPU cars and broadcasts exactly that share - so "ai=" going live on both
+		// slots during a race IS the AI-car sync working, and its absence names the broken half.
 		//
-		// The guest programs 848 bytes and boot filled 34 of them, so the interesting number is
-		// whether a race pushes that up into the hundreds.
-		char slot[256] = "-";
+		// BYTE ORDER - measured from the module's write32 (0x180035F49: `bswap; rol 16`, store at
+		// the natural offset) and write16 (`ror 8`, store at offset^2): the bank holds the guest's
+		// bytes with a HALFWORD-LANE SWAP, i.e. guest packet byte A lives at array byte A^2. It is
+		// NOT a full byte reversal, so a host LE u32 load does NOT yield the guest word - read the
+		// individual bytes at A^2 instead. The first decode assumed the reversal and misread every
+		// field it printed; the 'valid=1' samples were sitting in what it printed as the count.
+		char slot[352] = "-";
 		if (view.packetSize > 0 && static_cast<size_t>(view.packetSize) <= MAX_PACKET)
 		{
 			// WHICH ARRAY IS WORTH LOOKING AT DEPENDS ON THE TRANSPORT, and getting it wrong makes
@@ -1473,9 +1601,25 @@ namespace pre3
 					if (p[i] != 0) nonZero++;
 					if (haveHistory && p[i] != previous[offset + i]) changed++;
 				}
+				// The decode needs the packet to reach the CPU-car header; SRC2's 848 does.
+				// Guest byte A of the packet is array byte A^2 - see the lane-swap note above.
+				char proto[40] = "";
+				if (view.packetSize >= 0xD4 + 4)
+				{
+					const uint8_t mode = static_cast<uint8_t>(p[0x04 ^ 2] >> 3);
+					// 0x81 is a mask on the guest u32, so BOTH bits live in its low byte - guest
+					// +0x67, array +0x65. A first cut took bit 7 from the word's top byte and
+					// printed pc=- through a race whose ai= was Y on every racing heartbeat.
+					const bool carLive = (p[0x67 ^ 2] & 0x81) == 0x81;
+					const uint8_t aiFmt = p[0xD0 ^ 2];
+					const uint8_t aiCount = p[0xD2 ^ 2];
+					const bool aiValid = (p[0xD3 ^ 2] & 0x01) != 0;
+					_snprintf_s(proto, sizeof(proto), _TRUNCATE, " m=%u pc=%c ai=%c:%u/%u",
+						mode, carLive ? 'Y' : '-', aiValid ? 'Y' : '-', aiCount, aiFmt);
+				}
 				at += _snprintf_s(slot + at, sizeof(slot) - at, _TRUNCATE,
-					"%s[%d]%zu nz/%zu moved%s", at != 0 ? " " : "", node, nonZero, changed,
-					node == s_nodeId ? "*" : "");
+					"%s[%d]%zu nz/%zu moved%s%s", at != 0 ? " " : "", node, nonZero, changed,
+					proto, node == s_nodeId ? "*" : "");
 			}
 			previous.assign(base, base + span);
 		}

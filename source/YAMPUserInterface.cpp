@@ -262,6 +262,9 @@ void YAMPUserInterface::Draw()
 		desired.cabinetType = static_cast<uint8_t>(settings->m_pre3CabinetType);
 		desired.linkId = static_cast<uint8_t>(settings->m_pre3LinkId);
 		desired.carNumber = static_cast<uint8_t>(settings->m_pre3CarNumber);
+		desired.gameMode = static_cast<uint8_t>(settings->m_pre3GameMode);
+		desired.motorPower = static_cast<uint8_t>(settings->m_pre3MotorPower);
+		desired.ranking = static_cast<uint8_t>(settings->m_pre3RankingMode);
 
 		// A LIVE LINK OWNS THE LINK ID ROW, on the same rule every other board-facing control
 		// follows during a session: switched off for the duration.
@@ -479,6 +482,9 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	m_pre3CabinetType = settings->m_pre3CabinetType;
 	m_pre3LinkId = settings->m_pre3LinkId;
 	m_pre3CarNumber = settings->m_pre3CarNumber;
+	m_pre3GameMode = settings->m_pre3GameMode;
+	m_pre3MotorPower = settings->m_pre3MotorPower;
+	m_pre3RankingMode = settings->m_pre3RankingMode;
 	m_m2Country = settings->m_m2Country;
 	m_m2Freeplay = settings->m_m2Freeplay;
 	m_m2VersusMode = settings->m_m2VersusMode;
@@ -804,10 +810,27 @@ void YAMPUserInterface::DrawGamePre3()
 		static const char* const LINK_ID[] = { "Single", "Master", "Slave", "Live" };
 		static const char* const CAR[] = { "1", "2", "3", "4", "5", "6", "7", "8" };
 
+		static const char* const GAME_MODE[] = { "Normal (Sprint)", "Grand Prix", "100 Miles",
+			"200 Miles", "300 Miles", "400 Miles", "500 Miles" };
+		static const char* const MOTOR[] = { "50%", "60%", "70%", "80%", "90%", "100%" };
+		static const char* const RANKING[] = { "Normal", "Campaign", "Internet" };
+
 		boardCombo("Country", m_pre3Country, COUNTRY, static_cast<int>(std::size(COUNTRY)),
 			"COUNTRY on the board's GAME ASSIGNMENTS screen.\nRequires a restart.");
 		boardCombo("Cabinet Type", m_pre3CabinetType, CABINET, static_cast<int>(std::size(CABINET)),
 			"CABINET TYPE on the board's GAME ASSIGNMENTS screen.\nRequires a restart.");
+		boardCombo("Game Mode", m_pre3GameMode, GAME_MODE, static_cast<int>(std::size(GAME_MODE)),
+			"GAME MODE on the board's GAME ASSIGNMENTS screen: the race being driven.\n"
+			"A netplay room plays under the HOST's value - joining adopts it for the session.\n"
+			"Requires a restart.");
+		boardCombo("Motor Power", m_pre3MotorPower, MOTOR, static_cast<int>(std::size(MOTOR)),
+			"MOTOR POWER on the board's GAME ASSIGNMENTS screen: feedback motor strength.\n"
+			"A netplay room plays under the HOST's value - joining adopts it for the session.\n"
+			"Requires a restart.");
+		boardCombo("Ranking Mode", m_pre3RankingMode, RANKING, static_cast<int>(std::size(RANKING)),
+			"RANKING MODE on the board's GAME ASSIGNMENTS screen.\n"
+			"A netplay room plays under the HOST's value - joining adopts it for the session.\n"
+			"Requires a restart.");
 
 		// LINK ID and CAR NUMBER describe a LINKED cabinet, so netplay owns them once it can run
 		// this game - it has to, because the two cabinets must agree on who is master and which
@@ -3391,6 +3414,9 @@ void YAMPUserInterface::ApplySettings()
 		settings->m_pre3CabinetType != m_pre3CabinetType ||
 		settings->m_pre3LinkId != m_pre3LinkId ||
 		settings->m_pre3CarNumber != m_pre3CarNumber ||
+		settings->m_pre3GameMode != m_pre3GameMode ||
+		settings->m_pre3MotorPower != m_pre3MotorPower ||
+		settings->m_pre3RankingMode != m_pre3RankingMode ||
 		settings->m_m2Country != m_m2Country ||
 		settings->m_m2Freeplay != m_m2Freeplay ||
 		settings->m_m2VersusMode != m_m2VersusMode ||
@@ -3425,6 +3451,9 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_pre3CabinetType = m_pre3CabinetType;
 	settings->m_pre3LinkId = m_pre3LinkId;
 	settings->m_pre3CarNumber = m_pre3CarNumber;
+	settings->m_pre3GameMode = m_pre3GameMode;
+	settings->m_pre3MotorPower = m_pre3MotorPower;
+	settings->m_pre3RankingMode = m_pre3RankingMode;
 	settings->m_m2Country = m_m2Country;
 	settings->m_m2Freeplay = m_m2Freeplay;
 	settings->m_m2VersusMode = m_m2VersusMode;

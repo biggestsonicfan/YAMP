@@ -322,6 +322,12 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 			iniPath.c_str()), 0, 3);
 		m_pre3CarNumber = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2CarNumber", 0,
 			iniPath.c_str()), 0, 7);
+		m_pre3GameMode = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2GameMode", 0,
+			iniPath.c_str()), 0, 6);
+		m_pre3MotorPower = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2MotorPower", 3,
+			iniPath.c_str()), 0, 5);
+		m_pre3RankingMode = std::clamp<int>(GetPrivateProfileIntW(SECTION_NAME, L"Src2RankingMode", 0,
+			iniPath.c_str()), 0, 2);
 		m_m2Freeplay = GetPrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str()) != 0;
 		m_m2VersusMode = GetPrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str()) != 0;
 		m_m2RealDamage = GetPrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str()) != 0;
@@ -455,6 +461,9 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"Src2CabinetType", m_pre3CabinetType, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Src2LinkId", m_pre3LinkId, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"Src2CarNumber", m_pre3CarNumber, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2GameMode", m_pre3GameMode, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2MotorPower", m_pre3MotorPower, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"Src2RankingMode", m_pre3RankingMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"FreePlay", m_m2Freeplay, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"VersusMode", m_m2VersusMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"RealDamage", m_m2RealDamage, iniPath.c_str());

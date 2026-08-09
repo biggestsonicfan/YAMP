@@ -123,11 +123,16 @@ public:
 	// Sega Racing Classic 2's GAME ASSIGNMENTS, for the rows the module's settings injector cannot
 	// reach. Values are the BOARD's own option indices, so the UI can offer its strings verbatim -
 	// see pre3/ArcadeSettings.h for where each list comes from. Defaults match what the board
-	// itself boots with (JAPAN / TWIN / SINGLE / car 1).
+	// itself boots with (JAPAN / TWIN / SINGLE / car 1 / SPRINT / 80% / NORMAL ranking).
 	int m_pre3Country = 1;
 	int m_pre3CabinetType = 1;
 	int m_pre3LinkId = 0;
 	int m_pre3CarNumber = 0;
+	// The three rows a netplay room also publishes and adopts (see net::Src2Assignments); these
+	// are the LOCAL preferences the board boots with outside a session.
+	int m_pre3GameMode = 0;      // 0..6  NORMAL(SPRINT) / GRAND PRIX / 100..500 MILES
+	int m_pre3MotorPower = 3;    // 0..5  50% .. 100%; 3 = the board's own 80% default
+	int m_pre3RankingMode = 0;   // 0..2  NORMAL / CAMPAIGN / INTERNET
 	// Where each HLE hook should be installed, for program ROMs that are not Sonic the
 	// Fighters. Kept as the raw ini text because an entry may name an ELF symbol, which
 	// cannot be resolved until game.elf has been loaded - see HleHooks::ResolveRetarget for

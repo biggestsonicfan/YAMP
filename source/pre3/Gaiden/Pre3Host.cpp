@@ -662,19 +662,19 @@ namespace pre3
 			static_cast<int>(params.config.render_height * NATIVE_WIDTH / NATIVE_HEIGHT),
 			params.config.render_height, window.GetHeight());
 
-		int64_t frameTimeTicks;
+		// Two cap values, chosen per frame rather than once: the user's setting for solo play, and
+		// an unconditional 60 Hz while a link is live - the limiter half of the linked-cabinet
+		// pacer (CommBoard.h). A cabinet allowed to run its board at the monitor's 144 Hz lives
+		// that much further into the race than its peer, so a live link owns the frame cap, on
+		// the same rule as the LINK ID row. (The wait below spins on
+		// `delta * 1000 < ticks`, so the 60 Hz value is freq * 50/3 = freq/60 * 1000.)
+		int64_t linkedFrameTicks;
 		{
-			if (!settings->m_enableFpsCap)
-			{
-				frameTimeTicks = 0;
-			}
-			else
-			{
-				LARGE_INTEGER frequency;
-				QueryPerformanceFrequency(&frequency);
-				frameTimeTicks = (frequency.QuadPart * 50) / 3;
-			}
+			LARGE_INTEGER frequency;
+			QueryPerformanceFrequency(&frequency);
+			linkedFrameTicks = (frequency.QuadPart * 50) / 3;
 		}
+		const int64_t frameTimeTicks = settings->m_enableFpsCap ? linkedFrameTicks : 0;
 
 		m2ftg::ApplyAspectSetting(window, settings->m_m2Aspect);
 
@@ -705,11 +705,13 @@ namespace pre3
 					break;
 				}
 
+				const int64_t waitTicks = CommBoard::LinkPacingActive()
+					? linkedFrameTicks : frameTimeTicks;
 				LARGE_INTEGER currentTime;
 				do
 				{
 					QueryPerformanceCounter(&currentTime);
-				} while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < frameTimeTicks);
+				} while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
 				lastTime = currentTime;
 			}
 
@@ -1086,8 +1088,25 @@ namespace pre3
 			// consumed" from "it is set again after the scene ran".
 			SampleTilemapPipelinePreFrame();
 
+			// The accumulator half of the linked-cabinet pacer (CommBoard.h): a host frame that
+			// overran its 60 Hz budget owes more than one board frame, and repays up to 4 here so
+			// a linked pair stays at the same wall-clock rate through a stutter. Always 1 outside
+			// a live link. The comm exchange is re-pumped between the extra steps - the board's
+			// transfer runs once per update stage, and packet-per-board-frame is the contract the
+			// wire keeps everywhere else. Only the LAST board frame gets the render stages: the
+			// module builds its draw list in the update stage and the render stages read the board
+			// state that update produced, so rendering the swallowed frames would be GPU work for
+			// pictures nobody presents.
+			const unsigned int boardFramesDue = CommBoard::BoardFramesDue();
+
 			SetModuleRenderActiveNow(true);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
+			for (unsigned int step = 1; funcResult == 0 && step < boardFramesDue; ++step)
+			{
+				CommBoard::Attach(execute_info.p_work_ptr);
+				CommBoard::Update();
+				funcResult = entries.update(sizeof(execute_info), &execute_info);
+			}
 			if (funcResult == 0 && entries.render_begin != nullptr)
 			{
 				funcResult = entries.render_begin(sizeof(execute_info), &execute_info);

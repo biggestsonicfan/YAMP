@@ -915,11 +915,13 @@ Four independent lines of evidence, none of which depends on knowing where the A
 3. **The link is healthy, so this is not a delivery failure.** Both cabinets' RX arrays hold
    byte-identical contents - master `[0]487 nz / [1]475 nz`, slave the same, with matching churn.
    Whatever the ROM chooses to send arrives intact at both ends.
-4. **The packets are SYMMETRIC, which kills the broadcast hypothesis.** In a race the two slots
-   carry 487 and 475 non-zero bytes of 848 - near-equal, each cabinet transmitting its own car. The
-   227-vs-45 asymmetry §7 recorded was the BOOT HANDSHAKE and disappears once racing starts. A
-   master broadcasting a shared AI field would look nothing like this: there is no authority in the
-   protocol for one.
+4. **The packets are SYMMETRIC.** In a race the two slots carry 487 and 475 non-zero bytes of
+   848 - near-equal. The 227-vs-45 asymmetry §7 recorded was the BOOT HANDSHAKE and disappears once
+   racing starts. ~~A master broadcasting a shared AI field would look nothing like this: there is
+   no authority in the protocol for one.~~ **RETRACTED by §9**: the protocol's AI authority is
+   symmetric BY CONSTRUCTION - the CPU cars are split round-robin across the cabinets and each
+   broadcasts exactly its own share - so a symmetric packet is what a working shared field looks
+   like, not evidence against one.
 
 ### The control, and why the finding can be believed
 
@@ -959,9 +961,14 @@ at `0x000c0e6c` (four entries, three of them the per-car update at `0x0002535c`)
 `0x00025240` via `lbz r3, 5(r15)`, which is a GAME MODE index, not a car index - so the AI loop is
 somewhere else and was not worth chasing statically when the running game could be asked.
 
-**Whether this is a bug or the hardware's design is NOT established.** The symmetric packet is real
-evidence for "by design" - the protocol has no authority for a shared field. What would settle it
-is whether a real twin cabinet shows identical CPU traffic on both screens.
+~~**Whether this is a bug or the hardware's design is NOT established.** The symmetric packet is
+real evidence for "by design" - the protocol has no authority for a shared field.~~ **SETTLED by
+§9, the other way**: the ROM's protocol DOES share the CPU field - seeded round-robin, broadcast
+every frame at packet +0xD0 - and this probe was structurally blind to it, because an applied
+ABSOLUTE position on cabinet B is sampled at a different wall instant than the same guest frame on
+cabinet A, so matched-gframe block hashes can never agree even while the apply works perfectly.
+The §9 instruments (the `ai=` decode and the ownership table dump) are what the next race reads
+instead.
 
 ### 8a. Two UI faults a linked cabinet exposed, both the same mistake
 
@@ -1008,7 +1015,231 @@ a link would make the control half of that experiment impossible with the same b
 
 ### 8c. Still open after the race
 
-* **Whether shared AI cars are what the hardware does.** See above - the honest answer is unknown.
-* **The AI array's address.** Not located; the probe reaches its conclusion without it.
+* ~~**Whether shared AI cars are what the hardware does.**~~ **Answered by §9: yes, by
+  round-robin ownership.**
+* ~~**The AI array's address.**~~ **Located by §9**: the car list base pointer is guest
+  `0x737a7c` (stride in each record's word at +8, record 0 = the local player via the
+  slot-swap), and the ownership table is `0x72cad4`.
 * **Latency.** Both machines are on one LAN.
 * **The lobby path.** Still only driven from `-net-host` / `-net-join`.
+
+## 9. HOW THE COMM BOARD SEEDS THE AI CARS — read out of the ROM, 2026-08-08
+
+Static dive into the SRC2 guest image (Ghidra, port 5678), driven by §8's open question. The
+answer inverts §8's conclusion: **the protocol shares the CPU field, symmetrically, and every byte
+of it already rides YAMP's 848-byte relay.**
+
+### 9a. The packet, mapped
+
+The guest programs the board through `FUN_00012da4`: TX window `0xC0000100` (`0x100634`), RX window
+one packet later (`0x100638`), registers `0xC0020800` = id word, `0xC0020804` = **size × (count+1)**
+— count+1 slots, because the LAST RX slot is this cabinet's own packet back after a ring lap —
+and `0xC0020808` = the 0x350 packet size. Inside the 0x350:
+
+| offset | field | writer / reader |
+|---|---|---|
+| +0x00 | header word 0 — sender's comm MODE in the top 5 bits, race flags below | `FUN_00096d90` / everything |
+| +0x04 | header word 1 — screen/state mirror (0x105004/5/6 fields) | `FUN_00096d90` |
+| +0x08 | sender's master frame counter (0x737978) | `FUN_00096d90` / `FUN_00096f34` |
+| +0x0C..+0x12 | race handshake: countdown u16, leader id, group join fields | `FUN_0001da00`, `FUN_00095e1c` |
+| +0x11 | group size; +0x14 u32 group member mask | `FUN_00095a98` |
+| +0x36 | u16 stamp = the sender's board transfer sequence (`FUN_000921c8` reads the far-bank +0x0E counter the module stamps) | `FUN_00094d34` / `FUN_00094dc8` dedup |
+| +0x38 | header checksum slot | `FUN_00094d34` |
+| +0x3C..+0x48 | the BULK channel header: flags u32 (bit31 toggle, bit30 first, bit29 last), type byte, length u16; acks at +0x40/+0x44 | `FUN_00095514` / `FUN_00095680`, `FUN_000958a4` |
+| +0x48.. | bulk data — chunk ≤ 0x18 bytes during a race, ≤ 0x2FC in the lobby | same |
+| +0x60..+0xCC | the sender's PLAYER CAR snapshot, 0x1B words packed off the live car record; first word must read `(w & 0x81) == 0x81` to be applied | `FUN_00096648` / `FUN_00096b5c` |
+| **+0xD0** | **the CPU-CAR BROADCAST**: byte 0 format (2 compact / 3 full), byte 2 count, bit 0 valid | `FUN_0009680c` / `FUN_00096a14` |
+| **+0xD4..** | **count × 0x10 (compact) or 0x18 (full) packed CPU car records** — pos, heading, state | same |
+
+The bulk channel's types (dispatch table `0xE3A48`, name pool alongside): CONFIG_EX (per-node
+0x18-byte config records into `0x7375EC`), the master's settings broadcast, RANK/RANK_ALL (the
+0xFE0Cxxxx backup-RAM ranking tables, 0x1F78 bytes), TOUR/TOUR_ALL. `FUN_00094390` — the
+post-network-check lobby sync — is where the GRID is seeded: every cabinet broadcasts its
+CONFIG_EX record carrying its **car number**, the code cross-checks version and country
+("different version program detected"), detects duplicate car numbers ("Error: multiple car
+number"), and builds the same per-node car-number map (`0x72cabf` / `0x72caac`) on every cabinet.
+
+### 9b. The seeding: round-robin ownership
+
+`FUN_00092f04`, at race formation, fills the ownership table `0x72cad4` (one u32 per car slot,
+count at `0x105018`): byte 0 = type (1 player / 2 CPU), byte 2 = owner node id (1-based), bit
+0x80000 = remote-owned (`FUN_00092b70` sets it on every slot whose owner is not this cabinet).
+Each live group member's car slot is type 1 owned by that node, and **every CPU slot is dealt
+round-robin across the live members** (`slotIndex mod liveCount`), with each node's owned-slot
+list kept at `0x72c404 + node*0x2c` (+3 count, +4.. the slots). `FUN_00093318` re-deals a
+departed node's CPU cars to the least-loaded survivor; `FUN_0009380c` is the stand-alone fallback
+that hands everything to this cabinet.
+
+Ownership decides the car's UPDATE FUNCTION (`FUN_00093c24`, and `FUN_00092d1c` on transitions):
+locally-owned CPU cars run the real AI (`0x2d97c`); remote players run `0x2f258` and remote CPU
+cars `0x2f418`, both of which dead-reckon between packets (`FUN_0002f2bc` / `FUN_0002f474` /
+`FUN_0002f550` — velocity from successive received positions, extrapolated by the ring-latency
+byte the seeding stored at ownership+3).
+
+### 9c. The per-frame car sync
+
+`FUN_000973f0`, once per frame, under the board-status enable bits (13/14/15 of the status word →
+`0x736730` bits 26/27/28):
+
+* TX — `FUN_00096648` packs MY player car at +0x60, and **`FUN_0009680c` packs every CPU car I
+  own at +0xD0** (count from my owned-slot list, valid bit only when every record reads 0x81).
+* RX — `FUN_00096b5c` applies each remote PLAYER car from its owner's slot payload, and
+  **`FUN_00096a14` walks each remote node's owned-slot list — the receiver's own mirror of the
+  seeding — and applies that node's +0xD4 records to the matching local cars.**
+
+So each cabinet simulates half the field and receives the other half, which is why §8's packets
+were symmetric. Byte order throughout, measured from the module's own accessors and worth exact
+words because a wrong reading of it survived one whole race: write32 (`0x180035F49`) does
+`bswap; rol 16` and stores at the natural offset, write16 (`FUN_1800378E0`) does `ror 8` and
+stores at offset^2 — which compose to a **halfword-lane swap**: guest packet byte `A` lives at
+array byte `A ^ 2`. It is NOT a full byte reversal; a host LE u32 load does NOT yield the guest
+word. Read individual bytes at `A ^ 2`. (Guest *RAM* through `BoardGuestRam()` is a different
+mapping — u32 loads direct, single bytes at `A ^ 3` — and that one was already right.)
+
+One module gap found on the way, measured harmless: `FUN_0009680c` writes the broadcast's format
+and count bytes with `stb`, and the comm window's write8 handler is a discard (`_guard_check_icall`
+in the vtable) — so those two bytes never reach the bank, here or in Gaiden itself. It does not
+matter because the receiver takes both from its LOCAL ownership mirrors and gates only on the
+valid bit, which travels via a u32 read-modify-write and lands.
+
+### 9d. What YAMP's transport had to change: NOTHING in the bytes, two claims and two blind spots
+
+Every requirement the module's transfer (`FUN_180035BA0`, disassembled instruction by
+instruction) puts on the host was already met:
+
+* TX/RX arrays indexed by absolute 0-based node id, stride = OUR packet size ✓
+* the full 848 bytes relayed — the +0xD0 broadcast included ✓
+* ready bits gate state 3→4 once; state 4 free-runs ✓ (the staleness window therefore protects
+  LINKING, not racing — comment corrected in CommBoard.cpp)
+* **the own-echo mirror is REQUIRED, not a guess**: the ingest sources `(me-1-i) mod count`,
+  which includes `p1[me]`, into the guest's count+1th slot — and the MASTER's "upstream" pointer
+  (`0x737b7c`) resolves to its own echo, its ring-lap timing reference. The "open question"
+  hedge is retired.
+
+What changed instead: `LogState` now DECODES each slot (`m=` mode, `pc=` player-car valid,
+`ai=<valid>:<count>/<format>`), and the car probe dumps the seeding itself (`grp=`, `owned=`,
+`tbl=` — the ownership table with `*` on remote slots). The next linked race answers, from one
+log line each side: did the grid seed round-robin, is the +0xD0 broadcast valid and non-empty
+both ways, and is the apply path's precondition (matching owned-slot mirrors) in place.
+
+### 9e. What §8's on-screen divergence most plausibly was
+
+If the seeding runs, the remaining suspect is PACING, not the packet: the two cabinets measured
+~2.4:1 on emulated frame rate, and a peer that simulates its half of the field 2.4× slower makes
+that half fall visibly behind — a "different CPU field" made of the right cars in the wrong
+places. A real twin runs both boards off the same 57.5 Hz crystal. That is a frame-pacing
+problem, outside the packet, and it is measurable now: drive a race, read `ai=` on both sides,
+and compare the two `tbl=` dumps at matched gframes.
+
+## 10. THE VERIFICATION RACE — the AI cars SYNC over the link (2026-08-08)
+
+Same two machines, same RPCN path, same probe (`YAMP_SRC2_CARPROBE=1` both sides), a full match
+driven. Every §9 mechanism observed live:
+
+* **The seeding ran and both cabinets agree.** 135 in-race samples each side read
+  `grp=2 live=2 cars=40 owned=19/19` — 2 player cars plus 38 CPU cars dealt round-robin, 19 to
+  each cabinet — and the two `tbl=` dumps are the SAME table with the remote stars exactly
+  inverted: local `11 12* 21 22* 21 22* …`, remote `11* 12 21* 22 21* 22 …`. The pre-link phase
+  shows the stand-alone fallback (`owned=40/0` on the master, `0/40` on the slave), so the linked
+  path demonstrably replaced it at race formation.
+* **The +0xD0 broadcast went valid during racing.** 68 link heartbeats carried the valid byte set
+  (visible in the first build's misdecoded `ai=-:1/0` — the `1` was the valid byte in the lane the
+  decode printed as count; §9c's byte-order note is the correction). The record packers use
+  stfs/sth/stw only, so the car records themselves land in full.
+* **The deterministic layer is BIT-IDENTICAL between the cabinets.** Re-running §8's own
+  matched-gframe block comparison on the race: of 678 blocks that change on both cabinets,
+  **240 agree in >95% of samples** — §8 measured **0 of 592**. The agreeing region is structured,
+  not scattered: a contiguous **0x120100–0x126B00** (~27 KB — sized like a per-car state table
+  for the 40-car grid) plus a broad band through 0x1A0000–0x1C2000. The never-agreeing dynamic
+  blocks are exactly what must differ: the local player's car (0x105900–0x105D00, the §8
+  control), the region holding the remote player's applied car (0x106700–0x106C00), and
+  per-cabinet housekeeping — applied ABSOLUTE positions sampled at different wall instants can
+  never hash equal, which is §9's point about §8's probe being blind to that layer.
+
+**Conclusion: over YAMP's link the CPU field is shared — seeded identically, split by ownership,
+broadcast, applied, and its deterministic core advancing in lockstep.** §8's race is not
+reproduced. The likely difference is not the transport (unchanged in the interval) but the race
+CONFIGURATION: the room-published game assignments (game mode / difficulty / motor / ranking,
+commit `eed6dfd`) landed between the two races, and §9b's seeding is only as identical as the
+settings it reads. A definitive post-mortem of the first race is not possible from its logs — the
+old probe recorded no ownership tables. What §8 keeps: its method notes and the player-car
+control, both of which this run reused.
+
+Remaining, unchanged: frame pacing (the cabinets still free-run; a linked pair should share a
+clock), and on-screen confirmation from the players that the two CPU fields now read as one race.
+
+### 10a. THE ORACLE RACE (2026-08-08, third race) — and the alignment lesson that rewrites §8
+
+A third full match, both cabinets on the corrected decode. Everything §9 predicts, observed in
+one run:
+
+* **The decode speaks the ROM's mode machine.** `m=` walks the lobby modes (10–15) and sits at
+  **16 for the whole race — with `ai=Y` on every one of those 66 heartbeats, on BOTH slots
+  symmetrically** (~490/477 nz, ~335 bytes moving per sample each way). `ai=Y:0/0` is the
+  *predicted* shape: valid bit set, fmt/count zero because the module drops the ROM's `stb`
+  writes (§9c) and the receiver never needed them.
+* **Seeding mirrored again**: `cars=40 owned=19/19`, tables identical, stars inverted — third
+  race in a row of structure, second with both cabinets agreeing.
+* **THE COMPARISON MUST BE ALIGNED ON RACE FORMATION, NOT RAW GFRAME.** This race, the two
+  cabinets formed the race 930 guest frames apart (menu/coin timing is human), and the raw
+  matched-gframe comparison collapsed to **0 strong blocks** — on a race whose wire was
+  demonstrably carrying valid AI data both ways. Re-keyed on the first `owned=19/19` sample:
+  **492 of 688 dynamic blocks bit-identical in >95% of samples**, a plateau (492 at ±1 sample
+  shift), spanning the 0x120100–0x126B00 per-car table and a near-contiguous AI band through
+  0x1A0000–0x1AD800. Never-agree stays the required set (both player cars, applied-position
+  regions, per-cabinet housekeeping).
+* **Which retro-reads §8 and §10:** a raw-gframe comparison of a WORKING sync produces exactly
+  §8's zero whenever the formation offset is large; race 2's more modest 240 was presumably a
+  small-but-nonzero offset. §8's "0 of 592" is therefore evidence about its alignment key, not
+  about the AI cars. (`carcmp4.py` in the session scratchpad is the aligned tool.)
+
+Decode errata closed along the way: the player-car `pc=` test read bit 7 from the wrong byte —
+the ROM's `(w & 0x81) == 0x81` is a u32 mask whose bits both live in guest byte +0x67 (array
++0x65); fixed after this race, so `pc=` prints `-` in these logs without meaning anything.
+
+### 10b. Linked-cabinet FRAME PACING (implemented after the oracle race)
+
+The remaining on-screen suspect was rate: the boards free-ran at whatever their hosts achieved,
+and a cabinet simulating faster genuinely lives further into the race — its half of the CPU field
+pulls ahead of the half it receives. Real twins share a 57.5 Hz crystal; YAMP now pins both
+cabinets to 60 Hz wall time while a link is live, which is Virtual On's shipped `VirtualClock`
+policy minus the half pre3 does not need (no QPC patch — pre3's board is frame-deterministic, a
+fixed cpu_clock/60 budget per update stage, so pacing the update *calls* paces the board):
+
+* **Limiter** (`Pre3Host::Run`): while `CommBoard::LinkPacingActive()` (mode Link + peer address
+  known), the host loop's 60 Hz spin-wait is forced regardless of the user's FPS-cap setting —
+  a live link owns the frame cap, on the LINK ID row's rule. Engaging from link-up rather than
+  from racing also keeps the race-formation offset (§10a's alignment lesson) from growing while
+  the cabinets sit in their menus.
+* **Accumulator** (`CommBoard::BoardFramesDue`, called once per host frame in `GameLoop`): a host
+  frame that overran its budget steps the board up to 4 extra update stages, re-pumping the comm
+  exchange between steps (packet-per-board-frame is the wire's contract); the debt is dropped
+  past the cap. Only the last board frame gets the render stages — the swallowed frames' pictures
+  are never presented.
+* **Deliberately NOT ping-coupled.** Pacing one cabinet to the other is a feedback loop and a
+  competitive lever (deliberately slowing your presentation would slow your opponent's board);
+  pinning both to the crystal's rate needs no cooperation, which is what the hardware does. If
+  residual drift ever matters, the wire already carries `boardSeq` for an NTP-style slew — noted,
+  not built.
+* Solo, Probe and Shared keep the old policy exactly (BoardFramesDue returns 1, the spin uses the
+  user's setting). Verified inert: standalone `-src2 -frames 900` and `-fv2 -frames 600` both
+  exit 0, `module_stop -> 0x0`.
+
+### 10c. THE PACED RACE (fourth race) — pacing verified, and the design's last layer explained
+
+* **The formation offset went from 930 guest frames to ZERO.** Both cabinets formed the race at
+  gframe **3151 exactly**, and their probes sampled identical gframe spans (135/135) — the boards
+  are rate-locked from link-up. Every channel valid on every racing heartbeat: `m=16 pc=Y ai=Y`
+  (the fixed `pc=` decode's first outing).
+* **The strong-block metric is now understood, and it is gameplay, not link quality.** Per-sample
+  agreement opens at **88% of all 678 dynamic blocks** and holds ~85% for the first ~1000 gframes
+  (~17 s) — near-total simulation lockstep — then falls off a cliff to ~30% and decays to ~21%,
+  and the per-car table shows a monotonic 16%→99% gradient across its 40 slots: a divergence
+  propagating car by car from the moment the players reach the pack. The mechanism: each cabinet
+  sees the REMOTE player at dead-reckoned (not bit-identical) positions, so AI avoidance around
+  the players forks, and the fork cascades through the field. From then on coherence is carried
+  the way the hardware intends — by OWNERSHIP + BROADCAST, one authority per car, applied at
+  60 Hz — and the bit-fork lives only in each cabinet's non-authoritative mirrors. This also
+  explains the three races' strong counts (240 / 492 / 131) as three different amounts of
+  player-AI interaction, and closes the metric: bit-identity was only ever a proxy, valid before
+  first contact; after it, `ai=Y` at rate IS the sync.

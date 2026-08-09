@@ -34,7 +34,14 @@ namespace pre3
 	// never linked:
 	//
 	//   p_work_ptr[0]  TX ARRAY. The board copies its outgoing packet INTO it, at slot [nodeId].
-	//   p_work_ptr[1]  RX ARRAY. The board copies every node's packet OUT of it, indexed by node.
+	//   p_work_ptr[1]  RX ARRAY. The board copies every node's packet OUT of it, indexed by node
+	//                  - INCLUDING THIS NODE'S OWN. The state-4 ingest walks the sources as
+	//                  (me - 1 - i) mod count for i = 0..count-1, so p1[me] is read every frame
+	//                  and lands in the LAST of the count+1 window slots the guest programs
+	//                  (FUN_00012da4: register 0xC0020804 = size * (count + 1)) - the ring
+	//                  handing a cabinet its own packet back after a lap, which the master's
+	//                  comm service uses as its ring-lap timing reference. The host must keep
+	//                  that slot fed; CommBoard::Update mirrors it.
 	//   p_work_ptr[2]  points at a u64 RENDEZVOUS WORD, shared between all cabinets.
 	//
 	// Both arrays are `nodeCount * packetSize`, and packetSize is a register the GUEST programs
@@ -254,6 +261,34 @@ namespace pre3
 		// A no-op when the mode is Off, which leaves the three slots exactly as they were: null,
 		// the path the module already handles.
 		void Attach(void* workPointers[3]);
+
+		// THE LINKED-CABINET FRAME PACER - Virtual On's VirtualClock policy (m2ftg/VirtualClock.h),
+		// ported minus the half pre3 does not need. VON had to patch the module's QPC wrapper
+		// because its board advances with WALL time; pre3's board is frame-deterministic by
+		// construction - a fixed CPU budget of cpu_clock/60 per update stage, nothing in the frame
+		// path sampling elapsed time - so "pace the board" reduces to "call the update stage at
+		// 60 Hz", and both of VON's remaining pieces transfer:
+		//
+		//   * the LIMITER: while a link is live the host loop must hold 60 Hz even if the user's
+		//     FPS cap is off and the monitor is faster - game speed is a competitive advantage on
+		//     a linked pair, and a cabinet running its board at 144 Hz lives 2.4x further into the
+		//     race than its peer (the exact on-screen divergence §10 of the recon leaves open).
+		//     LinkPacingActive() is the host loop's gate for forcing the cap.
+		//   * the ACCUMULATOR: a host frame that overran its budget steps the board more than once
+		//     to stay at 60 Hz in wall time - the ordinary fixed-timestep loop, capped at 4 with
+		//     the debt dropped past the cap (a long hitch repaid in one burst reads as a hang).
+		//     BoardFramesDue() answers how many board frames this host frame owes; call it exactly
+		//     once per host frame. 1 in the steady state, and always 1 outside a live link - solo
+		//     play keeps the old policy, where a slow host runs slow rather than stuttering.
+		//
+		// Safe here for the reason it was safe for VON and unsafe under lockstep: there is no
+		// frame numbering to violate and no peer to stay bit-identical with - the ROM's own
+		// protocol synchronises, and this only fixes the RATE. Deliberately NOT coupled to the
+		// peer (no ping term, no adaptive skew): pacing one cabinet to the other is a feedback
+		// loop and a competitive lever, where pinning both to the crystal's rate - which is what
+		// twin hardware does - needs no cooperation at all.
+		bool LinkPacingActive();
+		unsigned int BoardFramesDue();
 
 		// One emulated frame's worth of host work, called BEFORE the module's update stage.
 		//

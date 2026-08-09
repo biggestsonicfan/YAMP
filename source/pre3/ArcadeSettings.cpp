@@ -158,18 +158,23 @@ namespace pre3
 				{ OFF_CABINET_TYPE, s_desired.cabinetType, "CABINET TYPE" },
 				{ OFF_LINK_ID,      s_desired.linkId,      "LINK ID" },
 				{ OFF_CAR_NUMBER,   s_desired.carNumber,   "CAR NUMBER" },
+				{ OFF_GAME_MODE,    s_desired.gameMode,    "GAME MODE" },
+				{ OFF_MOTOR_POWER,  s_desired.motorPower,  "MOTOR POWER" },
+				{ OFF_RANKING_MODE, s_desired.ranking,     "RANKING MODE" },
 			};
-			size_t writeCount = 4;
-			// The room's assignments, when a session armed them: the override's cabinet type
-			// replaces the local preference, and the other four rows join the write set. The
-			// injector has already run (the coin gate above), so these land last and win.
+			size_t writeCount = 7;
+			// The room's assignments, when a session armed them, REPLACE the local preferences:
+			// the race is the host's, not this machine's. DIFFICULTY only exists in the room case
+			// - the local value travels the module injector's own config path and needs no row
+			// here, but the room's arrives mid-session where no config field can carry it. The
+			// injector has already run (the coin gate above), so all of these land last and win.
 			if (s_roomArmed)
 			{
 				writes[1].value = s_room.cabinetType;
-				writes[writeCount++] = { OFF_DIFFICULTY,   s_room.difficulty, "DIFFICULTY" };
-				writes[writeCount++] = { OFF_GAME_MODE,    s_room.gameMode,   "GAME MODE" };
-				writes[writeCount++] = { OFF_MOTOR_POWER,  s_room.motorPower, "MOTOR POWER" };
-				writes[writeCount++] = { OFF_RANKING_MODE, s_room.ranking,    "RANKING MODE" };
+				writes[4].value = s_room.gameMode;
+				writes[5].value = s_room.motorPower;
+				writes[6].value = s_room.ranking;
+				writes[writeCount++] = { OFF_DIFFICULTY, s_room.difficulty, "DIFFICULTY" };
 			}
 			for (size_t i = 0; i < writeCount; i++)
 			{

@@ -22,6 +22,9 @@ namespace pre3
 	//   +0x20   CABINET TYPE     DELUXE, TWIN, SPECIAL
 	//   +0x21   DIFFICULTY       EASY, NORMAL, HARD, HARDEST
 	//   +0x22   ADVERTISE SOUND  OFF, ON
+	//   +0x23   GAME MODE        NORMAL(SPRINT), GRAND PRIX, 100/200/300/400/500 MILES
+	//   +0x26   MOTOR POWER      50%, 60%, 70%, 80%, 90%, 100%
+	//   +0x28   RANKING MODE     NORMAL, CAMPAIGN, INTERNET
 	//
 	// WHY THIS EXISTS AT ALL, rather than more config bytes: the injector writes +0x17, +0x18,
 	// +0x1E, +0x1F, +0x21 and +0x22, and it NEVER writes +0x20 - so CABINET TYPE has no host
@@ -40,12 +43,21 @@ namespace pre3
 
 		// What to apply. Values are the board's own, i.e. indices into the option lists above,
 		// so a UI combo can offer the board's strings verbatim and store the index.
+		//
+		// The last three rows joined 2026-08-08 for parity with the netplay room metadata: a room
+		// publishes and adopts them (SetRoomAssignments), so a machine has to be able to CHOOSE
+		// them outside a session too, or the host could only ever publish the board's defaults as
+		// edited by hand in the service menu each boot. Like CABINET TYPE they have no injector
+		// route at all - the direct write here is their only host path.
 		struct Desired
 		{
 			uint8_t country = 1;       // JAPAN
 			uint8_t cabinetType = 1;   // TWIN, which is what the board defaults to
 			uint8_t linkId = 0;        // SINGLE
 			uint8_t carNumber = 0;     // car 1
+			uint8_t gameMode = 0;      // NORMAL(SPRINT)
+			uint8_t motorPower = 3;    // 80%, the board's own default
+			uint8_t ranking = 0;       // NORMAL
 		};
 
 		void SetDesired(const Desired& desired);

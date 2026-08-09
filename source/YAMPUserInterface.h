@@ -110,6 +110,9 @@ private:
 	int m_pre3CabinetType = 1;
 	int m_pre3LinkId = 0;
 	int m_pre3CarNumber = 0;
+	int m_pre3GameMode = 0;
+	int m_pre3MotorPower = 3;
+	int m_pre3RankingMode = 0;
 	uint32_t m_m2Country = 0;
 	bool m_m2Freeplay = true;
 	bool m_m2VersusMode = false;
