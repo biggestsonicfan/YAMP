@@ -14,6 +14,7 @@ project "YAMP"
 	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*",
 			"source/imgui/*", "source/Utils/*", "source/input/*",
 			"source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
+			"source/net/LinkedCabinet.h",
 			"source/pxd/**.h", "source/pxd/**.cpp",
 			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
 			"source/pre3/**.h", "source/pre3/**.cpp",

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../net/LinkedCabinet.h"
+
 namespace pre3
 {
 	// The HOST HALF of the Model 3 network board — the linked-cabinet path for Sega Racing
@@ -220,22 +222,14 @@ namespace pre3
 		// perfectly. Virtual On had the same gap on the m2ftg side and the same answer.
 		bool LinkedCabinetSupported();
 
-		// WHAT THE OVERLAY RENDERS, and the shape is `m2ftg::K2::LinkedCabinet`'s on purpose: the
-		// two games answer the same questions about the same kind of link, and the UI should not
-		// have to care which emulator is running.
-		//
-		// Every field is the cabinet's OWN answer rather than the host's intent - `checkDone` in
-		// particular is the ROM's verdict from its boot network check, not "YAMP thinks the link is
-		// up". A host that reported its own hopes would say the ring was fine while the board sat
-		// in its check.
-		struct CabinetStatus
-		{
-			uint32_t role;      // 1 = MASTER, 2 = SLAVE, matching the board's own LINK ID row
-			bool ringUp;        // the peer's packets are arriving AND the board is transferring
-			uint8_t nodeId;     // as the ROM read it out of the ring (1-based), guest 0x10062B
-			uint8_t nodes;      // guest 0x10062A
-			bool checkDone;     // FUN_00093DB4 passed both gates and agreed on a ring
-		};
+		// WHAT THE OVERLAY RENDERS - the shared shape every linked-cabinet game fills
+		// (net/LinkedCabinet.h; until 2026-08-09 this was its own struct kept identical to
+		// `m2ftg::K2::LinkedCabinet` by hand). SRC2's answers, field by field: role matches the
+		// board's own LINK ID row; ringUp means the peer's packets are arriving AND the board is
+		// transferring; nodeId is 1-based off guest 0x10062B, nodes guest 0x10062A; checkDone is
+		// FUN_00093DB4 passing both gates and agreeing on a ring - the ROM's verdict, not
+		// "YAMP thinks the link is up".
+		using CabinetStatus = net::LinkedCabinetStatus;
 		bool GetLinkedCabinet(CabinetStatus& out);
 
 		Mode CurrentMode();

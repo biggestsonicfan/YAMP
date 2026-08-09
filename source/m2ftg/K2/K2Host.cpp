@@ -19,6 +19,7 @@
 #include "../Debug/DebugWindows.h"          // RomFrameCounterAddress / ReadEmulatedRam32
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
 #include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
+#include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
 #include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
 #include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
 #include "../ModuleArgs.h"
@@ -182,7 +183,7 @@ namespace m2ftg
 			constexpr size_t BOARD_INDEX    = 0x6911B4;   // written by the bank switch
 			constexpr size_t COMM_PAYLOAD   = 0x700;      // bytes the link moves per board per frame
 			constexpr size_t COMM_P2        = 0x7CA738;   // P1 + 0x8008
-			constexpr size_t COMM_BANK      = 0x4000;     // the second 16 KB bank
+			constexpr size_t COMM_BANK      = CommBoard::BANK;   // the second 16 KB bank
 
 			// THE DPRAM SLOT LAYOUT, read out of the module's own per-frame link transfer
 			// (`FUN_18006A310`, the function this file hooks). Per comm block, per bank:
@@ -1468,8 +1469,9 @@ namespace m2ftg
 			return net::LinkReady();
 		}
 
-		constexpr int RPCN_LINK_TIMEOUT_FRAMES = 30;
-		static int s_rpcnSinceRecv = RPCN_LINK_TIMEOUT_FRAMES + 1;
+		// Peer-packet freshness - the shared DPRAM residency model (CommBoard::LinkHealth),
+		// aged once per HOST frame in LogLinkState.
+		static CommBoard::LinkHealth s_linkHealth;
 
 		// "Is a linked partner exchanging with us RIGHT NOW?" Cheap and side-effect free, unlike
 		// ObserveLink, which also opens the harness transport - so this is what callers outside
@@ -1480,7 +1482,7 @@ namespace m2ftg
 			{
 				return false;
 			}
-			return LinkAvailable() && s_rpcnSinceRecv <= RPCN_LINK_TIMEOUT_FRAMES;
+			return LinkAvailable() && s_linkHealth.Fresh();
 		}
 
 		// THE ONE FUNCTION THE TRANSPORT HAS TO REPLACE. Everything else below is the firmware's
@@ -1520,7 +1522,6 @@ namespace m2ftg
 		// after every transfer is what a real DPRAM does between arrivals, and it is what makes a
 		// dropped datagram cost nothing.
 		static uint8_t s_peerPacket[OmgRva::COMM_PAYLOAD];
-		static bool s_peerHave = false;
 
 		// Counts datagrams actually put on the wire, so the send-rate change is measurable rather
 		// than asserted. Reset per host frame by LogLinkState.
@@ -1545,8 +1546,7 @@ namespace m2ftg
 				return;
 			}
 			uint8_t* const block = g_dllBase + OmgRva::COMM_P1;
-			uint8_t* const flag = g_dllBase + OmgRva::COMM_P1_FLAG;
-			const size_t front = (*flag & 1) ? OmgRva::COMM_BANK : 0;
+			const size_t front = CommBoard::CurrentBank(block);
 
 			// ONLY TRANSMIT ONCE OUR OWN COMM BOARD HAS BEEN RELEASED FROM RESET.
 			//
@@ -1561,7 +1561,7 @@ namespace m2ftg
 			// check, and the same edge the module's firmware stub keys its fake boot off. Gating
 			// transmission on it makes peer liveness mean what it means on hardware: the other
 			// cabinet's CPU has brought its comm board up and is participating in the ring.
-			if ((*(g_dllBase + OmgRva::COMM_P1_FLAG - 1) & 1) == 0)
+			if (!CommBoard::ReleasedFromReset(block))
 			{
 				return;
 			}
@@ -1608,8 +1608,7 @@ namespace m2ftg
 			{
 				return;
 			}
-			s_rpcnSinceRecv = 0;
-			s_peerHave = true;
+			s_linkHealth.NotePacket();
 			(LinkPacketStamped(s_peerPacket) ? s_pktStamped : s_pktUnstamped)++;
 		}
 
@@ -1642,12 +1641,12 @@ namespace m2ftg
 			// In `-von-2board` the second board really is running and really is producing packets,
 			// so its send buffer belongs to its i960 and must not be written over. That mode is the
 			// local two-cabinet experiment; it has no wire.
-			if (!s_peerHave || g_dllBase == nullptr || s_cabinetRole == 0 || WantTwoBoardMode())
+			if (!s_linkHealth.HavePacket() || g_dllBase == nullptr || s_cabinetRole == 0
+				|| WantTwoBoardMode())
 			{
 				return;
 			}
-			const size_t bank =
-				(*(g_dllBase + OmgRva::COMM_P2_FLAG) & 1) ? OmgRva::COMM_BANK : 0;
+			const size_t bank = CommBoard::CurrentBank(g_dllBase + OmgRva::COMM_P2);
 			memcpy(g_dllBase + OmgRva::COMM_P2_SEND + bank, s_peerPacket, OmgRva::COMM_PAYLOAD);
 		}
 
@@ -1673,30 +1672,14 @@ namespace m2ftg
 			}
 
 			const CommLink link = ObserveLink();
-			const uint8_t ringUp = link.peerUp ? 1 : 0;
-			const uint8_t nodeId = static_cast<uint8_t>(role);   // MASTER -> 1, SLAVE -> 2
 			// Truthful rather than convenient. While the ring is down the ROM is parked at the
-			// ring-up poll and never reads this, but if a future change raises byte 0 without a peer
-			// the ROM will take its own "Illegal Nodes: %d" path - reset the comm board and restart
-			// the check. That is correct behaviour for a mis-reported ring, not a bug to paper over.
-			const uint8_t nodeCount = link.nodes;
-
-			static int s_reported = -1;
-			if (s_reported != ringUp)
-			{
-				s_reported = ringUp;
-				net::Logf("comm firmware: ring %s, node id %u of %u%s",
-					ringUp ? "UP" : "DOWN", nodeId, nodeCount,
-					ringUp ? "" : " - the ROM will wait in \"Checking Network Now\"");
-			}
-
-			for (size_t bank = 0; bank <= OmgRva::COMM_BANK; bank += OmgRva::COMM_BANK)
-			{
-				uint8_t* status = g_dllBase + OmgRva::COMM_P1 + bank;
-				status[0] = ringUp;
-				status[2] = nodeId;
-				status[3] = nodeCount;
-			}
+			// ring-up poll and never reads the status bytes, but if a future change raised byte 0
+			// without a peer the ROM would take its own "Illegal Nodes: %d" path - reset the comm
+			// board and restart the check. That is correct behaviour for a mis-reported ring, not
+			// a bug to paper over.
+			CommBoard::WriteFirmwareStatus(g_dllBase + OmgRva::COMM_P1, link.peerUp,
+				static_cast<uint8_t>(role) /* MASTER -> 1, SLAVE -> 2 */, link.nodes,
+				"comm firmware", "Checking Network Now");
 
 			// After the status, because the exchange is what raises "data ready" and the ROM reads
 			// the two together.
@@ -1718,7 +1701,7 @@ namespace m2ftg
 			// screen the moment the check completes.
 			// Only while the ring is DOWN: once a peer answers, the ROM completes the check and
 			// reaches BlackOut+0x190 on its own, and hook 0 does the write for real.
-			if (!ringUp && g_dllBase[0x6910DF] == 0)
+			if (!link.peerUp && g_dllBase[0x6910DF] == 0)
 			{
 				g_dllBase[0x6910DF] = 1;
 				net::Logf("bring-up flag forced - the ROM is parked in Net_check waiting for the "
@@ -1792,13 +1775,10 @@ namespace m2ftg
 			// The no-stamp heartbeat is once per HOST frame; this is where that frame turns over.
 			s_sentThisHostFrame = false;
 
-			// Age the peer timeout - see s_rpcnSinceRecv. HOST frames, because a host frame is one
-			// to sixteen module_main calls and a timeout counted down there would be of unknown,
+			// Age the peer timeout here, in HOST frames - a host frame is one to sixteen
+			// module_main calls, and a timeout counted down there would be of unknown,
 			// machine-dependent length.
-			if (s_rpcnSinceRecv <= RPCN_LINK_TIMEOUT_FRAMES)
-			{
-				++s_rpcnSinceRecv;
-			}
+			s_linkHealth.Age();
 
 			// s_cabinetRole is the game gate as well as the role gate: it is only ever non-zero
 			// after ApplyCabinetRole verified hook 6's InitNetwork injector, which exists in `omg`

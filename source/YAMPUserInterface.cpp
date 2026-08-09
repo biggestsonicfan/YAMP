@@ -9,6 +9,7 @@
 #include "m2ftg/Debug/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
+#include "net/LinkedCabinet.h" // the shared linked-cabinet report all three games fill
 #include "m2ftg/LJ/MrLink.h"   // Motor Raid's linked cabinet, same questions
 #include "pre3/Debug/HleHooks.h"
 #include "pre3/ArcadeSettings.h"
@@ -104,35 +105,14 @@ static bool IsNetplayGame()
 		|| m2ftg::MrLink::LinkedCabinetSupported();
 }
 
-// The linked-cabinet report, whichever emulator is running. Both games answer the same questions
-// about the same kind of link, so the overlay below asks once and does not care which board it is.
-static bool GetLinkedCabinetStatus(pre3::CommBoard::CabinetStatus& out)
+// The linked-cabinet report, whichever emulator is running. All three games fill the shared
+// net::LinkedCabinetStatus (net/LinkedCabinet.h), so the overlay below asks once and does not
+// care which board it is.
+static bool GetLinkedCabinetStatus(net::LinkedCabinetStatus& out)
 {
-	if (pre3::CommBoard::GetLinkedCabinet(out))
-	{
-		return true;
-	}
-	m2ftg::MrLink::LinkedCabinet mr = {};
-	if (m2ftg::MrLink::GetLinkedCabinet(mr))
-	{
-		out.role = mr.role;
-		out.ringUp = mr.ringUp;
-		out.nodeId = mr.nodeId;
-		out.nodes = mr.nodes;
-		out.checkDone = mr.checkDone;
-		return true;
-	}
-	m2ftg::K2::LinkedCabinet von = {};
-	if (!m2ftg::K2::GetLinkedCabinet(von))
-	{
-		return false;
-	}
-	out.role = von.role;
-	out.ringUp = von.ringUp;
-	out.nodeId = von.nodeId;
-	out.nodes = von.nodes;
-	out.checkDone = von.checkDone;
-	return true;
+	return pre3::CommBoard::GetLinkedCabinet(out)
+		|| m2ftg::MrLink::GetLinkedCabinet(out)
+		|| m2ftg::K2::GetLinkedCabinet(out);
 }
 
 // The two families answer "has the emulated board booted?" and "put it back to a clean state"
@@ -3039,7 +3019,7 @@ void YAMPUserInterface::DrawNetplay()
 		// barrier, nothing to reset and nothing for "Start match" to open. Telling the player to
 		// press it would be telling them to press a button that does nothing - which is exactly
 		// what the overlay used to do through an entire match.
-		pre3::CommBoard::CabinetStatus lobbyLink = {};
+		net::LinkedCabinetStatus lobbyLink = {};
 		const bool linkedCabinet = GetLinkedCabinetStatus(lobbyLink);
 		if (linkedCabinet)
 		{
@@ -3155,7 +3135,7 @@ void YAMPUserInterface::DrawNetplayOverlay()
 	// consulted before the checks below. Doing that swallowed the room id (still 0 while
 	// connecting), the error text and the board-booting line, and drew a permanent box in offline
 	// solo play for anyone whose cabinet role was not NOLINK.
-	pre3::CommBoard::CabinetStatus link = {};
+	net::LinkedCabinetStatus link = {};
 	const bool linkedCabinet = GetLinkedCabinetStatus(link);
 
 	// Nothing to say before a session is started, and nothing worth covering the game with once

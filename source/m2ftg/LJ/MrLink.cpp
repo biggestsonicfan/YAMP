@@ -8,6 +8,7 @@
 #include "../../DebugLog.h"
 
 #include "../m2ftg.h"
+#include "../CommBoard/CommBoard.h"
 #include "../ModuleBuild.h"
 #include "../SystemSwitches.h"
 #include "../../net/NetPlugin.h"
@@ -22,13 +23,11 @@ namespace m2ftg
 		// because GameVerify pins the module by SHA-256 before it is ever loaded.
 		namespace MrRva
 		{
-			// Board 0's comm block: two 0x4000 banks of comm RAM, then the register pair the
-			// guest reaches at 0x1A14000/0x1A14002 and the firmware-boot latch.
+			// Board 0's comm block: the CommBoard model (two banks, then the register pair the
+			// guest reaches at 0x1A14000/0x1A14002 - see ../CommBoard/CommBoard.h). Only WHERE
+			// the blocks live is Motor Raid's own.
 			constexpr size_t COMM_BLOCK  = 0x741E50;
 			constexpr size_t COMM_BLOCK1 = 0x749E58;   // board 1's block (+0x8008)
-			constexpr size_t COMM_BANK   = 0x4000;
-			constexpr size_t REG_RESET   = 0x8000;   // guest 0x1A14000
-			constexpr size_t REG_FLAG    = 0x8001;   // guest 0x1A14002: bit0 bank, bit7 ready
 
 			// Slot layout inside a bank (guest window 0x1A10000 + offset):
 			//   +0x0000 firmware status (byte0 ring-up, byte2 node id, byte3 node count)
@@ -76,15 +75,11 @@ namespace m2ftg
 		// The APPLIED role (what the board was rebooted into), not the wanted one. 0 = no link.
 		static uint32_t s_role = 0;
 
-		// The newest peer packet, held resident - a DPRAM keeps its contents between arrivals,
-		// and re-laying it costs nothing. The WATCHDOG is why residency alone is not enough:
-		// the ROM checks that the neighbour's alive counter advances, so only fresh packets
-		// keep the ring healthy - a quiet peer errors out through the ROM's own accounting
-		// (docs/mr-comm-packet.md 5), which is the correct linked-cabinet behaviour.
+		// The newest peer packet, held resident, and its freshness - the shared DPRAM residency
+		// model (CommBoard::LinkHealth; the watchdog rationale is documented there, and
+		// docs/mr-comm-packet.md 5 is this ROM's own accounting of it).
 		static uint8_t s_peer[MrRva::PACKET];
-		static bool s_havePeer = false;
-		static int s_sinceRecv = 1000000;
-		constexpr int LINK_TIMEOUT_FRAMES = 30;
+		static CommBoard::LinkHealth s_health;
 
 		// The wire datagram: a tiny header in front of the raw slot. The sequence number exists
 		// because the plugin de-dupes byte-identical link payloads (measured on SRC2), and a
@@ -194,21 +189,15 @@ namespace m2ftg
 		static void ExchangeCommPayload()
 		{
 			uint8_t* const block = g_base + MrRva::COMM_BLOCK;
-			uint8_t* const resetReg = block + MrRva::REG_RESET;
-			uint8_t* const flagReg = block + MrRva::REG_FLAG;
 
-			// The ROM's own "I released the board" is reset bit0 (`_checkBoard` step: flag,
-			// then reset=1, then poll). While it is held in reset the firmware is not booted:
-			// no status, no exchange, no transmission - which is also what keeps "the peer is
-			// up" meaning "the peer's ROM reached its check", not "the other process started"
-			// (Virtual On's boot-flap lesson).
-			if ((*resetReg & 1) == 0)
+			// Nothing before the ROM's own release of the board (`_checkBoard` step: flag,
+			// then reset=1, then poll) - the boot-flap rationale is with ReleasedFromReset.
+			if (!CommBoard::ReleasedFromReset(block))
 			{
 				return;
 			}
 
-			const size_t cur = (*flagReg & 1) ? MrRva::COMM_BANK : 0;
-			const uint8_t* const sendCur = block + MrRva::SLOT_SEND + cur;
+			const uint8_t* const sendCur = block + MrRva::SLOT_SEND + CommBoard::CurrentBank(block);
 
 			// SEND: the slot the ROM wrote (current bank) onto the wire, once per host frame.
 			// The header's sequence defeats the plugin's byte-identical de-dupe; the ROM's own
@@ -235,52 +224,32 @@ namespace m2ftg
 					if (hdr.magic == WIRE_MAGIC)
 					{
 						memcpy(s_peer, buf + sizeof(WireHdr), MrRva::PACKET);
-						s_havePeer = true;
-						s_sinceRecv = 0;
+						s_health.NotePacket();
 					}
 				}
-				else if (s_sinceRecv < 1000000)
+				else
 				{
-					s_sinceRecv++;
+					// PreFrame runs once per host frame, which is the rate Age() wants.
+					s_health.Age();
 				}
 			}
 
-			// The firmware's answer, truthfully: ring up only while peer datagrams flow. While
-			// it is down the ROM parks at the ring-up poll in "CHECKING NETWORK NOW" - correct.
-			const bool ringUp = net::LinkReady() && s_havePeer && s_sinceRecv <= LINK_TIMEOUT_FRAMES;
-			const uint8_t nodeId = static_cast<uint8_t>(s_role);   // MASTER -> 1, SLAVE -> 2
-			const uint8_t nodeCount = 2;
-
-			static int s_reported = -1;
-			if (s_reported != static_cast<int>(ringUp))
-			{
-				s_reported = static_cast<int>(ringUp);
-				net::Logf("mr-link: ring %s, node id %u of %u%s",
-					ringUp ? "UP" : "DOWN", nodeId, nodeCount,
-					ringUp ? "" : " - the ROM will wait in \"CHECKING NETWORK NOW\"");
-			}
-
-			// Firmware status bytes into BOTH banks of board 0 - the module's boot response
-			// writes them the same way, and the transfer never touches them, so nothing here
-			// fights the module.
-			for (size_t bank = 0; bank <= MrRva::COMM_BANK; bank += MrRva::COMM_BANK)
-			{
-				uint8_t* status = block + bank;
-				status[0] = ringUp ? 1 : 0;
-				status[2] = nodeId;
-				status[3] = nodeCount;
-			}
+			// The firmware's answer, truthfully: ring up only while peer datagrams flow.
+			const bool ringUp = net::LinkReady() && s_health.HavePacket() && s_health.Fresh();
+			CommBoard::WriteFirmwareStatus(block, ringUp,
+				static_cast<uint8_t>(s_role) /* MASTER -> 1, SLAVE -> 2 */, 2,
+				"mr-link", "CHECKING NETWORK NOW");
 
 			// Stage the peer's packet into board 1's SEND buffer, the bank the module's
 			// transfer sources (`DAT_180751e59 & 1`, read one call before module_main runs
 			// it). Residency is free: board 1's i960 never steps (the two-board gate stays
 			// down), so nothing overwrites the staged packet between arrivals - a dropped
 			// datagram costs nothing, exactly the DPRAM behaviour (Virtual On's model).
-			if (s_havePeer)
+			if (s_health.HavePacket())
 			{
 				uint8_t* const block1 = g_base + MrRva::COMM_BLOCK1;
-				const size_t b1bank = (block1[MrRva::REG_FLAG] & 1) ? MrRva::COMM_BANK : 0;
-				memcpy(block1 + MrRva::SLOT_SEND + b1bank, s_peer, MrRva::PACKET);
+				memcpy(block1 + MrRva::SLOT_SEND + CommBoard::CurrentBank(block1),
+					s_peer, MrRva::PACKET);
 			}
 		}
 
@@ -374,7 +343,7 @@ namespace m2ftg
 				return false;
 			}
 			out.role = s_role;
-			out.ringUp = s_havePeer && s_sinceRecv <= LINK_TIMEOUT_FRAMES;
+			out.ringUp = s_health.HavePacket() && s_health.Fresh();
 			out.nodeId = *GuestRam(MrRva::SYM_NODE_ID);
 			out.nodes = *GuestRam(MrRva::SYM_TOTAL_NODES);
 			out.checkDone = *reinterpret_cast<uint32_t*>(GuestRam(MrRva::SYM_LINK_MODE)) != 0;

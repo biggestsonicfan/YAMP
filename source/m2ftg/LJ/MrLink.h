@@ -26,6 +26,7 @@
 #include <cstdint>
 
 #include "../m2ftg.h"
+#include "../../net/LinkedCabinet.h"
 
 namespace m2ftg
 {
@@ -51,16 +52,11 @@ namespace m2ftg
 		// is the after-a-room question.
 		bool LinkedCabinetSupported();
 
-		// Linked-cabinet status for the netplay overlay - same questions Virtual On and SRC2
-		// answer, read from the ROM's own globals rather than YAMP's intentions.
-		struct LinkedCabinet
-		{
-			uint32_t role;      // 1 = MASTER CONTROLLER, 2 = SLAVE MACHINE
-			bool ringUp;        // peer datagrams arriving right now
-			uint8_t nodeId;     // as the ROM adopted it from the firmware block
-			uint8_t nodes;
-			bool checkDone;     // the ROM's own network check completed (_LinkMode non-zero)
-		};
+		// Linked-cabinet status for the netplay overlay - the shared shape all three
+		// linked-cabinet games fill (net/LinkedCabinet.h), read from the ROM's own globals
+		// rather than YAMP's intentions. Here role 1 = MASTER CONTROLLER, 2 = SLAVE MACHINE,
+		// and checkDone is _LinkMode non-zero.
+		using LinkedCabinet = net::LinkedCabinetStatus;
 		bool GetLinkedCabinet(LinkedCabinet& out);
 
 		// "-mr-iotest": drives a deterministic pattern through pad[0]'s analogue fields (one

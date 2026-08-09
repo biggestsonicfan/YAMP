@@ -21,6 +21,7 @@
 
 #include "../../RenderWindow.h"
 #include "../../YAMPGeneral.h"
+#include "../../net/LinkedCabinet.h"
 
 namespace m2ftg
 {
@@ -66,14 +67,9 @@ namespace m2ftg
 		// Returns false when this is not a linked-cabinet session at all (a different game, or
 		// Virtual On with the cabinet role set to NOLINK), in which case the overlay's normal
 		// round-based reporting is the right thing.
-		struct LinkedCabinet
-		{
-			uint32_t role;      // 1 = MASTER, 2 = SLAVE
-			bool ringUp;        // is the partner cabinet exchanging with us right now?
-			uint8_t nodeId;     // as the ROM read it out of the ring
-			uint8_t nodes;
-			bool checkDone;     // the ROM's own Net_check completed (net_flag)
-		};
+		// The shared shape all three linked-cabinet games fill (net/LinkedCabinet.h). Here
+		// checkDone is the ROM's own Net_check completing (net_flag).
+		using LinkedCabinet = net::LinkedCabinetStatus;
 		bool GetLinkedCabinet(LinkedCabinet& out);
 	}
 }
