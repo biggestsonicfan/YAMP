@@ -5,8 +5,8 @@
 #include "YAMPGeneral.h"
 #include "GameVerify.h"
 #include "m2ftg/ELF/ElfRom.h"
-#include "m2ftg/DebugWindows.h"
-#include "m2ftg/HleHooks.h"
+#include "m2ftg/Debug/DebugWindows.h"
+#include "m2ftg/Debug/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
 #include "m2ftg/LJ/MrLink.h"   // Motor Raid's linked cabinet, same questions
@@ -1810,10 +1810,10 @@ void YAMPUserInterface::DrawDebug()
 		}
 	}
 
-	// NOT inside the isStf block: every LJ m2ftg game with a hook table gets this panel, which
-	// is Sonic the Fighters AND Fighting Vipers. It self-gates on HleHooks::Count(), so a game
-	// without a table draws nothing rather than an empty list.
-	DrawStfHleHooks();
+	// NOT inside the isStf block: every m2ftg game with a hook table gets this panel - StF, FV,
+	// VF2, Virtual On and Motor Raid. It self-gates on HleHooks::Count(), so a game without a
+	// table draws nothing rather than an empty list.
+	DrawHleHooks();
 	// The Model 3 boards' equivalent. Self-gating the same way, and mutually exclusive with the
 	// panel above in practice - no game has both kinds of table.
 	DrawPre3HleHooks();
@@ -2037,7 +2037,7 @@ void YAMPUserInterface::DrawPre3HleHooks()
 	}
 }
 
-void YAMPUserInterface::DrawStfHleHooks()
+void YAMPUserInterface::DrawHleHooks()
 {
 	namespace Hle = m2ftg::HleHooks;
 

@@ -14,8 +14,8 @@
 
 #include "../../pxd/LJ/sys_util.h"
 #include "../../pxd/LJ/cs_game.h"
-#include "../HleHooks.h"
-#include "../DebugWindows.h"
+#include "../Debug/HleHooks.h"
+#include "../Debug/DebugWindows.h"
 
 #include "../ImportSymbols.h"
 #include "../../pxd/Imports.h"

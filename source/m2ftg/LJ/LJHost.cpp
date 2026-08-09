@@ -29,8 +29,8 @@ void AdvanceFrameStampNow();
 
 #include "../ImportSymbols.h"
 #include "../../pxd/LJ/HostCdevice.h"
-#include "../HleHooks.h"
-#include "../DebugWindows.h"
+#include "../Debug/HleHooks.h"
+#include "../Debug/DebugWindows.h"
 #include "../NetSession.h"
 #include "../SystemSwitches.h"
 #include "../ELF/CharRamFix.h"

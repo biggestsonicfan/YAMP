@@ -3,7 +3,7 @@
 #include <filesystem>
 
 #include "input/Input.h"
-#include "m2ftg/HleHooks.h"
+#include "m2ftg/Debug/HleHooks.h"
 
 class YAMPSettings
 {

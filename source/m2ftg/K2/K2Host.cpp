@@ -16,9 +16,9 @@
 #include "../../pxd/K2/sl.h"            // pxd::K2 — THIS generation's context layout (0xF3C0)
 #include "../../pxd/LJ/sl_internal.h"   // handle_internal_buffer_t (the 8-byte queue node)
 #include "../m2ftg.h"                 // m2ftg_config_t (0x100C) — unchanged in this generation
-#include "../DebugWindows.h"          // RomFrameCounterAddress / ReadEmulatedRam32
+#include "../Debug/DebugWindows.h"          // RomFrameCounterAddress / ReadEmulatedRam32
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
-#include "../HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
+#include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
 #include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
 #include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
 #include "../ModuleArgs.h"

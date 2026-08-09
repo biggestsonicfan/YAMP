@@ -1,12 +1,12 @@
 #include "DebugWindows.h"
 
-#include "ModuleBuild.h"
-#include "../YAMPGeneral.h"
-#include "../DebugLog.h"
-#include "ELF/ElfRom.h"
-#include "../net/NetPlugin.h"
+#include "../ModuleBuild.h"
+#include "../../YAMPGeneral.h"
+#include "../../DebugLog.h"
+#include "../ELF/ElfRom.h"
+#include "../../net/NetPlugin.h"
 
-#include "../imgui/imgui.h"
+#include "../../imgui/imgui.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>

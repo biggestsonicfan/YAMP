@@ -39,9 +39,10 @@ private:
 	void AssignStfKey(int player, uint32_t action, uint32_t vk);
 	void AssignStfPadButton(int player, uint32_t action, uint32_t button, const std::string& padId);
 	void DrawDebug();
-	// Per-hook control over the module's HLE ROM patches, for every LJ m2ftg game that has a
-	// hook table - StF (76 hooks) and FV (95). Self-gating: draws nothing when there is none.
-	void DrawStfHleHooks();
+	// Per-hook control over the module's HLE ROM patches, for every m2ftg game that has a
+	// hook table - StF (76 hooks), FV (95), VF2 (67), Virtual On (120) and Motor Raid (64).
+	// Self-gating: draws nothing when there is none.
+	void DrawHleHooks();
 	void DrawPre3HleHooks();
 	// The netplay page: persisted RPCN account settings on top, the live lobby below.
 	void DrawNetplay();
