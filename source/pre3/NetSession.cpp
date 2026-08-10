@@ -258,7 +258,10 @@ void pre3::NetSession::EndFrame(const pre3_execute_info_t& info)
 	uint32_t cpu = 0, ram = 0;
 	const bool settled = WaitForEmulatedFrame(m_frameMarker);
 	const bool haveParts = settled && StateCheckParts(cpu, ram);
-	const uint32_t check = haveParts ? StateCheckValue() : 0;
+	// Combine the parts already in hand - StateCheckValue() would re-run the whole 12 MB
+	// strided sweep StateCheckParts just performed, doubling the most expensive read this
+	// frame makes (measured ~0.4-2 ms per pass).
+	const uint32_t check = haveParts ? StateCheckCombine(cpu, ram) : 0;
 
 	// ---- The per-frame trace (Netplay/TimerTrace) --------------------------------------------
 	//

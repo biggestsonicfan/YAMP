@@ -227,6 +227,10 @@ namespace pre3
 	// False, leaving both zero, when the board cannot be read.
 	bool StateCheckParts(uint32_t& cpu, uint32_t& ram);
 
+	// FNV-combine two parts already read (what StateCheckValue does internally), so a caller
+	// that just paid for StateCheckParts is not forced to run the 12 MB sweep a second time.
+	uint32_t StateCheckCombine(uint32_t cpu, uint32_t ram);
+
 	// ---- Reading board state safely: THE EMULATOR IS ON ITS OWN THREAD ----------------------
 	//
 	// This is the single most important fact about hosting pre3, and it was not in the original

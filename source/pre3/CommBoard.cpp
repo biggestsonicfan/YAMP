@@ -1020,6 +1020,14 @@ namespace pre3
 
 		void LogSyncDigest(uint32_t /*hostFrame*/, unsigned nodeId)
 		{
+#if !YAMP_DEBUG_LOGGING
+			// The digest's ONLY consumer is the DebugLogFile line at the bottom, which compiles
+			// to nothing in Release - but the 8 MB / 2M-step FNV sweep above it did not, so a
+			// shipping linked cabinet paid a ~3-4 ms hitch every ~2 s to compute a string it
+			// then threw away. No work when there is no sink.
+			(void)nodeId;
+			return;
+#else
 			const auto* const ram = static_cast<const uint8_t*>(BoardGuestRam());
 			if (ram == nullptr) return;
 
@@ -1054,6 +1062,7 @@ namespace pre3
 
 			DebugLogFile("[%s sync] gframe=%u node=%u %s\n",
 				gGeneral.GetGameTag(), guestFrame, nodeId, line);
+#endif
 		}
 	}
 

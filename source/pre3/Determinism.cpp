@@ -462,6 +462,15 @@ namespace pre3
 				& (Machine::REQ_RESTORE_PRELOAD | Machine::REQ_RESTORE_SAVE)) != 0;
 	}
 
+	uint32_t StateCheckCombine(uint32_t cpu, uint32_t ram)
+	{
+		// FNV-1a's own combining step, so the value on the wire is exactly what one pass over both
+		// regions would have produced - the split is a diagnostic, not a different canary.
+		const uint32_t h = net::Fnv1aWord(net::Fnv1aWord(net::FNV1A_BASIS, cpu), ram);
+		// A hash that happened to land on zero would read as "no canary" to the caller.
+		return h != 0 ? h : 1u;
+	}
+
 	uint32_t StateCheckValue()
 	{
 		uint32_t cpu = 0, ram = 0;
@@ -469,11 +478,7 @@ namespace pre3
 		{
 			return 0;
 		}
-		// FNV-1a's own combining step, so the value on the wire is exactly what one pass over both
-		// regions would have produced - the split below is a diagnostic, not a different canary.
-		const uint32_t h = net::Fnv1aWord(net::Fnv1aWord(net::FNV1A_BASIS, cpu), ram);
-		// A hash that happened to land on zero would read as "no canary" to the caller.
-		return h != 0 ? h : 1u;
+		return StateCheckCombine(cpu, ram);
 	}
 
 	bool StateCheckParts(uint32_t& cpu, uint32_t& ram)
