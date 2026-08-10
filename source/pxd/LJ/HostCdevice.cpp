@@ -5,7 +5,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
-#include "D3D12MemAlloc.h"
+#include "../../third_party/D3D12MemoryAllocator/D3D12MemAlloc.h"
 #include "../../wil/com.h"
 
 #include <cstdint>

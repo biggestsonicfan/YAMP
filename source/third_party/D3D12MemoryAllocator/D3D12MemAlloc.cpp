@@ -42,7 +42,7 @@
 // RW mutexes (proven: m_Device sits at AllocatorPimpl+0x80, which only works if m_BudgetMutex is 8-byte
 // SRWLOCK; a 0x50 std::mutex would push it to +0xC8). Overriding RW_MUTEX bloats every m_PoolsMutex and
 // mis-aligns m_BlockVectors (which the DLL reads at Pimpl+0x350). Defined before the D3D12MA_MUTEX guards.
-#include "DllMutex.h"
+#include "../../pxd/LJ/DllMutex.h"
 #define D3D12MA_MUTEX StfDllMutex
 
 ////////////////////////////////////////////////////////////////////////////////

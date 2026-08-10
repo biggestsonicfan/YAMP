@@ -16,6 +16,7 @@ project "YAMP"
 			"source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
 			"source/net/LinkedCabinet.h", "source/net/Round.h", "source/net/Round.cpp",
 			"source/pxd/**.h", "source/pxd/**.cpp",
+			"source/third_party/**.h", "source/third_party/**.cpp",
 			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
 			"source/pre3/**.h", "source/pre3/**.cpp",
 			"source/vf5fs/**.h", "source/vf5fs/**.cpp" }
