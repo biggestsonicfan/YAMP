@@ -22,18 +22,10 @@
 #include "../../DebugLog.h"
 #include "../../YAMPGeneral.h" // gGeneral.GetGameTag() — this path is shared by StF and FV
 
-// Defined in RenderWindow.cpp. The DLL binds descriptor heaps + never sets a root signature on a
-// DIFFERENT command list than the one it draws on, so the draw list has neither. The SetPipelineState
-// hook (which fires on the draw list) re-binds the DLL's own heaps + the PSO's root sig there.
-ID3D12RootSignature*  GetCapturedRootSignature();
-ID3D12DescriptorHeap* GetDllRingCbvSrvHeap();
-ID3D12DescriptorHeap* GetDllRingSamplerHeap();
-// True only for PSOs the DLL created (tracked in RenderWindow.cpp). The command-list vtable is shared
-// with d3d11on12's blit list; gate the StF heap/root-sig injection on this so we don't corrupt the blit.
-bool IsModulePso(void* pso);
-// Defined in RenderWindow.cpp: dump DRED (last GPU op + page-fault resource) on device-removal, and
-// append a line to d3d12_debug.log. Used by the frame-submit path to record a GPU hang once.
-void DumpDredNow();
+// The D3D12 module-interop layer (PSO tracking, captured heaps/root sig, DRED) - used to be
+// re-declared here by hand while the definitions lived in RenderWindow.cpp; both now come
+// from DeviceHooks in this folder.
+#include "DeviceHooks.h"
 
 namespace pxd
 {

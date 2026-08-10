@@ -17,15 +17,6 @@
 #include <vector>
 #include <dxgi1_6.h>
 
-// The StF DLL creates its own large shader-visible descriptor heaps (CBV/SRV/UAV ~1M + SAMPLER 2048)
-// and binds them; PatchGs wires the gs+0x7550 descriptor rings to reference THESE (captured by the
-// device CreateDescriptorHeap hook) so the DLL's root-table GPU handles resolve into the bound heap.
-ID3D12DescriptorHeap* GetDllRingCbvSrvHeap();
-ID3D12DescriptorHeap* GetDllRingSamplerHeap();
-// The DLL never calls SetGraphicsRootSignature; the host must. This is the root sig the PSO was
-// built with, re-bound after each SetPipelineState in the command-list hook.
-ID3D12RootSignature* GetCapturedRootSignature();
-
 // A simple manager for the window handle and the D3D11 device
 class RenderWindow
 {

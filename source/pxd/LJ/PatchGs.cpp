@@ -11,6 +11,7 @@
 
 #include "HostCdevice.h"
 #include "pxd_types.h"
+#include "DeviceHooks.h"
 
 #include "../../DebugLog.h"
 #include "../../YAMPGeneral.h"
