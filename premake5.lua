@@ -12,9 +12,10 @@ project "YAMP"
 	-- block applies to EVERY project in the workspace - once the netplay plugin became a second
 	-- project it started inheriting the whole emulator, so the list moved here where it belongs.
 	files { "source/*.h", "source/*.cpp", "source/resources/*.rc", "source/criware/*", "source/wil/*",
-			"source/imgui/*", "source/Utils/*", "source/input/*", "source/cabinet/*",
+			"source/imgui/*", "source/Utils/*", "source/input/*", "source/cabinet/*", "source/ui/*",
 			"source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
 			"source/net/LinkedCabinet.h", "source/net/Round.h", "source/net/Round.cpp",
+			"source/net/UiNetplay.cpp",
 			"source/pxd/**.h", "source/pxd/**.cpp",
 			"source/third_party/**.h", "source/third_party/**.cpp",
 			"source/m2ftg/**.h", "source/m2ftg/**.cpp",

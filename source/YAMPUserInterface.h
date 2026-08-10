@@ -39,6 +39,10 @@ private:
 	void AssignStfKey(int player, uint32_t action, uint32_t vk);
 	void AssignStfPadButton(int player, uint32_t action, uint32_t button, const std::string& padId);
 	void DrawDebug();
+	// Once-per-frame reconciliation of the emulated board against the settings (debug windows,
+	// both families' HLE hook masks, the pre3 arcade-settings injection). Not UI: it runs
+	// whether or not the settings window is open. Called by Draw() before the F1 gate.
+	void ReconcileEmulatorState();
 	// Per-hook control over the module's HLE ROM patches, for every m2ftg game that has a
 	// hook table - StF (76 hooks), FV (95), VF2 (67), Virtual On (120) and Motor Raid (64).
 	// Self-gating: draws nothing when there is none.
