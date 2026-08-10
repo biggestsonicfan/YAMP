@@ -9,35 +9,7 @@
 #include "wil/resource.h"
 
 #include "YAMPSettings.h"
-
-// TODO: Move
-static std::wstring UTF8ToWchar(std::string_view text)
-{
-	std::wstring result;
-
-	const int count = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-	if ( count != 0 )
-	{
-		result.resize(count);
-		MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), count);
-	}
-
-	return result;
-}
-
-static std::string WcharToUTF8(std::wstring_view text)
-{
-	std::string result;
-
-	const int count = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-	if ( count != 0 )
-	{
-		result.resize(count);
-		WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), count, nullptr, nullptr);
-	}
-
-	return result;
-}
+#include "StringUtil.h"   // UTF8ToWchar / WcharToUTF8, formerly static functions right here
 
 // TODO: Move to YAMP namespace maybe?
 class YAMPGeneral

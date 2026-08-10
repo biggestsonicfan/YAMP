@@ -1,4 +1,5 @@
 #include "TlsClient.h"
+#include "Winsock.h"
 
 #define SECURITY_WIN32
 #include <winsock2.h>
@@ -25,31 +26,7 @@ namespace yampnet
     {
         constexpr uint32_t kIoBuffer = 32 * 1024;
 
-        // TlsClient may be the first thing in the process to touch winsock (the TLS session opens
-        // before any game transport), so it cannot assume someone else called WSAStartup. Ref
-        // counted rather than one-shot so Close()/Connect() cycles do not tear it down under a
-        // still-live UDP socket owned elsewhere in the plugin.
-        int g_wsa_refs = 0;
-
-        bool WsaAcquire()
-        {
-            if (g_wsa_refs++ == 0)
-            {
-                WSADATA data = {};
-                if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
-                {
-                    g_wsa_refs = 0;
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        void WsaRelease()
-        {
-            if (g_wsa_refs > 0 && --g_wsa_refs == 0)
-                WSACleanup();
-        }
+        // The plugin-wide Winsock refcount lives in Winsock.h now (was a private copy here).
 
         int HexVal(char c)
         {

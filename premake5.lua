@@ -6,7 +6,6 @@ project "YAMP"
 	language "C++"
 
 	include "source/VersionInfo.lua"
-	files { "**/MemoryMgr.h", "**/Trampoline.h", "**/Patterns.*" }
 
 	-- YAMP's own sources. These used to live in the shared `workspace "*"` block below, but that
 	-- block applies to EVERY project in the workspace - once the netplay plugin became a second

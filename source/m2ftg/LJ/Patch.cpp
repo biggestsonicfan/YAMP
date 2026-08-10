@@ -1,4 +1,4 @@
-﻿#include "Patch.h"
+#include "Patch.h"
 #include "../SystemSwitches.h" // InstallSystemSwitches (moved out; shared with the YLAD host)
 
 #include "../../pxd/LJ/file_access.h"
@@ -267,19 +267,4 @@ namespace m2ftg
 		}
 
 
-		static void assign_helper_enable_shared_from_this(...)
-		{
-		}
-
-		static float get_frame_speed_pause_stub()
-		{
-			return 1.0f;
-		}
-
-		static void* (*orgVF5AppCtor)(void* obj, int argc, char** argv);
-		static void* VF5AppCtor_arguments(void* obj, int /*argc*/, char** /*argv*/)
-		{
-			return orgVF5AppCtor(obj, __argc, __argv);
-		}
-	}
-
+}

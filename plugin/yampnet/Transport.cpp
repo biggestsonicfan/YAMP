@@ -2,6 +2,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "Winsock.h"
 
 #include <cstdio>
 #include <cstring>
@@ -10,29 +11,7 @@ namespace yampnet
 {
     namespace
     {
-        // Winsock needs process-wide startup. Refcounted so opening/closing transports repeatedly
-        // (host, then join, then host again) does not tear it down under a live socket.
-        int g_wsa_refs = 0;
-
-        bool WsaAcquire()
-        {
-            if (g_wsa_refs++ == 0)
-            {
-                WSADATA data = {};
-                if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
-                {
-                    g_wsa_refs = 0;
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        void WsaRelease()
-        {
-            if (g_wsa_refs > 0 && --g_wsa_refs == 0)
-                WSACleanup();
-        }
+        // The plugin-wide Winsock refcount lives in Winsock.h now (was a private copy here).
     }
 
     UdpTransport::UdpTransport() : m_socket(static_cast<uintptr_t>(INVALID_SOCKET)) {}
