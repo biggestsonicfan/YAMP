@@ -1,42 +1,17 @@
-#include "K2Host.h"
-#include "../../ModuleLoad.h"
+// The cabinet ROLE (VonRole.cpp): the three-encodings table, ApplyCabinetRole (the hook-6
+// immediate patch) and the TEST-driven soft-reset state machine. Split from K2Host.cpp
+// (2026-08-09); VonBoard.h is the shared K2 seam.
+#include "VonBoard.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
-#include <algorithm>
-#include <filesystem>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "ImportSymbols.h"
-
-#include "../../criware/Cri.h"
-#include "../../pxd/LJ/sl.h"            // pxd::sl — the head of the context, and the primitives
-#include "../../pxd/K2/sl.h"            // pxd::K2 — THIS generation's context layout (0xF3C0)
-#include "../../pxd/LJ/sl_internal.h"   // handle_internal_buffer_t (the 8-byte queue node)
-#include "../m2ftg.h"                 // m2ftg_config_t (0x100C) — unchanged in this generation
-#include "../Determinism.h"           // RomFrameCounterAddress / ReadEmulatedRam32
-#include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
-#include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
-#include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
-#include "../../cabinet/Cabinet.h"    // the shared cabinet front panel (pause/coin/assign/switches)
-#include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
-#include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
-#include "../ModuleArgs.h"
-#include "../DisplayModes.h"
-#include "../../input/Input.h"
-#include "../HostUI.h"
+#include "../../pxd/LJ/sl.h"          // pxd:: — the namespace the body opens
+#include "../Debug/HleHooks.h"        // the HLE trap table, disabled by repointing its handlers
+#include "../Determinism.h"           // IsBoardBooted
+#include "../../net/NetPlugin.h"      // net::Logf / net::GetStatus — the room role source
 #include "../../DebugLog.h"
-#include "../../YAMPGeneral.h"
-#include "../../GameVerify.h"
-#include "../../Utils/MemoryMgr.h"       // VP::Patch — protection-aware writes into module .text
-#include "../../Utils/ScopedUnprotect.hpp"
-#include "../../Utils/Trampoline.h"
-#include "../../wil/resource.h"
-
-#include "VonBoard.h"
+#include "../../Utils/MemoryMgr.h"    // VP::Patch — protection-aware writes into module .text
 
 namespace m2ftg
 {

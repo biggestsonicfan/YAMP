@@ -91,7 +91,7 @@ inline bool IsPre3Game()
 // Netplay hangs off the LJ m2ftg host loop, but holding two emulators in lockstep needs the
 // determinism work as well: board reset, host-RNG seeding, the texture-budget pin, and the ROM
 // frame counter the round anchors and desync-checks against. All of it is now reconstructed for
-// Fighting Vipers too (see docs/fv-hle-hooks.md and the DwGame table in DebugWindows.cpp), so
+// Fighting Vipers too (see docs/fv-hle-hooks.md and the DwGame table in Debug/DwGame.h), so
 // both games get the page.
 //
 // FV's RNG needed the one genuinely new piece: it draws from TWO host twisters, not one, and

@@ -9,7 +9,7 @@
 // below; only VF2 is wired up so far.
 //
 // This is a THIRD pxd generation (sl 0xF3C0 / gs 0x202140) and it differs from LJ and YLAD in
-// ways that matter to a host — see K2Host.cpp for the live-captured details:
+// ways that matter to a host — see K2Host.cpp / VonBoard.h for the live-captured details:
 //   * module_main is neither exported nor returned through params; YAMP pattern-scans it.
 //   * module_start is handed ONLY params+0x20 (ICriWare) and params+0x38 (the 0x100C m2ftg
 //     config). No sl/gs/ct module blocks — the module owns its own contexts.

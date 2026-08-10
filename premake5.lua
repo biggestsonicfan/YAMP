@@ -19,7 +19,10 @@ project "YAMP"
 			"source/third_party/**.h", "source/third_party/**.cpp",
 			"source/m2ftg/**.h", "source/m2ftg/**.cpp",
 			"source/pre3/**.h", "source/pre3/**.cpp",
-			"source/vf5fs/**.h", "source/vf5fs/**.cpp" }
+			"source/vf5fs/**.h", "source/vf5fs/**.cpp",
+			-- The .inc hook tables and shared gs blocks are #included, not compiled - list them
+			-- so they show up (and are searchable) in the generated project.
+			"source/pxd/**.inc", "source/m2ftg/**.inc", "source/pre3/**.inc" }
 
 	-- bcrypt: SHA-256 for the arcade module integrity check (source/GameVerify.cpp).
 	-- dinput8/dxguid: the non-XInput half of the controller layer (source/input/DirectInputPad.cpp)
@@ -46,10 +49,13 @@ workspace "*"
 	--   source/pxd/     generation-NEUTRAL only: Imports.h (the pxd::ImportsT container every host
 	--                   instantiates with its own symbol enum) and pxd_shader.h (both gs.h's use it).
 	--   source/pxd/LJ/  Lost-Judgment era (sl 0xF000 / gs 0x388A00 / ct 0x30, DX12 host cdevice) —
-	--                   used by the m2ftg hosts, the LJ VF5FS host and (sl only) the YLAD one.
-	--   source/pxd/Y6/  Yakuza 6 era: its own sl/gs/file_access/async_request/cs_game/sys_util/
-	--                   pxd_types. Moved out of source/vf5fs/Y6/, where it looked like shared VF5FS
-	--                   code — the LJ and YLAD VF5FS hosts include none of it.
+	--                   used by the m2ftg hosts, the LJ VF5FS host and (sl only) the YLAD one. Also
+	--                   the base type layer (pxd_types/file_access/async_request/cs_game/sys_util)
+	--                   and the two gs_shared_*.inc blocks the Y6 generation reuses (2026-08-09).
+	--   source/pxd/Y6/  Yakuza 6 era, de-forked 2026-08-09: only its sl+gs SIBLINGS remain (its own
+	--                   context_t layouts); everything else comes from pxd/LJ. Moved out of
+	--                   source/vf5fs/Y6/, where it looked like shared VF5FS code.
+	--   source/pxd/K2/  Yakuza Kiwami 2 era: sl only (context_t 0xF3C0); reuses pxd/LJ for the rest.
 	-- Hence the pxd globs are recursive now; source/vf5fs/<title>/ holds hosts only.
 	-- source/input = the binding layer EVERY game shares: M2Input (key/pad bindings, read straight
 	-- out of YAMPSettings) and M2Pad (pxd::csl_pad::set_state, the policy that turns those bindings

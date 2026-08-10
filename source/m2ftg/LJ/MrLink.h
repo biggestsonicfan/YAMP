@@ -6,7 +6,7 @@
 // packet per node per frame through a dual-banked DPRAM window, a firmware status block the
 // boot check reads, and a mod-3 alive counter each cabinet watches on its downstream
 // neighbour. Nothing here is lockstep - no barrier, no seed, no determinism requirement -
-// exactly Virtual On's architecture (K2Host.cpp), with one structural difference:
+// exactly Virtual On's architecture (VonLink.cpp), with one structural difference:
 //
 // THE MODULE'S OWN COMM BOARD NEVER RUNS ON THE RETAIL PATH. The mr DLL ships the same
 // comm-board emulation as omg (blocks at 0x741E50, transfer/firmware in FUN_18005c030 /

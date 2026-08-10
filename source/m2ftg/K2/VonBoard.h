@@ -11,9 +11,11 @@
 #include <cstddef>
 #include <cstdint>
 
-// Self-sufficient on purpose: the flag helpers below read gGeneral/YAMPSettings, and without
-// this the header compiled only because every K2 TU happened to include it last.
+// Self-sufficient on purpose: the flag helpers read gGeneral/YAMPSettings and COMM_BANK
+// aliases CommBoard::BANK - without these the header compiled only because every K2 TU
+// happened to include them first.
 #include "../../YAMPGeneral.h"
+#include "../CommBoard/CommBoard.h"
 
 namespace m2ftg
 {

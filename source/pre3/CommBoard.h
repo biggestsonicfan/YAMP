@@ -301,7 +301,7 @@ namespace pre3
 		// SELF-CHECKING, because a wrong offset here would produce plausible numbers rather than
 		// an obvious failure: the vtable pointer at rom+0x588 is compared against the module's own
 		// CXComm vtable before any field is believed. That is the lesson already written next to
-		// RAM_PTR in HleHooks.cpp — validate a memory probe against a known-fixed value before
+		// RAM_PTR in Debug/HleHooks.cpp — validate a memory probe against a known-fixed value before
 		// believing anything it says.
 		struct BoardView
 		{

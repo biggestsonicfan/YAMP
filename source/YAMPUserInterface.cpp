@@ -1,40 +1,7 @@
-﻿#include "YAMPUserInterface.h"
-
-#include "m2ftg/DisplayModes.h"
-
-#include "YAMPGeneral.h"
-#include "GameVerify.h"
-#include "m2ftg/ELF/ElfRom.h"
-#include "m2ftg/Debug/DebugWindows.h"
-#include "m2ftg/Determinism.h"
-#include "m2ftg/Debug/HleHooks.h"
-#include "m2ftg/LJ/LJHost.h"
-#include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round
-#include "net/LinkedCabinet.h" // the shared linked-cabinet report all three games fill
-#include "m2ftg/LJ/MrLink.h"   // Motor Raid's linked cabinet, same questions
-#include "pre3/Debug/HleHooks.h"
-#include "pre3/ArcadeSettings.h"
-#include "pre3/CommBoard.h"
-#include "pre3/Determinism.h"
-
-// Draw isolation, defined in pxd/LJ/HostCdevice.cpp next to the D3D12 draw hooks it drives. Free
-// functions rather than a header, matching how the other host-facing entry points there are used.
-unsigned int ModuleDrawsLastFrameNow();
-void SetModuleDrawLimitNow(unsigned int limit);
-unsigned int ModuleDrawLimitNow();
-void SetModuleSkipDrawNow(unsigned int index);
-unsigned int ModuleSkipDrawNow();
-
-#include "net/NetPlugin.h"
-
-#include "imgui/imgui.h"
-
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-
-#include <algorithm>
-#include <cstdlib>
-
+﻿// The shell of the settings UI - the tab frame, Draw(), the reconciliation tick, apply/
+// discard and the disclaimer. Everything else moved to the per-panel TUs (ui/, m2ftg/, pre3/,
+// net/, input/). All the shared includes, predicates, helpers and the draw-isolation shims
+// live in ui/UiInternal.h, which every panel TU pulls in - this file just uses them.
 #include "ui/UiInternal.h"
 
 // Once-per-frame reconciliation of the emulated board against the settings - the debug

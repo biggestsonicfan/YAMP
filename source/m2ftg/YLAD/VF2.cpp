@@ -352,7 +352,7 @@ namespace m2ftg
 			execute_info.sound_volume = Cabinet::VolumeFraction();
 
 			// Escape toggles the pause menu; while it is open, drive the MODULE'S OWN pause
-			// path (status bit0 — same m2ftg protocol as StF/FV, see StF.cpp's RE notes).
+			// path (status bit0 — same m2ftg protocol as StF/FV, see LJHost.cpp's RE notes (the StF host)).
 			// Locked during netplay - rationale with Cabinet::PauseMenu.
 			s_pause.Poll(netplayLocked);
 			if (s_pause.open)
@@ -410,7 +410,7 @@ namespace m2ftg
 			// at boot. Reproduces headlessly in ~3 minutes by scripting two short TEST presses.
 			Cabinet::PollSystemSwitches(s_pause.open || netplayLocked, SetSystemSwitches);
 
-			// Arcade coin/start dance - Cabinet::CoinStart (see StF.cpp / YLAD method_pre_render
+			// Arcade coin/start dance - Cabinet::CoinStart (see LJHost.cpp / YLAD method_pre_render
 			// for the reference logic; the full write-up is with the class). During a netplay
 			// round it runs AFTER Step() instead - see below.
 			if (!g_isFreeplay && !s_pause.open && !netplayMatch)
