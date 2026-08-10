@@ -293,9 +293,19 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 
 	{
 		const wchar_t* SECTION_NAME = L"VF5FS";
-		m_arcadeMode = GetPrivateProfileIntW(SECTION_NAME, L"ArcadeMode", 0, iniPath.c_str()) != 0;
-		m_circleConfirm = GetPrivateProfileIntW(SECTION_NAME, L"CircleConfirm", 0, iniPath.c_str()) != 0;
-		m_language = GetPrivateProfileIntW(SECTION_NAME, L"Language", 1, iniPath.c_str());
+		// These three were WRITTEN under [Audio] until 2026-08-09 while being READ from
+		// [VF5FS], so every edit silently reverted on the next launch. They save under
+		// [VF5FS] now; the [Audio] value is used as the fallback default so an existing
+		// profile keeps its setting and migrates on its next save.
+		m_arcadeMode = GetPrivateProfileIntW(SECTION_NAME, L"ArcadeMode",
+			GetPrivateProfileIntW(L"Audio", L"ArcadeMode", 0, iniPath.c_str()),
+			iniPath.c_str()) != 0;
+		m_circleConfirm = GetPrivateProfileIntW(SECTION_NAME, L"CircleConfirm",
+			GetPrivateProfileIntW(L"Audio", L"CircleConfirm", 0, iniPath.c_str()),
+			iniPath.c_str()) != 0;
+		m_language = GetPrivateProfileIntW(SECTION_NAME, L"Language",
+			GetPrivateProfileIntW(L"Audio", L"Language", 1, iniPath.c_str()),
+			iniPath.c_str());
 	}
 
 	{
@@ -442,12 +452,15 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"VF5FS";
 		WritePrivateProfileIntW(SECTION_NAME, L"ArcadeMode", m_arcadeMode, iniPath.c_str());
 		WritePrivateProfileIntW(SECTION_NAME, L"CircleConfirm", m_circleConfirm, iniPath.c_str());
+		// Language SAVED under [Audio] until 2026-08-09 while being READ from [VF5FS], so an
+		// edit silently reverted on the next launch; the load side keeps an [Audio] fallback
+		// so an old profile migrates on its next save.
+		WritePrivateProfileIntW(SECTION_NAME, L"Language", m_language, iniPath.c_str());
 	}
 
 	{
 		const wchar_t* SECTION_NAME = L"Audio";
 		WritePrivateProfileIntW(SECTION_NAME, L"Volume", m_volumePercent, iniPath.c_str());
-		WritePrivateProfileIntW(SECTION_NAME, L"Language", m_language, iniPath.c_str());
 	}
 
 	{

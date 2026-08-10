@@ -1,5 +1,6 @@
 // Main.cpp
 #include "YAMPGeneral.h"
+#include "GameRegistry.h"
 #include "RenderWindow.h"
 #include "GameLauncher.h"
 #include "vf5fs/Y6/VF5FS.h"
@@ -74,31 +75,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     // parent games) and boots the chosen one as a child process with these arguments and the
     // game folder as its CWD.
     const wchar_t* cmdLine = GetCommandLineW();
-    // "-vf2-k2" must be tested BEFORE "-vf2", which is a prefix of it (same trap as -vf5fs-lj).
-    const bool runVF2_K2 = wcsstr(cmdLine, L"-vf2-k2") != nullptr;
-    // Kiwami 2's other module, Virtual On ("omg" = Operation Moon Gate). Same host as -vf2-k2.
-    const bool runVON_K2 = wcsstr(cmdLine, L"-von-k2") != nullptr;
-    const bool runVF2 = !runVF2_K2 && wcsstr(cmdLine, L"-vf2") != nullptr;
-    // The two Model 3 games (Like a Dragon Gaiden's pre3 module). "-fv2" must be tested BEFORE
-    // "-fv", which is a prefix of it — the same trap as -vf2-k2 and -vf5fs-lj above, and the one
-    // that would otherwise send Fighting Vipers *2* to the Fighting Vipers host.
-    const bool runFV2 = wcsstr(cmdLine, L"-fv2") != nullptr;
-    const bool runSRC2 = wcsstr(cmdLine, L"-src2") != nullptr;
-    const bool runFV = !runVF2 && !runFV2 && wcsstr(cmdLine, L"-fv") != nullptr;
-    // "-mr-gaiden" must be tested BEFORE "-mr", which is a prefix of it (same trap as -fv2/-fv):
-    // Like a Dragon Gaiden ships its own 2023 rebuild of the Motor Raid module under the same
-    // file name, and the two builds need distinct GameIds so the launcher can tell them apart.
-    const bool runMR_GAIDEN = wcsstr(cmdLine, L"-mr-gaiden") != nullptr;
-    const bool runMR = !runVF2 && !runFV && !runMR_GAIDEN && wcsstr(cmdLine, L"-mr") != nullptr;
-    // Test the LJ and YLAD switches first: both contain "-vf5fs" as a prefix, so the Y6 test
-    // must exclude them.
-    const bool runVF5FS_LJ = !runVF2 && !runFV && !runMR && !runMR_GAIDEN && wcsstr(cmdLine, L"-vf5fs-lj") != nullptr;
-    const bool runVF5FS_YLAD = !runVF2 && !runFV && !runMR && !runVF5FS_LJ
-        && wcsstr(cmdLine, L"-vf5fs-ylad") != nullptr;
-    const bool runVF5FS = !runVF2 && !runFV && !runMR && !runVF5FS_LJ && !runVF5FS_YLAD
-        && wcsstr(cmdLine, L"-vf5fs") != nullptr;
-    const bool runStF = !runVF2 && !runVF2_K2 && !runVON_K2 && !runVF5FS && !runVF5FS_LJ && !runVF5FS_YLAD
-        && !runFV2 && !runSRC2;
+    // Longest-match over the registry's boot switches - the rule the hand-ordered wcsstr chain
+    // that used to live here enforced with five comments about prefix traps ("-vf2-k2" before
+    // "-vf2", "-fv2" before "-fv", "-mr-gaiden" before "-mr", the "-vf5fs-*" pair before
+    // "-vf5fs"). Launcher when no game switch is present.
+    const YAMPGeneral::GameId bootId = GameRegistry::ParseBootArg(cmdLine);
+    const bool runVF2_K2 = bootId == YAMPGeneral::GameId::VF2_K2;
+    const bool runVON_K2 = bootId == YAMPGeneral::GameId::VON_K2;
+    const bool runVF2 = bootId == YAMPGeneral::GameId::VF2;
+    const bool runFV2 = bootId == YAMPGeneral::GameId::FV2;
+    const bool runSRC2 = bootId == YAMPGeneral::GameId::SRC2;
+    const bool runFV = bootId == YAMPGeneral::GameId::FV;
+    const bool runMR_GAIDEN = bootId == YAMPGeneral::GameId::MR_GAIDEN;
+    const bool runMR = bootId == YAMPGeneral::GameId::MR;
+    const bool runVF5FS_LJ = bootId == YAMPGeneral::GameId::VF5FS_LJ;
+    const bool runVF5FS_YLAD = bootId == YAMPGeneral::GameId::VF5FS_YLAD;
+    const bool runVF5FS = bootId == YAMPGeneral::GameId::VF5FS;
+    const bool runStF = bootId == YAMPGeneral::GameId::StF;
 
     // "-frames N": run N frames, then leave the loop normally and shut the module down. For
     // automated smoke tests, so a run ends through the real teardown path instead of being killed
@@ -108,10 +101,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         gGeneral.SetFrameLimit(static_cast<uint32_t>(_wtoi(framesArg + 8)));
     }
 
-    const bool anyGameArg = runVF2 || runVF2_K2 || runVON_K2 || runFV || runMR || runMR_GAIDEN
-        || runVF5FS || runVF5FS_LJ || runVF5FS_YLAD
-        || runFV2 || runSRC2 || wcsstr(cmdLine, L"-stf") != nullptr;
-    if (!anyGameArg) {
+    if (bootId == YAMPGeneral::GameId::Launcher) {
         Launcher::Run(hInstance, nShowCmd);
         ImGui::DestroyContext();
         return 0;
