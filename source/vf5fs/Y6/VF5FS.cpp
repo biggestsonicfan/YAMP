@@ -1,4 +1,5 @@
 #include "VF5FS.h"
+#include "../../ModuleLoad.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -206,50 +207,7 @@ namespace vf5fs
 		static wil::unique_hmodule gameDll;
 		HMODULE vf5fs::Y6::LoadDLL()
 		{
-			// TODO: Clean up
-			{
-				DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
-				auto buf = std::make_unique<wchar_t[]>(dwSize);
-				GetCurrentDirectoryW(dwSize, buf.get());
-				gamePath.assign(buf.get());
-			}
-
-			// Locate the DLL as a FILE first (the CWD, then the "vf5fs" subdirectory): the integrity
-			// check has to run before LoadLibrary, or a module YAMP is about to reject has already
-			// run its DllMain. Yakuza 6 keeps it in <install>/vf5fs/, next to vf5fs_media/.
-			std::filesystem::path dllFile = gamePath / DLL_NAME;
-			if (!std::filesystem::is_regular_file(dllFile))
-			{
-				gamePath.append(L"vf5fs");
-				dllFile = gamePath / DLL_NAME;
-			}
-
-			if (!std::filesystem::is_regular_file(dllFile))
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) + L"!\n\nMake sure that YAMP.exe is located in your Yakuza 6: The Song of Life directory or its \"vf5fs\" subdirectory, next to the DLL file.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-				return nullptr;
-			}
-
-			gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
-
-			// Hard gate: known-good module checksum + an installed copy of Yakuza 6. The old
-			// post-load "reject known old DLLs" timestamp test lived here; those three stamps are
-			// now OUTDATED_TIMESTAMPS in GameVerify.cpp, which keeps the same "update your game"
-			// wording while running BEFORE the module is loaded.
-			if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
-			{
-				return nullptr;
-			}
-
-			gameDll.reset(LoadLibraryW(dllFile.c_str()));
-			if (!gameDll)
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-					L"!\n\nThe file exists but Windows refused to load it.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-			}
-
+			gameDll.reset(LoadModuleDll(DLL_NAME, L"vf5fs", ModuleSearch::CwdThenSubdir, gamePath));
 			return gameDll.get();
 		}
 

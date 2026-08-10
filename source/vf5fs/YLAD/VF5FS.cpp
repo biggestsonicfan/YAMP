@@ -1,4 +1,5 @@
 #include "VF5FS.h"
+#include "../../ModuleLoad.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -458,47 +459,7 @@ namespace vf5fs
 
 		HMODULE LoadDLL()
 		{
-			{
-				DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
-				auto buf = std::make_unique<wchar_t[]>(dwSize);
-				GetCurrentDirectoryW(dwSize, buf.get());
-				gamePath.assign(buf.get());
-			}
-
-			// Locate the DLL as a FILE first: the integrity check has to run before LoadLibrary,
-			// or a module YAMP is about to reject has already run its DllMain.
-			// YLAD keeps it in runtime/media/vf5fs/, next to vf5fs_media/.
-			std::filesystem::path dllFile = gamePath / DLL_NAME;
-			if (!std::filesystem::is_regular_file(dllFile))
-			{
-				gamePath.append(DLL_SUBDIR);
-				dllFile = gamePath / DLL_NAME;
-			}
-
-			if (!std::filesystem::is_regular_file(dllFile))
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-					L"!\n\nMake sure that YAMP.exe is located next to the DLL file, or that its \"" +
-					DLL_SUBDIR + L"\" subdirectory contains it.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-				return nullptr;
-			}
-
-			gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
-
-			// Hard gate: known-good module checksum + an installed copy of Yakuza: Like a Dragon.
-			if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
-			{
-				return nullptr;
-			}
-
-			gameDll.reset(LoadLibraryW(dllFile.c_str()));
-			if (!gameDll)
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-					L"!\n\nThe file exists but Windows refused to load it.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-			}
+			gameDll.reset(LoadModuleDll(DLL_NAME, DLL_SUBDIR, ModuleSearch::CwdThenSubdir, gamePath));
 			return gameDll.get();
 		}
 

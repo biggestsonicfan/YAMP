@@ -1,4 +1,5 @@
 #include "VF2.h"
+#include "../../ModuleLoad.h"
 
 // Virtua Fighter 2 (YLAD "m2ftg" module, DX11) host.
 //
@@ -265,38 +266,8 @@ namespace m2ftg
 
 		HMODULE LoadDLL()
 		{
-			DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
-			auto buf = std::make_unique<wchar_t[]>(dwSize);
-			GetCurrentDirectoryW(dwSize, buf.get());
-			gamePath.assign(buf.get());
-			gamePath /= L"vf2";
-
-			// Locate the DLL as a FILE first: the integrity check has to run before LoadLibrary,
-			// or a module YAMP is about to reject has already run its DllMain.
-			const std::filesystem::path dllFile = gamePath / DLL_NAME;
-			if (!std::filesystem::is_regular_file(dllFile))
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-					L"!\n\nPlace the DLL (with its rom/ and w64/ folders) in the \"vf2\" subdirectory next to YAMP.exe.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-				return nullptr;
-			}
-
-			gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
-
-			// Hard gate: known-good module checksum + an installed copy of Yakuza: Like a Dragon.
-			if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
-			{
-				return nullptr;
-			}
-
-			gameDll.reset(LoadLibraryW(dllFile.c_str()));
-			if (gameDll == nullptr)
-			{
-				const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-					L"!\n\nThe file exists but Windows refused to load it.");
-				MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-			}
+			gameDll.reset(LoadModuleDll(DLL_NAME, L"vf2", ModuleSearch::SubdirOnly, gamePath,
+				L"Place the DLL (with its rom/ and w64/ folders) in the \"vf2\" subdirectory next to YAMP.exe."));
 			return gameDll.get();
 		}
 

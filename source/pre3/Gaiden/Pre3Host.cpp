@@ -1,4 +1,5 @@
 #include "Pre3Host.h"
+#include "../../ModuleLoad.h"
 
 // Defined in pxd/LJ/HostCdevice.cpp — the same four per-frame host duties every LJ-generation
 // DX12 host has. See LJHost.cpp for what each of them fixes; nothing about them is m2ftg-specific.
@@ -451,44 +452,7 @@ namespace pre3
 
 	HMODULE pre3::LoadDLL()
 	{
-		{
-			DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
-			auto buf = std::make_unique<wchar_t[]>(dwSize);
-			GetCurrentDirectoryW(dwSize, buf.get());
-			gamePath.assign(buf.get());
-		}
-
-		std::filesystem::path dllFile = gamePath / DLL_NAME;
-		if (!std::filesystem::is_regular_file(dllFile))
-		{
-			gamePath.append(DLL_SUBDIR);
-			dllFile = gamePath / DLL_NAME;
-		}
-
-		if (!std::filesystem::is_regular_file(dllFile))
-		{
-			const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-				L"!\n\nMake sure that YAMP.exe is located next to the DLL file or its \"" +
-				DLL_SUBDIR + L"\" subdirectory contains it.");
-			MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-			return nullptr;
-		}
-
-		gGeneral.SetDLLName(WcharToUTF8(DLL_NAME));
-
-		if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
-		{
-			return nullptr;
-		}
-
-		gameDll.reset(LoadLibraryW(dllFile.c_str()));
-		if (!gameDll)
-		{
-			const std::wstring str(L"Could not load " + std::wstring(DLL_NAME) +
-				L"!\n\nThe file exists but Windows refused to load it.");
-			MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-		}
-
+		gameDll.reset(LoadModuleDll(DLL_NAME, DLL_SUBDIR, ModuleSearch::CwdThenSubdir, gamePath));
 		return gameDll.get();
 	}
 

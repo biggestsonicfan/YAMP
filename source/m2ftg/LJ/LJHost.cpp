@@ -1,4 +1,5 @@
 #include "LJHost.h"
+#include "../../ModuleLoad.h"
 
 // Defined in HostCdevice.cpp: mark the DLL's per-frame render window so the ResourceBarrier hook
 // only corrects StF's own barrier StateBefore values (not d3d11on12's blit barriers).
@@ -248,51 +249,9 @@ namespace m2ftg
         static wil::unique_hmodule gameDll;
         HMODULE m2ftg::LoadDLL()
         {
-            const GameDesc& game = CurrentGame();
-
-            // TODO: Clean up
-            {
-                DWORD dwSize = GetCurrentDirectoryW(0, nullptr);
-                auto buf = std::make_unique<wchar_t[]>(dwSize);
-                GetCurrentDirectoryW(dwSize, buf.get());
-                gamePath.assign(buf.get());
-            }
-
-            // Locate the DLL as a FILE first (the CWD, then the "stf"/"fv"/"mr" subdirectory):
-            // the integrity check has to run before LoadLibrary, or a module YAMP is about to
-            // reject has already run its DllMain by the time we know what it is.
-            std::filesystem::path dllFile = gamePath / game.dll_name;
-            if (!std::filesystem::is_regular_file(dllFile))
-            {
-                gamePath.append(game.subdir);
-                dllFile = gamePath / game.dll_name;
-            }
-
-            if (!std::filesystem::is_regular_file(dllFile))
-            {
-                const std::wstring str(L"Could not load " + std::wstring(game.dll_name) + L"!\n\nMake sure that YAMP.exe is located next to the DLL file or its \"" + game.subdir + L"\" subdirectory contains it.");
-                MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-                return nullptr;
-            }
-
-            gGeneral.SetDLLName(WcharToUTF8(game.dll_name));
-
-            // Hard gate: the module's SHA-256 must match a build YAMP knows how to patch, and
-            // the parent game must actually be installed. CheckBeforeLoad sets the DLL
-            // timestamp for the About panel and explains whichever check failed to the user.
-            if (!Verify::CheckBeforeLoad(gGeneral.GetGameId(), dllFile))
-            {
-                return nullptr;
-            }
-
-            gameDll.reset(LoadLibraryW(dllFile.c_str()));
-            if (!gameDll)
-            {
-                const std::wstring str(L"Could not load " + std::wstring(game.dll_name) + L"!\n\nThe file exists but Windows refused to load it.");
-                MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-            }
-
-            return gameDll.get();
+        	const GameDesc& game = CurrentGame();
+        	gameDll.reset(LoadModuleDll(game.dll_name, game.subdir, ModuleSearch::CwdThenSubdir, gamePath));
+        	return gameDll.get();
         }
 
         void m2ftg::PreInitialize()
