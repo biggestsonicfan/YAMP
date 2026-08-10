@@ -1,6 +1,6 @@
 #include "NetSession.h"
 
-#include "Debug/DebugWindows.h"   // the determinism helpers + RomFrameCounterAddress()
+#include "Determinism.h"   // the determinism helpers + RomFrameCounterAddress()
 #include "../YAMPGeneral.h"
 #include "../YAMPSettings.h"
 #include "../net/NetPlugin.h"

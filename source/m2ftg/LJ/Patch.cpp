@@ -16,6 +16,7 @@
 #include "../../pxd/LJ/cs_game.h"
 #include "../Debug/HleHooks.h"
 #include "../Debug/DebugWindows.h"
+#include "../Determinism.h"
 
 #include "../ImportSymbols.h"
 #include "../../pxd/Imports.h"

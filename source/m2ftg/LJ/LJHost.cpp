@@ -31,6 +31,7 @@ void AdvanceFrameStampNow();
 #include "../../pxd/LJ/HostCdevice.h"
 #include "../Debug/HleHooks.h"
 #include "../Debug/DebugWindows.h"
+#include "../Determinism.h"
 #include "../NetSession.h"
 #include "../../cabinet/Cabinet.h"
 #include "../SystemSwitches.h"

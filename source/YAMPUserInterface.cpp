@@ -6,6 +6,7 @@
 #include "GameVerify.h"
 #include "m2ftg/ELF/ElfRom.h"
 #include "m2ftg/Debug/DebugWindows.h"
+#include "m2ftg/Determinism.h"
 #include "m2ftg/Debug/HleHooks.h"
 #include "m2ftg/LJ/LJHost.h"
 #include "m2ftg/K2/K2Host.h"   // GetLinkedCabinet - the overlay for a game with no round

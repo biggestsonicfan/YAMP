@@ -16,7 +16,7 @@
 #include "../../pxd/K2/sl.h"            // pxd::K2 — THIS generation's context layout (0xF3C0)
 #include "../../pxd/LJ/sl_internal.h"   // handle_internal_buffer_t (the 8-byte queue node)
 #include "../m2ftg.h"                 // m2ftg_config_t (0x100C) — unchanged in this generation
-#include "../Debug/DebugWindows.h"          // RomFrameCounterAddress / ReadEmulatedRam32
+#include "../Determinism.h"           // RomFrameCounterAddress / ReadEmulatedRam32
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
 #include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
 #include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
