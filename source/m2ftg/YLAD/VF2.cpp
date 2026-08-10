@@ -36,6 +36,7 @@
 #include "../ModuleArgs.h"
 #include "../DisplayModes.h"
 #include "../../pxd/Imports.h"
+#include "../../pxd/GsBringup.h"
 #include "../ImportSymbols.h"
 #include "../HostUI.h" // PollAspectSetting / DrawPauseMenu (shared m2ftg host helpers)
 #include "../../cabinet/Cabinet.h"
@@ -134,31 +135,22 @@ namespace m2ftg
 		//  - shared-symbol slot [5] (g_p_allocator): assumed {[0]=alloc(this,size,align), [1]=free}
 		//  - gs context +0xB0: verified {[1]=alloc(this,size,align,tag), [2]=free?} — the shader
 		//    create FUN_18008d270 calls vtbl+8 with (this, 0x40, 0x10, name)
-		static void* __fastcall HostAlloc(void* /*self*/, size_t size, size_t align)
-		{
-			void* p = _aligned_malloc(size, align != 0 ? align : 16);
-			if (p != nullptr) memset(p, 0, size);
-			return p;
-		}
-		static void __fastcall HostFree(void* /*self*/, void* p)
-		{
-			_aligned_free(p);
-		}
-		static void __fastcall HostAllocNoop(void*) {}
+		// The zero-filling allocator trio is shared (pxd/GsBringup.h); the two vtable ORDERS are
+		// this module's own measured facts (and K2's differ - it frees at slot 3, not 2).
 		static void* s_allocatorVtbl[4] = {
-			reinterpret_cast<void*>(&HostAlloc),
-			reinterpret_cast<void*>(&HostFree),
-			reinterpret_cast<void*>(&HostAllocNoop),
-			reinterpret_cast<void*>(&HostAllocNoop),
+			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),
+			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
 		};
 		static void* s_allocator[2] = { s_allocatorVtbl, nullptr };
 
 		// gs-context allocator (ctx+0xB0): vtbl slot 1 = alloc, slot 2 = free
 		static void* s_gsAllocatorVtbl[4] = {
-			reinterpret_cast<void*>(&HostAllocNoop),
-			reinterpret_cast<void*>(&HostAlloc),
-			reinterpret_cast<void*>(&HostFree),
-			reinterpret_cast<void*>(&HostAllocNoop),
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
+			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),
+			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
 		};
 		static void* s_gsAllocator[2] = { s_gsAllocatorVtbl, nullptr };
 
@@ -179,7 +171,7 @@ namespace m2ftg
 			//   +0x00 IDXGISwapChain*, +0x08 color target obj, +0x10 depth target obj,
 			//   +0x20 packed color dims ((w-1) | (h-1)<<14), +0x40 packed depth dims
 			*reinterpret_cast<void**>(s_swapChain + 0x00) = window.GetSwapChain();
-			const uint32_t packedDims = (1280 - 1) | ((720 - 1) << 14);
+			const uint32_t packedDims = pxd::GsBringup::PackDims(1280, 720);
 			*reinterpret_cast<uint32_t*>(s_swapChain + 0x20) = packedDims;
 			*reinterpret_cast<uint32_t*>(s_swapChain + 0x40) = packedDims;
 
@@ -195,17 +187,10 @@ namespace m2ftg
 			// (FUN_18008d270: `(**(ctx+0xB0) + 8))(obj, 0x40, 0x10, name)`). Ctor leaves it null.
 			*reinterpret_cast<void**>(g_gsContext + 0xB0) = s_gsAllocator;
 
-			// sbgl attaches a shadow-state block to the ID3D11DeviceContext via SetPrivateData
-			// with a pxd GUID (DLL .rdata +0x104a18; bytes embedded below). The render path
-			// (FUN_18008f4b0) does GetPrivateData(guid, 8, &blockPtr) and writes bound-target/
-			// viewport state into the block — normally the host device-start attaches it.
-			{
-				static const GUID kPxdCtxGuid =
-					{ 0xa84b07f7, 0x3bd0, 0x4c4e, { 0x89, 0x90, 0xe9, 0xd5, 0xaf, 0x6e, 0xfb, 0xa2 } };
-				static uint8_t s_ctxShadowState[0x1000]{};
-				void* blockPtr = s_ctxShadowState;
-				window.GetD3D11DeviceContext()->SetPrivateData(kPxdCtxGuid, sizeof(blockPtr), &blockPtr);
-			}
+			// The pxd shadow-state attach (DLL .rdata +0x104a18 holds the GUID; the render path
+			// FUN_18008f4b0 fetches the block and writes bound-target/viewport state into it) -
+			// shared with K2, same GUID bytes. See pxd/GsBringup.h.
+			pxd::GsBringup::AttachCtxShadowState(window.GetD3D11DeviceContext());
 
 			// Handle (instance) tables: 10 x 0x20-byte t_instance_tbl at ctx+0x101718 (the ctor
 			// zeroes exactly 0x101718..0x101858 = 10 tables), LJ order mesh/tex/vs/ps/gs/hs/ds/
@@ -213,17 +198,8 @@ namespace m2ftg
 			// capacity@+0x14 (vs @+0x101758, ps @+0x101778); the bitmap allocator FUN_1800858d0
 			// reads bitmap@+0x08, cursor@+0x18, word-count@+0x1C. Same struct as LJ t_instance_tbl.
 			{
-				struct vf2_instance_tbl
-				{
-					void** tbl;
-					uint64_t* free_tbl;
-					uint32_t status;
-					uint32_t max;
-					uint32_t free_top;
-					uint32_t free_words;
-				};
-				static_assert(sizeof(vf2_instance_tbl) == 0x20);
-
+				// LJ order mesh/tex/vs/ps/gs/hs/ds/cs/gts/fx; seeding is the shared bitmap fill
+				// (pxd/GsBringup.h).
 				static constexpr uint32_t kCaps[10] = {
 					4096,   // mesh
 					32768,  // tex
@@ -236,19 +212,7 @@ namespace m2ftg
 					8192,   // gts
 					8192,   // fx
 				};
-				for (int i = 0; i < 10; i++)
-				{
-					auto* t = reinterpret_cast<vf2_instance_tbl*>(g_gsContext + 0x101718 + i * 0x20);
-					const uint32_t cap = kCaps[i];
-					const uint32_t words = (cap + 63) / 64;
-					t->tbl = new void* [cap]();
-					t->free_tbl = new uint64_t[words];
-					for (uint32_t w = 0; w < words; w++) t->free_tbl[w] = ~0ull;
-					t->status = 0;
-					t->max = cap;
-					t->free_top = 0;
-					t->free_words = words;
-				}
+				pxd::GsBringup::SeedInstanceTables(g_gsContext + 0x101718, kCaps, 10);
 			}
 
 			// Per-texture-id format table at ctx+0x1690: texture create (FUN_180086300) writes
@@ -370,26 +334,13 @@ namespace m2ftg
 			// mp_sbgl_context, +0x20 mp_sbgl_deferred_context, +0x28 mp_cb_pool, +0x30 mp_up_pool —
 			// confirmed by FUN_18008394D passing *(devctx+0x18) as the D3D11 context). Zeroed buffer,
 			// fields mapped as the bring-up progresses.
-			static uint8_t* s_deviceContext = []() {
-				uint8_t* p = new uint8_t[0x40000]();
-				return p;
-			}();
-			// In the DX11 pxd world the sbgl ccontext IS the immediate ID3D11DeviceContext
-			// (Y6 does the same reinterpret_cast in its PatchGs).
-			*reinterpret_cast<void**>(s_deviceContext + 0x18) = window.GetD3D11DeviceContext();
-			// Host-provided render-state block (reset_state_all FUN_180082290 fills defaults at
-			// blk+0x670 etc.; the LJ equivalent lived at devctx+0x12C98, here it's devctx+0x38).
-			// Zeroed => optional callback ptr inside stays null and is skipped.
-			static uint8_t* s_renderStateBlock = new uint8_t[0x8000]();
-			*reinterpret_cast<void**>(s_deviceContext + 0x38) = s_renderStateBlock;
-			// mp_cb_pool (devctx+0x28): size-bucketed lazily-filling buffer table
-			// (FUN_180090660 indexes [bucket*0x20 + sizeclass]*8 and creates buffers on miss via
-			// FUN_18008ef90; +0x08 = live count). A zeroed table self-populates. +0x30 = mp_up_pool,
-			// same treatment.
-			static uint8_t* s_cbPool = new uint8_t[0x40000]();
-			static uint8_t* s_upPool = new uint8_t[0x40000]();
-			*reinterpret_cast<void**>(s_deviceContext + 0x28) = s_cbPool;
-			*reinterpret_cast<void**>(s_deviceContext + 0x30) = s_upPool;
+			// The cgs_device_context stand-in - the shared shape (pxd/GsBringup.h): +0x18 the
+			// immediate context (in the DX11 pxd world the sbgl ccontext IS the immediate
+			// ID3D11DeviceContext; Y6 does the same reinterpret_cast in its PatchGs), +0x28/+0x30
+			// the lazily-filling cb/up pools (FUN_180090660 / FUN_18008ef90), +0x38 the
+			// render-state block reset_state_all FUN_180082290 fills defaults through.
+			static uint8_t* s_deviceContext = nullptr;
+			pxd::GsBringup::EnsureDeviceContextBlock(s_deviceContext, window.GetD3D11DeviceContext());
 
 			PollAspectSetting(window);
 

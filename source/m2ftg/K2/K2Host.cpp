@@ -21,6 +21,7 @@
 #include "../VirtualClock.h"          // the module's timebase, driven by frames not real time
 #include "../Debug/HleHooks.h"              // the HLE trap table, disabled by repointing its handlers
 #include "../CommBoard/CommBoard.h"   // the Model 2 comm board's DPRAM model, shared with MrLink
+#include "../../pxd/GsBringup.h"      // the shared DX11 gs bring-up pieces
 #include "../../cabinet/Cabinet.h"    // the shared cabinet front panel (pause/coin/assign/switches)
 #include "../SystemSwitches.h"        // cabinet TEST / SERVICE on the emulated I/O board
 #include "../../net/NetPlugin.h"      // net::Logf — the diagnostic sink both peers share
@@ -191,20 +192,13 @@ namespace m2ftg
 		uint8_t* g_dllBase = nullptr;
 
 		// times per boot and must stay silent.
-		static void* __fastcall GsAlloc(void* /*self*/, size_t size, size_t align)
-		{
-			void* p = _aligned_malloc(size, align != 0 ? align : 16);
-			if (p != nullptr) memset(p, 0, size);
-			return p;
-		}
-		static void __fastcall GsFree(void* /*self*/, void* p) { _aligned_free(p); }
-		static void __fastcall GsAllocNoop(void*) {}
-
+		// The zero-filling allocator trio is shared (pxd/GsBringup.h); the vtable ORDER is this
+		// module's own measured fact - it frees at slot 3 where the YLAD generation frees at 2.
 		static void* s_gsAllocatorVtbl[4] = {
-			reinterpret_cast<void*>(&GsAllocNoop),   // slot 0
-			reinterpret_cast<void*>(&GsAlloc),       // slot 1 (+0x08) — alloc(this, size, align)
-			reinterpret_cast<void*>(&GsAllocNoop),   // slot 2
-			reinterpret_cast<void*>(&GsFree),        // slot 3 (+0x18) — free(this, ptr)
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),    // slot 0
+			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),    // slot 1 (+0x08) — alloc(this, size, align)
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),    // slot 2
+			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),  // slot 3 (+0x18) — free(this, ptr)
 		};
 		static void* s_gsAllocator[2] = { s_gsAllocatorVtbl, nullptr };
 
@@ -337,29 +331,12 @@ namespace m2ftg
 		{
 			if (g_gsContext == nullptr) return;
 
-			if (s_deviceContext == nullptr) s_deviceContext = new uint8_t[0x40000]();
-			// +0x18 mp_sbgl_context — the RAW ID3D11DeviceContext (immediate). FUN_180093090 hands
-			// exactly this to the render-target setter.
-			*reinterpret_cast<void**>(s_deviceContext + 0x18) = window.GetD3D11DeviceContext();
-			// +0x28 mp_cb_pool / +0x30 mp_up_pool — size-bucketed buffer tables. FUN_18009F1D0
-			// indexes one as `[bucket*0x20 + sizeclass]` (three size classes: <=0x20 inline,
-			// <=0x120 at +0xC02, larger at +0x1802) and lazily creates the D3D11 buffer in an empty
-			// slot, so the table itself only has to exist and start zeroed. Reached on the first
-			// constant-buffer upload of frame 1: a null table faults at DLL+0x9F23C reading
-			// [null + index*8].
-			if (*reinterpret_cast<void**>(s_deviceContext + 0x28) == nullptr)
-			{
-				*reinterpret_cast<void**>(s_deviceContext + 0x28) = new uint8_t[0x40000]();
-				*reinterpret_cast<void**>(s_deviceContext + 0x30) = new uint8_t[0x40000]();
-			}
-			// +0x38 — the render-state block. `reset_state_all` (FUN_180091E40) is called as
-			// `FUN_180091E40(*(devctx + 0x38))` at the end of every device-context reset and writes
-			// straight through it (0x670, 0x3670, 0x3700.., up to 0x4340), so a null here is an
-			// instant AV WRITE at addr=0x670. Same field as the YLAD generation's devctx.
-			if (*reinterpret_cast<void**>(s_deviceContext + 0x38) == nullptr)
-			{
-				*reinterpret_cast<void**>(s_deviceContext + 0x38) = new uint8_t[0x8000]();
-			}
+			// The cgs_device_context stand-in - the shared shape (pxd/GsBringup.h): +0x18 the
+			// immediate context (FUN_180093090 hands exactly this to the render-target setter),
+			// +0x28/+0x30 the lazily-filling cb/up pools (a null table faults at DLL+0x9F23C on
+			// frame 1's first constant-buffer upload), +0x38 the render-state block
+			// (reset_state_all FUN_180091E40 writes through it unconditionally).
+			pxd::GsBringup::EnsureDeviceContextBlock(s_deviceContext, window.GetD3D11DeviceContext());
 
 			// The embedded display sub-object at gs+0xC0 — this generation's cswap_chain. The
 			// render-target setter FUN_18009E1E0 reads it through DAT_1803914E8 (= shared symbol
@@ -370,23 +347,14 @@ namespace m2ftg
 			// are seeded because they become the viewport width/height.
 			uint8_t* sub = g_gsContext + 0xC0;
 			*reinterpret_cast<void**>(sub + 0x00) = window.GetSwapChain();
-			const uint32_t packedDims = (1280 - 1) | ((720 - 1) << 14);
+			const uint32_t packedDims = pxd::GsBringup::PackDims(1280, 720);
 			*reinterpret_cast<uint32_t*>(sub + 0x20) = packedDims;
 			*reinterpret_cast<uint32_t*>(sub + 0x40) = packedDims;
 
-			// sbgl keeps its per-device-context shadow state in a block attached to the
-			// ID3D11DeviceContext with a pxd GUID, and fetches it with
-			// GetPrivateData(guid, 8, &blockPtr) — ID3D11DeviceChild vtable slot 4 (+0x20). The
-			// render-target setter then writes the bound targets and the viewport straight into
-			// that block, so an unattached (null) block is an immediate AV WRITE at DLL+0x9E34E.
-			// In the real game the host's device-start attaches it; here YAMP does.
-			{
-				static const GUID kPxdCtxGuid =
-					{ 0xa84b07f7, 0x3bd0, 0x4c4e, { 0x89, 0x90, 0xe9, 0xd5, 0xaf, 0x6e, 0xfb, 0xa2 } };
-				static uint8_t s_ctxShadowState[0x1000] {};
-				void* blockPtr = s_ctxShadowState;
-				window.GetD3D11DeviceContext()->SetPrivateData(kPxdCtxGuid, sizeof(blockPtr), &blockPtr);
-			}
+			// The pxd shadow-state attach (an unattached block is an immediate AV WRITE at
+			// DLL+0x9E34E when the render-target setter records the viewport) - shared, the GUID
+			// is the same bytes in both DX11 generations. See pxd/GsBringup.h.
+			pxd::GsBringup::AttachCtxShadowState(window.GetD3D11DeviceContext());
 
 			void** p = reinterpret_cast<void**>(g_gsContext + 0x20);
 			p[0] = window.GetD3D11Device();
@@ -415,31 +383,8 @@ namespace m2ftg
 			// siblings use). Capacity is uniform and generous because the per-slot meaning is not
 			// mapped for this generation — YLAD's order (mesh/tex/vs/ps/...) must NOT be assumed.
 			{
-				struct instance_tbl
-				{
-					void** tbl;
-					uint64_t* free_tbl;
-					uint32_t status;
-					uint32_t max;
-					uint32_t free_top;
-					uint32_t free_words;
-				};
-				static_assert(sizeof(instance_tbl) == 0x20);
-
 				constexpr uint32_t kCapacity = 16384;
-				constexpr uint32_t kWords = (kCapacity + 63) / 64;
-				for (int i = 0; i < 10; i++)
-				{
-					auto* t = reinterpret_cast<instance_tbl*>(g_gsContext + 0x1808 + i * 0x20);
-					if (t->tbl != nullptr) continue;   // already built (re-entry safety)
-					t->tbl = new void* [kCapacity]();
-					t->free_tbl = new uint64_t[kWords];
-					for (uint32_t w = 0; w < kWords; w++) t->free_tbl[w] = ~0ull;
-					t->status = 0;
-					t->max = kCapacity;
-					t->free_top = 0;
-					t->free_words = kWords;
-				}
+				pxd::GsBringup::SeedInstanceTablesUniform(g_gsContext + 0x1808, kCapacity, 10);
 				DebugLogFile("[m2ftg::K2] instance tables: 10 x %u entries at gs+0x1808\n", kCapacity);
 			}
 
