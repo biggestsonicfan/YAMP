@@ -213,12 +213,15 @@ namespace pre3
 
 		bool MaskTest(const uint64_t mask[2], size_t index)
 		{
-			return index < 128 && (mask[index >> 6] & (1ull << (index & 63))) != 0;
+			// MAX_COUNT, not 128: drift from the m2ftg copy this API came from (where MAX_COUNT
+			// happens to be 128). The hardcoded bound let MaskSet write bits 64-127 that no
+			// Count()-driven reader ever looks at.
+			return index < MAX_COUNT && (mask[index >> 6] & (1ull << (index & 63))) != 0;
 		}
 
 		void MaskSet(uint64_t mask[2], size_t index, bool disabled)
 		{
-			if (index >= 128) return;
+			if (index >= MAX_COUNT) return;
 			const uint64_t bit = 1ull << (index & 63);
 			if (disabled) mask[index >> 6] |= bit;
 			else          mask[index >> 6] &= ~bit;

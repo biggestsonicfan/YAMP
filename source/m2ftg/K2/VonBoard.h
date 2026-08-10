@@ -11,6 +11,10 @@
 #include <cstddef>
 #include <cstdint>
 
+// Self-sufficient on purpose: the flag helpers below read gGeneral/YAMPSettings, and without
+// this the header compiled only because every K2 TU happened to include it last.
+#include "../../YAMPGeneral.h"
+
 namespace m2ftg
 {
 	namespace K2
