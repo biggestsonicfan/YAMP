@@ -3,6 +3,7 @@
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 #include "../net/NetPlugin.h"
+#include "../net/StateHash.h"
 #include "ArcadeSettings.h"
 #include "Determinism.h"
 
@@ -786,15 +787,9 @@ namespace pre3
 
 		static uint32_t HashBlock(const uint8_t* p, size_t bytes)
 		{
-			// FNV-1a over 32-bit words. Words rather than bytes purely for speed: 8 MB every two
-			// seconds is already the most expensive thing in this file.
-			uint32_t hash = 2166136261u;
-			const auto* words = reinterpret_cast<const uint32_t*>(p);
-			for (size_t i = 0; i < bytes / 4; ++i)
-			{
-				hash = (hash ^ words[i]) * 16777619u;
-			}
-			return hash;
+			// 8 MB every two seconds is already the most expensive thing in this file - the
+			// shared dword hash (net/StateHash.h) is the fast form.
+			return net::Fnv1aWords(p, bytes);
 		}
 
 		// ---- THE CAR PROBE: are the AI cars the same on both cabinets? -----------------------

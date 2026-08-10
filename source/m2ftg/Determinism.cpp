@@ -6,6 +6,7 @@
 #include "../YAMPSettings.h"
 #include "../DebugLog.h"
 #include "../net/NetPlugin.h"
+#include "../net/StateHash.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -376,22 +377,11 @@ uint32_t m2ftg::StateCheckValue()
 			return 0;
 		}
 		const uint8_t* p = ram + game->stateHashBase;
-		// FNV-1a, stepped a DWORD at a time rather than a byte: it only has to be identical on
-		// both peers and sensitive to a changed byte, and the byte-wise form is a serial
-		// xor-multiply chain four times longer for no extra sensitivity. Both peers are x86-64,
-		// so the word load agrees on both without an endian conversion.
-		//
 		// Only the 32-bit RESULT goes on the wire (submit_state_check takes a uint32), so this
 		// costs no bandwidth over the single counter it replaces - it is purely local work, and
-		// it runs once per EMULATED frame, not once per host frame.
-		uint32_t h = 2166136261u;
-		const uint32_t words = game->stateHashLen / 4;
-		const auto* w = reinterpret_cast<const uint32_t*>(p);
-		for (uint32_t i = 0; i < words; ++i)
-		{
-			h = (h ^ w[i]) * 16777619u;
-		}
-		return h;
+		// it runs once per EMULATED frame, not once per host frame. The dword-FNV rationale is
+		// with net::Fnv1aWords.
+		return net::Fnv1aWords(p, game->stateHashLen);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{

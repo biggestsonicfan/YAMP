@@ -15,7 +15,7 @@ project "YAMP"
 			"source/imgui/*", "source/Utils/*", "source/input/*", "source/cabinet/*", "source/ui/*",
 			"source/net/YampNet.h", "source/net/NetPlugin.h", "source/net/NetPlugin.cpp",
 			"source/net/LinkedCabinet.h", "source/net/Round.h", "source/net/Round.cpp",
-			"source/net/UiNetplay.cpp",
+			"source/net/UiNetplay.cpp", "source/net/StateHash.h",
 			"source/pxd/**.h", "source/pxd/**.cpp",
 			"source/third_party/**.h", "source/third_party/**.cpp",
 			"source/m2ftg/**.h", "source/m2ftg/**.cpp",

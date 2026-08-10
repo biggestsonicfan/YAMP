@@ -1,6 +1,7 @@
 #include "Determinism.h"
 #include "BoardVtables.h"
 
+#include "../net/StateHash.h"
 #include "../YAMPGeneral.h"
 #include "../DebugLog.h"
 
@@ -470,7 +471,7 @@ namespace pre3
 		}
 		// FNV-1a's own combining step, so the value on the wire is exactly what one pass over both
 		// regions would have produced - the split below is a diagnostic, not a different canary.
-		const uint32_t h = (((2166136261u ^ cpu) * 16777619u) ^ ram) * 16777619u;
+		const uint32_t h = net::Fnv1aWord(net::Fnv1aWord(net::FNV1A_BASIS, cpu), ram);
 		// A hash that happened to land on zero would read as "no canary" to the caller.
 		return h != 0 ? h : 1u;
 	}
@@ -514,22 +515,22 @@ namespace pre3
 			// Measured on a 400-frame run: the RAM half alone repeats its value for five frames at a
 			// time on a static screen (a 256-byte stride simply does not land on the handful of words
 			// a title screen touches), while the register half came out different on every frame.
-			uint32_t h = 2166136261u;
+			uint32_t h = net::FNV1A_BASIS;
 			if (const auto* cpuObject =
 				*reinterpret_cast<uint8_t* const*>(base + Machine::RVA_CPU_PTR))
 			{
 				const uint8_t* regs = cpuObject + Machine::CPU_REGISTER_FILE;
 				for (size_t off = Machine::REGS_FIRST; off < Machine::REGS_LAST; off += 4)
 				{
-					h = (h ^ *reinterpret_cast<const uint32_t*>(regs + off)) * 16777619u;
+					h = net::Fnv1aWord(h, *reinterpret_cast<const uint32_t*>(regs + off));
 				}
 			}
 			cpu = h;
 
-			h = 2166136261u;
+			h = net::FNV1A_BASIS;
 			for (size_t off = 0; off < Machine::RAM_SIZE; off += Machine::HASH_STRIDE)
 			{
-				h = (h ^ *reinterpret_cast<const uint32_t*>(ramBase + off)) * 16777619u;
+				h = net::Fnv1aWord(h, *reinterpret_cast<const uint32_t*>(ramBase + off));
 			}
 			ram = h;
 			return true;
