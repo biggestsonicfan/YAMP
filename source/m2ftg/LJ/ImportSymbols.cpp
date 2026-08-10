@@ -1,4 +1,5 @@
-﻿#include "../ImportSymbols.h"
+#include "../ImportSymbols.h"
+#include "../../pxd/PatternHelpers.h"
 #include "../../pxd/Imports.h"
 
 #include "../../Utils/Patterns.h"
@@ -8,25 +9,12 @@ using namespace hook::txn;
 
 namespace m2ftg
 {
-		template<typename T = void>
-		static auto get_module_pattern(void* module, std::string_view pattern_string, ptrdiff_t offset = 0)
-		{
-			return pattern(module, std::move(pattern_string)).get_first<T>(offset);
-		}
-
-		static void* immediate(void* addr)
-		{
-			void* val;
-			Memory::ReadOffsetValue(addr, val);
-			return val;
-		}
-
-		static void* immediate8(void* addr)
-		{
-			intptr_t srcAddr = (intptr_t)addr;
-			intptr_t dstAddr = srcAddr + 1 + *(int8_t*)srcAddr;
-			return reinterpret_cast<void*>(dstAddr);
-		}
+		// Pattern resolution: the shared helpers in pxd/PatternHelpers.h, under this
+		// namespace's names so the tables below read unchanged.
+		using pxd::get_module_pattern;
+		using pxd::immediate;
+		using pxd::immediate8;
+		using pxd::immediateImm8;
 
 		Imports BuildSymbolMap(void* dll)
 		{

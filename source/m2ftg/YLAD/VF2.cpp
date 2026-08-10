@@ -1,4 +1,5 @@
 #include "VF2.h"
+#include "../../pxd/PatternHelpers.h"
 #include "../../ModuleLoad.h"
 
 // Virtua Fighter 2 (YLAD "m2ftg" module, DX11) host.
@@ -68,18 +69,12 @@ namespace m2ftg
 
 		// ============================ symbol resolution ============================
 
-		template<typename T = void>
-		static auto get_module_pattern(void* module, std::string_view pattern_string, ptrdiff_t offset = 0)
-		{
-			return hook::txn::pattern(module, std::move(pattern_string)).get_first<T>(offset);
-		}
-
-		static void* immediate(void* addr)
-		{
-			void* val;
-			Memory::ReadOffsetValue(addr, val);
-			return val;
-		}
+		// Pattern resolution: the shared helpers in pxd/PatternHelpers.h, under this
+		// namespace's names so the tables below read unchanged.
+		using pxd::get_module_pattern;
+		using pxd::immediate;
+		using pxd::immediate8;
+		using pxd::immediateImm8;
 
 		// Pattern set verified against vf2-pxd-w64-retail.dll (each match confirmed unique and
 		// resolved to the intended target; addresses in comments are the verified targets).

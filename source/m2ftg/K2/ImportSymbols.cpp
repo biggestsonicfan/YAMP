@@ -1,4 +1,5 @@
 #include "ImportSymbols.h"
+#include "../../pxd/PatternHelpers.h"
 
 #include "../../Utils/Patterns.h"
 #include "../../Utils/MemoryMgr.h"
@@ -11,30 +12,12 @@ namespace m2ftg
 {
 	namespace K2
 	{
-		template<typename T = void>
-		static auto get_module_pattern(void* module, std::string_view pattern_string, ptrdiff_t offset = 0)
-		{
-			return pattern(module, std::move(pattern_string)).get_first<T>(offset);
-		}
-
-		static void* immediate(void* addr)
-		{
-			void* val;
-			Memory::ReadOffsetValue(addr, val);
-			return val;
-		}
-
-		// Same, for a RIP-relative operand whose instruction carries ONE trailing immediate byte
-		// after the disp32 - `CMP byte ptr [rip+disp32], imm8`. RIP is relative to the END of the
-		// instruction, so the imm8 counts. Using the plain immediate() here resolves one byte
-		// SHORT, which would not crash: it would quietly write to the neighbouring byte and leave
-		// the real gate clear, i.e. it would look exactly like "the change did nothing".
-		static void* immediateImm8(void* addr)
-		{
-			void* val;
-			Memory::ReadOffsetValue<1>(addr, val);
-			return val;
-		}
+		// Pattern resolution: the shared helpers in pxd/PatternHelpers.h, under this
+		// namespace's names so the tables below read unchanged.
+		using pxd::get_module_pattern;
+		using pxd::immediate;
+		using pxd::immediate8;
+		using pxd::immediateImm8;
 
 		// Addresses in the comments are for the non-ASLR'd 0x180000000 image of
 		// vf2-pxd-w64-gog_retail.dll, for cross-referencing in Ghidra. BOTH the module DLL and

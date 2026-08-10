@@ -1,4 +1,5 @@
 #include "../ImportSymbols.h"
+#include "../../pxd/PatternHelpers.h"
 #include "../../pxd/Imports.h"
 
 #include "../../Utils/Patterns.h"
@@ -32,18 +33,12 @@ using namespace hook::txn;
 
 namespace pre3
 {
-	template<typename T = void>
-	static auto get_module_pattern(void* module, std::string_view pattern_string, ptrdiff_t offset = 0)
-	{
-		return pattern(module, std::move(pattern_string)).get_first<T>(offset);
-	}
-
-	static void* immediate(void* addr)
-	{
-		void* val;
-		Memory::ReadOffsetValue(addr, val);
-		return val;
-	}
+	// Pattern resolution: the shared helpers in pxd/PatternHelpers.h, under this
+	// namespace's names so the tables below read unchanged.
+	using pxd::get_module_pattern;
+	using pxd::immediate;
+	using pxd::immediate8;
+	using pxd::immediateImm8;
 
 	Imports BuildSymbolMap(void* dll)
 	{
