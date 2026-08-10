@@ -7,7 +7,7 @@
 #include <xmmintrin.h>
 
 #include "../pxd_shader.h"
-#include "pxd_types.h"
+#include "../LJ/pxd_types.h"
 
 class RenderWindow;
 
@@ -15,6 +15,19 @@ namespace vf5fs
 {
 	namespace Y6
 	{
+		// The shared type layer (pxd/LJ/pxd_types.h - the Y6 copy was deleted in the
+		// 2026-08-09 de-fork), under this generation's names.
+		using pxd::spinlock_t;
+		using pxd::rwspinlock_t;
+		using pxd::recursive_rwspinlock_t;
+		using pxd::t_instance_tbl;
+		using pxd::t_fixed_deque;
+		using pxd::t_lockfree_stack;
+		using pxd::t_avl_tree_node;
+		using pxd::t_status_ptr;
+		using pxd::t_lockfree_ptr;
+		using pxd::csl_hash;
+		using pxd::sl::handle_t;
 		enum sbgl_format_t
 		{
 			SBGL_FORMAT_UNKNOWN = 0x0,

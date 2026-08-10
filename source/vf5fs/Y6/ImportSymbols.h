@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../pxd/Imports.h"
+
 namespace vf5fs
 {
 	namespace Y6
@@ -47,6 +49,9 @@ namespace vf5fs
 			DEST_CS_AUTOLOAD_PATCH,
 		};
 
-		class Imports BuildSymbolMap(void* dll);
+		// The generation-neutral container, like every other host (pxd/Y6/Imports.h was a
+		// de-templatized copy of it, deleted in the 2026-08-09 de-fork).
+		using Imports = pxd::ImportsT<ImportSymbol>;
+		Imports BuildSymbolMap(void* dll);
 	}
 }

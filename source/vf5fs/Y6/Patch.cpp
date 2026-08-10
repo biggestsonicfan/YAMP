@@ -1,24 +1,30 @@
 #include "Patch.h"
 
-#include "../../pxd/Y6/file_access.h"
-#include "../../pxd/Y6/pxd_types.h"
-#include "../../pxd/Y6/async_request.h"
+#include "../../pxd/LJ/file_access.h"
+#include "../../pxd/LJ/async_request.h"
 
 #include "../../wil/resource.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/Trampoline.h"
 #include "../../DebugLog.h"
 
-#include "../../pxd/Y6/sys_util.h"
-#include "../../pxd/Y6/cs_game.h"
+#include "../../pxd/LJ/sys_util.h"
+#include "../../pxd/LJ/cs_game.h"
 
 #include "ImportSymbols.h"
-#include "../../pxd/Y6/Imports.h"
 
 namespace vf5fs
 {
 	namespace Y6
 	{
+		// The base layer's implementations, under this generation's names - the Y6 copies of
+		// all of these were deleted in the 2026-08-09 de-fork (see pxd/Y6/sl.h).
+		using pxd::csl_file_access;
+		using pxd::sys_util_check_enable_storage;
+		using pxd::sys_util_start_load_systemdata_task;
+		using pxd::sys_util_start_save_systemdata_task;
+		using pxd::sys_util_is_enter_circle;
+		using pxd::dest_cs_autoload;
 		void PatchSl(sl::context_t* context)
 		{
 			// Populate handle_free_queue

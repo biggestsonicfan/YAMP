@@ -4,7 +4,7 @@
 #include "../../pxd/Y6/sl.h"
 #include "../../pxd/Y6/gs.h"
 
-#include "../../pxd/Y6/Imports.h"
+#include "ImportSymbols.h"
 
 namespace vf5fs
 {

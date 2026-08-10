@@ -8,10 +8,8 @@
 
 #include "../../pxd/Y6/sl.h"
 #include "../../pxd/Y6/gs.h"
-#include "../../pxd/Y6/Imports.h"
 #include "Patch.h"
-#include "../../pxd/Y6/sys_util.h"
-#include "../../pxd/Y6/cs_game.h"
+#include "../../pxd/LJ/cs_game.h"
 
 #include "ImportSymbols.h"
 #include "../../YAMPGeneral.h"
@@ -88,6 +86,25 @@ namespace vf5fs
 		static_assert(offsetof(vf5fs_execute_info_t, assign) == 0x20);
 		static_assert(offsetof(vf5fs_execute_info_t, pad) == 0x30);
 
+		// The Y6 DLL's archive lock takes the HANDLE BY VALUE (this generation's condvar is a
+		// handle to an archive_lock object); the base layer's slots take a POINTER to the lock
+		// word - the LJ/YLAD recursive-spinlock convention the shared file_access speaks
+		// (m2ftg/file_access.cpp passes sl::sync_archive_condvar()). These shims bridge the
+		// two: the shared code hands over the ADDRESS of the handle field, the shim loads the
+		// handle and calls the DLL.
+		static void (*s_archiveWlockY6)(handle_t);
+		static void (*s_archiveWunlockY6)(handle_t);
+		static_assert(sizeof(handle_t) == sizeof(uint32_t),
+			"the shims reload the handle through the uint32_t* the shared code passes");
+		static void ArchiveWlockShim(uint32_t* lock)
+		{
+			s_archiveWlockY6(*reinterpret_cast<handle_t*>(lock));
+		}
+		static void ArchiveWunlockShim(uint32_t* lock)
+		{
+			s_archiveWunlockY6(*reinterpret_cast<handle_t*>(lock));
+		}
+
 		static void ImportFunctions(const Imports& symbols)
 		{
 			auto Import = [&symbols](auto& var, auto symbol)
@@ -95,6 +112,8 @@ namespace vf5fs
 					var = static_cast<std::decay_t<decltype(var)>>(symbols.GetSymbol(symbol));
 				};
 
+			// The sl:: names below alias pxd::sl's inline slots (see pxd/Y6/sl.h), so these
+			// writes arm the SHARED primitives - one set of pointers, whichever host fills it.
 			Import(sl::sm_context, ImportSymbol::SL_CONTEXT_INSTANCE);
 			Import(gs::sm_context, ImportSymbol::GS_CONTEXT_INSTANCE);
 			Import(sl::file_create_internal, ImportSymbol::SL_FILE_CREATE);
@@ -103,13 +122,24 @@ namespace vf5fs
 			Import(sl::file_close, ImportSymbol::SL_FILE_CLOSE);
 			Import(sl::handle_create_internal, ImportSymbol::SL_HANDLE_CREATE);
 			Import(sl::file_handle_destroy, ImportSymbol::SL_FILE_HANDLE_DESTROY);
-			Import(sl::archive_lock_wlock, ImportSymbol::ARCHIVE_LOCK_WLOCK);
-			Import(sl::archive_lock_wunlock, ImportSymbol::ARCHIVE_LOCK_WUNLOCK);
+			Import(s_archiveWlockY6, ImportSymbol::ARCHIVE_LOCK_WLOCK);
+			Import(s_archiveWunlockY6, ImportSymbol::ARCHIVE_LOCK_WUNLOCK);
+			pxd::sl::archive_lock_wlock = &ArchiveWlockShim;
+			pxd::sl::archive_lock_wunlock = &ArchiveWunlockShim;
 			Import(cgs_device_context::reset_state_all_internal, ImportSymbol::DEVICE_CONTEXT_RESET_STATE_ALL);
 			Import(gs::vb_create, ImportSymbol::VB_CREATE);
 			Import(gs::ib_create, ImportSymbol::IB_CREATE);
-			Import(shift_next_mode, ImportSymbol::SHIFT_NEXT_MODE);
-			Import(shift_next_mode_sub, ImportSymbol::SHIFT_NEXT_MODE_SUB);
+			Import(pxd::shift_next_mode, ImportSymbol::SHIFT_NEXT_MODE);
+			Import(pxd::shift_next_mode_sub, ImportSymbol::SHIFT_NEXT_MODE_SUB);
+
+			// Publish the context to the BASE layer. The head of the Y6 context is
+			// field-compatible with pxd::sl::context_t (asserted in pxd/Y6/sl.h), which is all
+			// the shared primitives read; the archive condvar, whose position and TYPE are this
+			// generation's own, goes through the override pointer (see pxd/LJ/sl.h) so the
+			// shared file_access locks the right word.
+			pxd::sl::sm_context = reinterpret_cast<pxd::sl::context_t*>(sl::sm_context);
+			pxd::sl::p_sync_archive_condvar =
+				reinterpret_cast<uint32_t*>(&sl::sm_context->sync_archive_condvar);
 		}
 
 		static void PrefillVariables(const Imports& symbols, const RenderWindow& window)

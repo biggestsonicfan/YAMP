@@ -1,163 +1,74 @@
 #pragma once
 
-#include <cstdint>
-#include <cstddef>
+// The Yakuza 6 generation of the pxd sl layer, DE-FORKED 2026-08-09. This folder used to be a
+// full copy of the base layer (pxd/LJ) predating the K2 rule - "the primitives are
+// byte-identical to the Lost Judgment ones, so reuse them rather than cloning" - and the copy
+// had drifted BEHIND the base (async Open/Create still unimplemented, the t_fixed_deque
+// reserve fix missing). Everything byte-identical now comes FROM the base; what remains here
+// is genuinely this generation's own, each divergence measured:
+//
+//   * sl::context_t - the Y6 layout: handle_free_queue @0x600 (base 0x6C0), pool sync @0x1B40,
+//     file_handle_pool @0x1B48, and sync_archive_condvar @0x1B80 as a HANDLE to an
+//     archive_lock object. LJ/YLAD later replaced that handle with a recursive spinlock WORD
+//     (@0x1C20), which is why pxd::sl::archive_lock_wlock takes uint32_t* - the Y6 host
+//     therefore imports its DLL's handle-taking wlock/wunlock through value shims (VF5FS.cpp)
+//     and points pxd::sl::p_sync_archive_condvar at its handle field.
+//
+// The HEAD of the context (through p_archive_async_request @0x120) matches the base
+// field-for-field - asserted on both sides - which is what lets the Y6 host set
+// pxd::sl::sm_context to this context and every shared primitive keep working: the K2
+// pattern, applied to the generation that predates it.
+//
+// csl_pad is the base's now, which also retires this generation's private raw-XInput +
+// hardcoded-keyboard set_state: Y6 input goes through the shared binding layer
+// (source/input) like every other host.
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-
-#include "pxd_types.h"
-#include "sl_internal.h"
+#include "../LJ/sl.h"
 
 namespace vf5fs
 {
 	namespace Y6
 	{
-		class isl_file_access;
-		class csl_file_access_archive;
+		using pxd::csl_pad;
+		using pxd::sl::handle_t;
+		using pxd::spinlock_t;
+		using pxd::rwspinlock_t;
+		using pxd::sl::mutex_t;
+		using pxd::t_locked_queue;
+		using pxd::t_fixed_deque;
+		using pxd::isl_file_access;
+		using pxd::csl_file_access_archive;
+		using pxd::csl_file_async_request;
 
-		// sl definitions for Yakuza 6
-		class csl_file_async_request;
-
-		struct csl_pad
+		namespace sl
 		{
-		public:
-			void set_state(unsigned int index);
+			// The shared machinery, aliased so the Y6 host still reads as `sl::...` - same
+			// names, ONE implementation (and one set of import slots: writing through these
+			// aliases writes pxd::sl's pointers, which is the point).
+			using pxd::sl::handle_create;
+			using pxd::sl::handle_create_internal;
+			using pxd::sl::semaphore_create;
+			using pxd::sl::thread_create;
+			using pxd::sl::file_open;
+			using pxd::sl::file_create;
+			using pxd::sl::file_open_internal;
+			using pxd::sl::file_create_internal;
+			using pxd::sl::file_read;
+			using pxd::sl::file_close;
+			using pxd::sl::file_write;
+			using pxd::sl::file_handle_destroy;
+			using pxd::sl::file_handle_internal_t;
+			using pxd::sl::handle_internal_buffer_t;
+			using pxd::sl::export_context_t;
+			using pxd::sl::semaphore_internal_t;
+			using pxd::sl::thread_internal_t;
+			using pxd::sl::archive_lock;
+			using pxd::sl::file_handle_event;
+			using pxd::sl::handle_instance;
+			using pxd::sl::file_handle_instance;
+			using pxd::sl::semaphore_handle_instance;
 
-			unsigned int m_now;
-			unsigned int m_push;
-			unsigned int m_pull;
-			unsigned int m_prev;
-			float m_x1;
-			float m_y1;
-			float m_x2;
-			float m_y2;
-			int m_button_frame[32];
-			uint8_t m_buttons[32];
-			uint8_t m_prev_buttons[32];
-			unsigned int m_port;
-			int m_user_id;
-			bool m_is_connected;
-			bool m_is_remote;
-			std::byte gap[132];
-		};
-		static_assert(sizeof(csl_pad) == 0x170);
-
-		namespace sl {
-
-			enum BUTTON
-			{
-				BUTTON_A = 0x0,
-				BUTTON_B = 0x1,
-				BUTTON_X = 0x2,
-				BUTTON_Y = 0x3,
-				BUTTON_LB = 0x4,
-				BUTTON_RB = 0x5,
-				BUTTON_LT = 0x6,
-				BUTTON_RT = 0x7,
-				BUTTON_START = 0x8,
-				BUTTON_BACK = 0x9,
-				BUTTON_L_THUMB = 0xA,
-				BUTTON_R_THUMB = 0xB,
-				BUTTON_UP = 0xC,
-				BUTTON_DOWN = 0xD,
-				BUTTON_LEFT = 0xE,
-				BUTTON_RIGHT = 0xF,
-				BUTTON_L_UP = 0x10,
-				BUTTON_L_DOWN = 0x11,
-				BUTTON_L_LEFT = 0x12,
-				BUTTON_L_RIGHT = 0x13,
-				BUTTON_R_UP = 0x14,
-				BUTTON_R_DOWN = 0x15,
-				BUTTON_R_LEFT = 0x16,
-				BUTTON_R_RIGHT = 0x17,
-				BUTTON_ALL_UP = 0x18,
-				BUTTON_ALL_DOWN = 0x19,
-				BUTTON_ALL_LEFT = 0x1A,
-				BUTTON_ALL_RIGHT = 0x1B,
-				BUTTON_DA_UP = 0x1C,
-				BUTTON_DA_DOWN = 0x1D,
-				BUTTON_DA_LEFT = 0x1E,
-				BUTTON_DA_RIGHT = 0x1F,
-				BUTTON_MAX = 0x20,
-				BUTTON_UNKNOWN = 0xFF,
-				BUTTON_FORCE_32BIT = 0x7FFFFFFF,
-			};
-
-			// Imported function
-			extern handle_t* (*handle_create_internal)(handle_t* obj, void* ptr, uint32_t type);
-			handle_t handle_create(void* ptr, uint32_t type);
-
-			handle_t semaphore_create(uint32_t initialCount);
-			handle_t thread_create(uint32_t(*p_routine)(uint64_t), uint64_t arg, const char* name);
-
-			inline handle_t* (*file_open_internal)(handle_t* obj, const char* in_sz_file_path);
-			inline handle_t* (*file_create_internal)(handle_t* obj, const char* in_sz_file_path);
-			handle_t file_open(const char* in_sz_file_path);
-			handle_t file_create(const char* in_sz_file_path);
-
-			inline int64_t(*file_read)(handle_t h_file, void* p_buffer, unsigned int read_size);
-			inline int (*file_close)(handle_t h_file);
-			int64_t file_write(handle_t h_file, const void* p_buffer, unsigned int write_size);
-
-			struct alignas(16) file_handle_internal_t : public file_handle_t
-			{
-				volatile unsigned int m_flags;
-				unsigned int m_buffer_size;
-				unsigned int m_archive_file_no;
-				unsigned int m_error_code;
-				handle_t m_async_event;
-				handle_t m_h_basefile;
-				unsigned __int64 m_basefile_offset;
-				void* mp_buffer;
-				void* mp_cache; // TODO: csl_filecache_name
-				uint64_t m_read_offset;
-				uint64_t m_real_file_size;
-				void (*mp_callback_func)(handle_t, unsigned int, void*);
-				void* mp_callback_param;
-				volatile uint64_t m_callback_execute_thread;
-				FILE_ASYNC_METHOD m_callback_method;
-				unsigned int m_req_item_index;
-				unsigned int m_last_async_status;
-				rwspinlock_t m_locked;
-				file_handle_internal_t* mp_link;
-
-				void begin_async_request();
-				void end_async_request();
-				void callback(FILE_ASYNC_METHOD type, uint32_t status);
-
-			public:
-				void _afterConstruct();
-			};
-			static_assert(sizeof(file_handle_internal_t) == 0x4D0);
-			static_assert(offsetof(file_handle_internal_t, m_buffer_size) == 1116);
-
-			inline void (*file_handle_destroy)(sl::file_handle_internal_t* p_handle);
-
-			struct export_context_t
-			{
-				size_t size_of_struct;
-				void* p_context;
-			};
-
-			struct alignas(16) semaphore_internal_t
-			{
-				uint32_t tag_id = 0x4D455348;
-				void* h_semaphore;
-			};
-
-			struct alignas(16) thread_internal_t
-			{
-				uint32_t tag_id = 0x44525448;
-				char sz_name[28];
-				void* h_thread;
-				uint64_t thread_id;
-				uint64_t arg;
-				uint32_t(*p_routine)(uint64_t arg);
-			};
-			static_assert(sizeof(thread_internal_t) == 0x40);
-
+			// This generation's own context layout - see the header comment for what moved.
 			struct context_t
 			{
 				uint32_t tag_id;
@@ -176,8 +87,8 @@ namespace vf5fs
 				double count_per_tick;
 				union
 				{
-					handle_internal_buffer_t* p_handle_buffer;
-					handle_internal_t* p_handle_tbl;
+					pxd::sl::handle_internal_buffer_t* p_handle_buffer;
+					pxd::sl::handle_internal_t* p_handle_tbl;
 				} handles;
 				uint32_t handle_max;
 				uint32_t file_handle_max;
@@ -197,7 +108,8 @@ namespace vf5fs
 				std::byte gap4[32];
 				handle_t sync_archive_condvar;
 			};
-			// Validate important offsets
+			// Validate important offsets. The HEAD (through 0x120) matches pxd::sl::context_t
+			// on purpose - the shared primitives depend on it; the TAIL is this generation's.
 			static_assert(offsetof(context_t, handles) == 0x70);
 			static_assert(offsetof(context_t, p_file_access) == 0x90);
 			static_assert(offsetof(context_t, p_file_async_request) == 0x98);
@@ -207,71 +119,13 @@ namespace vf5fs
 			static_assert(offsetof(context_t, sync_file_handle_pool) == 0x1B40);
 			static_assert(offsetof(context_t, file_handle_pool) == 0x1B48);
 			static_assert(offsetof(context_t, sync_archive_condvar) == 0x1B80);
+			static_assert(offsetof(pxd::sl::context_t, handles) == offsetof(context_t, handles));
+			static_assert(offsetof(pxd::sl::context_t, p_archive_async_request)
+				== offsetof(context_t, p_archive_async_request));
 
-			// TODO: Consider changing this to a pointer to real sm_context
+			// The Y6-typed view of the running context. The same object is also published as
+			// pxd::sl::sm_context (cast; head-compatible) so the shared primitives can read it.
 			extern context_t* sm_context;
-
-			// Custom types
-			struct archive_lock
-			{
-				uint32_t tag_id = 0x4C575248;
-				handle_t eventHandle1;
-				handle_t eventHandle2;
-				uint32_t unk1 = 0;
-				uint32_t unk2 = 0;
-				uint32_t unk3 = 0;
-				uint32_t unk4 = 0;
-				sl::mutex_t critSec1;
-				sl::mutex_t critSec2;
-
-			public:
-				void _afterConstruct();
-			};
-			static_assert(sizeof(archive_lock) == 0x80);
-			static_assert(offsetof(archive_lock, critSec1) == 32);
-			static_assert(offsetof(archive_lock, critSec2) == 80);
-
-			struct file_handle_event
-			{
-				void* gap;
-				HANDLE eventHandle;
-
-			public:
-				void _afterConstruct();
-			};
-			static_assert(sizeof(file_handle_event) == 16);
-
-			// Y:LAD changed this to a recursive_rwspinlock
-			extern void (*archive_lock_wlock)(handle_t handle);
-			extern void (*archive_lock_wunlock)(handle_t handle);
-
-
-			template<typename T>
-			inline T* handle_instance(handle_t handle, uint32_t type)
-			{
-				T* result = nullptr;
-				if (handle.h.data.m_bank < sm_context->handle_max)
-				{
-					const handle_internal_t& internalHandle = sm_context->handles.p_handle_tbl[handle.h.data.m_bank];
-					if (internalHandle.intern.data.m_serial == handle.h.data.m_serial && internalHandle.intern.data.m_type == type)
-					{
-						result = reinterpret_cast<T*>(internalHandle.intern.data.m_ptr << 4);
-					}
-				}
-
-				return result;
-			}
-
-			inline file_handle_internal_t* file_handle_instance(handle_t handle)
-			{
-				return handle_instance<file_handle_internal_t>(handle, 5);
-			}
-
-			inline semaphore_internal_t* semaphore_handle_instance(handle_t handle)
-			{
-				return handle_instance<semaphore_internal_t>(handle, 2);
-			}
-
-		};
+		}
 	}
 }
