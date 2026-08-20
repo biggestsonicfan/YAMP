@@ -752,9 +752,19 @@ namespace m2ftg
 			// pre-compose, and 3 is the cabinet's actual control set. Choosing 3 means a player can
 			// produce every stick position, which is the difference between playing the game and
 			// operating a shortcut menu.
+			//
+			// WHICH of the five is now the player's choice ([VirtualOn] ControlScheme, settings
+			// page "Control type") - the beginner gestures are a legitimate way to play, and the
+			// module re-latches this byte every frame, so the pick applies live. Clamped here as
+			// well as at ini load, because an index past the table's five entries decodes every
+			// pad through the pointer data that follows it - the original "no input at all" bug.
 			if (gGeneral.GetGameId() == YAMPGeneral::GameId::VON_K2)
 			{
-				execute_info.assign[0][4] = 3;
+				const auto* settings = gGeneral.GetSettings();
+				const uint32_t scheme =
+					settings != nullptr && settings->m_vonControlScheme <= 4
+						? settings->m_vonControlScheme : 3;
+				execute_info.assign[0][4] = static_cast<unsigned char>(scheme);
 			}
 
 			const bool advanceFrame = true;

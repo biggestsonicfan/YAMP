@@ -276,6 +276,50 @@ void YAMPUserInterface::DrawGameStF()
 		// is_disable_pepsi. Removed 2026-08-02: the module never reads that byte, so the option
 		// did nothing at all. See m2ftg.h's config map at +0x08 for the evidence.
 	}
+
+	// Virtual On's own pad-to-twin-stick mapping. The module ships five schemes and latches the
+	// selection every frame from execute_info's assign[0][4] byte, so the choice applies live -
+	// see the frame-loop note in K2Host.cpp for the per-entry decode. Order and numbering are the
+	// module's own table; renumbering here would misdocument what the byte actually selects.
+	if (gGeneral.GetGameId() == YAMPGeneral::GameId::VON_K2)
+	{
+		static const char* const SCHEME_NAMES[] = {
+			"Type 1 - button gestures (beginner)",
+			"Type 2 - button gestures (beginner)",
+			"Type 3 - partial sticks",
+			"Type 4 - full twin-stick",
+			"Type 5 - partial sticks",
+		};
+		const uint32_t current = m_vonControlScheme < std::size(SCHEME_NAMES) ? m_vonControlScheme : 3;
+		if (ImGui::BeginCombo("Control type", SCHEME_NAMES[current]))
+		{
+			for (uint32_t index = 0; index < std::size(SCHEME_NAMES); index++)
+			{
+				const bool isSelected = index == current;
+				if (ImGui::Selectable(SCHEME_NAMES[index], isSelected))
+				{
+					m_pageModified = true;
+					m_vonControlScheme = index;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip(
+				"Which of the module's five pad mappings drives the cabinet's twin levers.\n"
+				"Applies immediately - switch mid-game to compare them.\n\n"
+				"Types 1/2: face buttons and D-pad trigger pre-composed two-stick gestures\n"
+				"(both inward = crouch, both outward = jump, turbos on the buttons). Easy to\n"
+				"play, but only the gestures someone chose to pre-compose are reachable.\n"
+				"Type 4: every stick direction is discrete - D-pad drives the left lever, face\n"
+				"buttons the right, shoulders the triggers and turbos. The cabinet's actual\n"
+				"control set: harder, but every stick position can be produced.\n"
+				"Types 3/5: partial mappings - most directions unrouted in the module's table.");
+		}
+	}
 }
 
 

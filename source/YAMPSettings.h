@@ -88,6 +88,14 @@ public:
 	// (A DisablePepsi switch used to live here; the module never read it — see m2ftg.h +0x08.)
 	bool m_vf2Version20 = false;
 
+	// Virtual On (Kiwami 2 "omg" module) — which of the module's five pad-to-twin-stick control
+	// schemes to play with. The module reads execute_info+0x15E4 (assign[0][4]) as an index into
+	// its own 0xC0-byte mapping table at DLL+0x12ABB0 EVERY frame, so this applies live. 0-4;
+	// 3 is the full discrete twin-stick mapping (the cabinet's actual control set), 0/1 are the
+	// beginner schemes where one button expands into a pre-composed two-stick gesture. See the
+	// assign[0][4] note in K2Host's frame loop for the per-entry decode.
+	uint32_t m_vonControlScheme = 3;
+
 	// Debug settings
 	bool m_dontApplyPatches = false;
 	bool m_useD3DDebugLayer = false;

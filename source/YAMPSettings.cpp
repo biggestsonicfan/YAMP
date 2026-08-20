@@ -385,6 +385,20 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		const wchar_t* SECTION_NAME = L"VF2";
 		m_vf2Version20 = GetPrivateProfileIntW(SECTION_NAME, L"Version20", m_vf2Version20, iniPath.c_str()) != 0;
 	}
+
+	{
+		// Clamped rather than trusted: the module's mapping table has exactly five entries, and
+		// entry 5 onwards is unrelated pointer data - an out-of-range index decodes every pad
+		// through garbage, which presents as "no input works at all" (the original assign[0][4]
+		// bug, see K2Host).
+		const wchar_t* SECTION_NAME = L"VirtualOn";
+		m_vonControlScheme = GetPrivateProfileIntW(SECTION_NAME, L"ControlScheme",
+			m_vonControlScheme, iniPath.c_str());
+		if (m_vonControlScheme > 4)
+		{
+			m_vonControlScheme = 3;
+		}
+	}
 }
 
 void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
@@ -503,5 +517,10 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"VF2";
 		WritePrivateProfileIntW(SECTION_NAME, L"Version20", m_vf2Version20, iniPath.c_str());
+	}
+
+	{
+		const wchar_t* SECTION_NAME = L"VirtualOn";
+		WritePrivateProfileIntW(SECTION_NAME, L"ControlScheme", m_vonControlScheme, iniPath.c_str());
 	}
 }

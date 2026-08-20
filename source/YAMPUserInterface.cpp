@@ -294,6 +294,7 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	}
 
 	m_vf2Version20 = settings->m_vf2Version20;
+	m_vonControlScheme = settings->m_vonControlScheme;
 
 	// Netplay: settings hold std::strings, the page edits fixed buffers (no std::string InputText
 	// in this ImGui build), so the two are copied across at the page's edges.
@@ -603,6 +604,10 @@ void YAMPUserInterface::ApplySettings()
 
 	// Consumed by module_start (config.is_vf20), hence the restart warning.
 	settings->m_vf2Version20 = m_vf2Version20;
+
+	// Re-read by the K2 frame loop every frame (the module latches the scheme byte per frame
+	// too), so it applies live - deliberately absent from the needsRestart test above.
+	settings->m_vonControlScheme = m_vonControlScheme;
 
 	// Netplay: read when a session connects and when a round starts, so no restart is needed —
 	// which is why none of these appear in the needsRestart test above.
