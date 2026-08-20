@@ -496,8 +496,10 @@ namespace dwdbg
 		switch (gGeneral.GetGameId())
 		{
 		// Sonic the Fighters ships in two titles and every RVA in the descriptor differs between
-		// the two module builds, so this picks by BUILD as well as by game.
-		case YAMPGeneral::GameId::StF: return m2ftg::IsGaidenBuild() ? &DW_STF_GAIDEN : &DW_STF;
+		// the two module builds, so this picks by BUILD as well as by game. The GameId says only
+		// which install the launcher offered; IsGaidenBuild() is what reads the loaded DLL.
+		case YAMPGeneral::GameId::StF:
+		case YAMPGeneral::GameId::StF_GAIDEN: return m2ftg::IsGaidenBuild() ? &DW_STF_GAIDEN : &DW_STF;
 		case YAMPGeneral::GameId::FV:  return &DW_FV;
 		case YAMPGeneral::GameId::VF2: return &DW_VF2;
 		case YAMPGeneral::GameId::VON_K2: return &DW_OMG;

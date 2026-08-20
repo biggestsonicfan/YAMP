@@ -42,6 +42,13 @@ public:
 		            // launcher can tell the two builds apart — without it, whichever install
 		            // the search found first decided the "Motor Raid" verdict, and a Gaiden
 		            // copy blocked the Lost Judgment one as an unknown build.
+		StF_GAIDEN, // ...and the same story for Sonic the Fighters, which Like a Dragon Gaiden
+		            // also rebuilt. The two ids exist for the LAUNCHER: each one owns the hash
+		            // table and the parent-title check for ITS build, so the two installs list
+		            // as two rows and neither blocks the other. At RUNTIME they are one game —
+		            // byte-identical ROM and assets, one settings section, one save file, one
+		            // hook table — so ask IsSonicTheFighters() rather than comparing to StF,
+		            // and which BUILD is loaded stays m2ftg::IsGaidenBuild()'s question.
 		Launcher,
 	};
 
@@ -62,6 +69,15 @@ public:
 
 	GameId GetGameId() const { return m_gameId; }
 	void SetGameId(GameId id) { m_gameId = id; }
+
+	// "Is the running game Sonic the Fighters?", whichever title's module build it came out of.
+	// Every per-game fact about StF — the ROM, the 76 HLE hooks, the DAMAGE assignment, the ini
+	// keys, the debug menu — is true of both builds, so this is the test those sites want; only
+	// the launcher's verification tables and the RVA tables (via IsGaidenBuild) care which.
+	bool IsSonicTheFighters() const
+	{
+		return m_gameId == GameId::StF || m_gameId == GameId::StF_GAIDEN;
+	}
 
 	// Optional "-frames N" run limit: after N frames a host leaves its loop NORMALLY and shuts the
 	// module down, instead of the run being ended by killing the process. Zero means unlimited (the

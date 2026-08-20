@@ -262,7 +262,11 @@ namespace
 	{
 		switch (gGeneral.GetGameId())
 		{
-		case YAMPGeneral::GameId::StF: return &GAME_STF;
+		// One hook SET for both Sonic the Fighters builds - all 76 records have identical
+		// romOffsets in the same order - with CurrentBuildRvas below picking where the table
+		// lives in whichever DLL is loaded.
+		case YAMPGeneral::GameId::StF:
+		case YAMPGeneral::GameId::StF_GAIDEN: return &GAME_STF;
 		case YAMPGeneral::GameId::FV:  return &GAME_FV;
 		case YAMPGeneral::GameId::VF2: return &GAME_VF2;
 		case YAMPGeneral::GameId::VON_K2: return &GAME_VON;

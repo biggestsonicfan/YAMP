@@ -208,7 +208,11 @@ namespace
 		ImGui::Separator();
 		ImGui::TextUnformatted("DISASM (live IP)");
 
-		uint8_t* ctx = booted ? *reinterpret_cast<uint8_t**>(base + DW_STF.rvaCpuCtxPtr) : nullptr;
+		// Through the running build's descriptor: the CPU-context pointer sits at a different RVA
+		// in Like a Dragon Gaiden's rebuild of the module (0x596320 vs 0x58A960).
+		const DwGame* game = CurrentDw();
+		uint8_t* ctx = (booted && game != nullptr)
+			? *reinterpret_cast<uint8_t**>(base + game->rvaCpuCtxPtr) : nullptr;
 		uint32_t ip = 0;
 		if (ctx == nullptr || !CurrentI960Ip(ctx, ip))
 		{
@@ -236,7 +240,9 @@ namespace
 			return;
 		}
 
-		uint8_t* ctx = *reinterpret_cast<uint8_t**>(base + DW_STF.rvaCpuCtxPtr);
+		const DwGame* game = CurrentDw();
+		uint8_t* ctx = game != nullptr
+			? *reinterpret_cast<uint8_t**>(base + game->rvaCpuCtxPtr) : nullptr;
 		if (ctx == nullptr)
 		{
 			ImGui::TextDisabled("No CPU context.");
@@ -516,7 +522,7 @@ uint32_t m2ftg::I960Profile::Bucket(size_t index)
 
 void m2ftg::DrawDebugWindows()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	if (!gGeneral.IsSonicTheFighters())
 	{
 		return;
 	}
@@ -531,8 +537,13 @@ void m2ftg::DrawDebugWindows()
 		return;
 	}
 
+	const DwGame* game = CurrentDw();
+	if (game == nullptr)
+	{
+		return;
+	}
 	const auto* root = reinterpret_cast<const DwMenuWindow*>(base + RootWindowRva());
-	const uint32_t bootState = *reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState);
+	const uint32_t bootState = *reinterpret_cast<const uint32_t*>(base + game->rvaBootState);
 	const bool booted = bootState == 2;
 
 	ImGui::SetNextWindowPos({ 10.0f, 40.0f }, ImGuiCond_FirstUseEver);
@@ -573,7 +584,7 @@ void m2ftg::DrawDebugWindows()
 
 void m2ftg::UpdateGameDebugFlag()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	if (!gGeneral.IsSonicTheFighters())
 	{
 		return;
 	}
@@ -597,7 +608,7 @@ void m2ftg::UpdateGameDebugFlag()
 	static bool baselineKnown = false;
 	static uint32_t baselineBits = 0;
 	static bool applied = false;
-	if (*reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState) != 2)
+	if (!BoardBooted(CurrentDw(), base))
 	{
 		baselineKnown = false;
 		applied = false;

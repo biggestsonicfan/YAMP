@@ -92,6 +92,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     const bool runVF5FS_YLAD = bootId == YAMPGeneral::GameId::VF5FS_YLAD;
     const bool runVF5FS = bootId == YAMPGeneral::GameId::VF5FS;
     const bool runStF = bootId == YAMPGeneral::GameId::StF;
+    const bool runStF_GAIDEN = bootId == YAMPGeneral::GameId::StF_GAIDEN;
+    // The five games the Lost Judgment m2ftg host runs, INCLUDING the two Like a Dragon Gaiden
+    // rebuilds: which build loaded is a timestamp question inside the host, not a different path.
+    // This has to be the whole set, because the branch below falls through to the VF5FS host for
+    // anything it does not claim - which is where Fighting Vipers and Motor Raid ended up when
+    // this was written as "not StF" against a bootId that, unlike the wcsstr chain it replaced,
+    // means StF alone.
+    const bool runLJm2ftg = runStF || runStF_GAIDEN || runFV || runMR || runMR_GAIDEN;
 
     // "-frames N": run N frames, then leave the loop normally and shut the module down. For
     // automated smoke tests, so a run ends through the real teardown path instead of being killed
@@ -225,7 +233,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         ImGui::DestroyContext();
         return 0;
     }
-    else if (!runStF) {
+    else if (!runLJm2ftg) {
         // --- VF5FS path (unchanged; DX11on12)
         gGeneral.SetGameId(YAMPGeneral::GameId::VF5FS);
         HMODULE dll = vf5fs::Y6::LoadDLL();
@@ -242,13 +250,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         return 0;
     }
     else {
-        // --- LJ m2ftg path: StF by default, FV with "-fv", Motor Raid with "-mr". All three
-        // games share the whole hosting path; the per-game differences live in
-        // m2ftg::GameDesc (m2ftg/LJ/LJHost.h).
-        gGeneral.SetGameId(runFV ? YAMPGeneral::GameId::FV
-            : runMR ? YAMPGeneral::GameId::MR
-            : runMR_GAIDEN ? YAMPGeneral::GameId::MR_GAIDEN
-            : YAMPGeneral::GameId::StF);
+        // --- LJ m2ftg path: StF by default, FV with "-fv", Motor Raid with "-mr", and the two
+        // Like a Dragon Gaiden rebuilds with "-stf-gaiden" / "-mr-gaiden". Every one of them
+        // shares the whole hosting path; the per-game differences live in m2ftg::GameDesc
+        // (m2ftg/LJ/LJHost.h) and the per-build ones in m2ftg::IsGaidenBuild().
+        gGeneral.SetGameId(bootId);
         HMODULE stfDll = m2ftg::LoadDLL();  // stf- / fv- / mr-pxd-w64-d3d12_retail.dll
 
         // Always seed settings so UI has something to read

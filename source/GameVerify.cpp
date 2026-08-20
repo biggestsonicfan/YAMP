@@ -55,9 +55,16 @@ namespace Verify
 		// is unchanged (execute_info 0x1760, config 0x100C) — only the host DLL was recompiled.
 		// The per-build RVAs and the two pxd context sizes that differ live in m2ftg/ModuleBuild.h
 		// and the tables that key off it.
+		//
+		// ONE TABLE PER BUILD, not one table listing both, for the same reason Motor Raid needs it
+		// (see MR_GAIDEN below): the two DLLs have the same file name at the same relative path, so
+		// a table accepting both would let either install satisfy either launcher row — the LJ row
+		// would happily verify a Gaiden DLL and then check for the wrong parent executable.
 		constexpr KnownModuleBuild STF_BUILDS[] = {
 			{ "DF7FE561ED3B2954066CC138C179B9DD5CE2F65D0EC4A4104A7AD161236A07BB", 2086896, 0x637B11A3,
 				"Lost Judgment (2022-11-21)" },
+		};
+		constexpr KnownModuleBuild STF_GAIDEN_BUILDS[] = {
 			{ "991383EB33CA7E119425C69C6FBB48C9B09D3EC027BBC0264D505D449B6CB26F", 2132984, 0x65647FB5,
 				"Like a Dragon Gaiden (2023-11-27)" },
 		};
@@ -141,6 +148,8 @@ namespace Verify
 		constexpr ModuleEntry MODULE_ENTRIES[] = {
 			{ YAMPGeneral::GameId::StF, STF_BUILDS, std::size(STF_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
+			{ YAMPGeneral::GameId::StF_GAIDEN, STF_GAIDEN_BUILDS, std::size(STF_GAIDEN_BUILDS),
+				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
 			{ YAMPGeneral::GameId::FV, FV_BUILDS, std::size(FV_BUILDS),
 				OUTDATED_TIMESTAMPS, std::size(OUTDATED_TIMESTAMPS) },
 			{ YAMPGeneral::GameId::MR, MR_BUILDS, std::size(MR_BUILDS),
@@ -168,9 +177,11 @@ namespace Verify
 			const char* label;
 		};
 
-		// One title that can supply a given arcade game. Most games have exactly one, but an
-		// arcade machine reused across releases has several — Sonic the Fighters ships in both
-		// Lost Judgment and Like a Dragon Gaiden, and owning EITHER is enough.
+		// One title that can supply a given arcade game. A list rather than a single title because
+		// an arcade machine reused across releases could be satisfied by owning ANY of them — but
+		// every entry has exactly one today: a reused machine is a rebuilt module, and each build
+		// gets its own GameId (StF/StF_GAIDEN, MR/MR_GAIDEN) so the module hash and the parent
+		// executable are checked as the matched pair they are.
 		struct ParentTitle
 		{
 			const wchar_t* exeName;
@@ -216,26 +227,17 @@ namespace Verify
 			{ 0x67A1DC3D, 0x18D15000, 387517984, "Like a Dragon Gaiden (Steam)" },
 		};
 
-		// Sonic the Fighters is the first game YAMP can source from more than one title: Lost
-		// Judgment and Like a Dragon Gaiden ship byte-identical ROM and asset files, so owning
-		// EITHER is proof of ownership and the module that gets loaded decides which build runs.
-		constexpr ParentTitle STF_TITLES[] = {
-			{ L"LostJudgment.exe", "LostJudgment.exe",
-				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
-			{ L"likeadragongaiden.exe", "likeadragongaiden.exe",
-				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
-		};
-		// The Model 3 games come only from Like a Dragon Gaiden — Lost Judgment ships no pre3
-		// module at all, so unlike Sonic the Fighters there is no second source for them.
+		// Like a Dragon Gaiden supplies the Model 3 games, its own Motor Raid rebuild and its own
+		// Sonic the Fighters rebuild. Each of those is a SEPARATE GameId whose module table holds
+		// only that title's build, so the parent check is per-title too: a row that offered "either
+		// title is fine" would pass an install whose DLL cannot be the one on disk.
 		constexpr ParentTitle GAIDEN_TITLES[] = {
 			{ L"likeadragongaiden.exe", "likeadragongaiden.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
 				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
 		};
 		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), so it stays
-		// Lost-Judgment-only. MR's Gaiden build is its own entry (MR_GAIDEN) now.
+		// Lost-Judgment-only. The Gaiden builds of MR and StF are their own entries now.
 		constexpr ParentTitle LJ_TITLES[] = {
 			{ L"LostJudgment.exe", "LostJudgment.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
@@ -256,7 +258,8 @@ namespace Verify
 		};
 
 		constexpr ParentEntry PARENT_ENTRIES[] = {
-			{ YAMPGeneral::GameId::StF, STF_TITLES, std::size(STF_TITLES) },
+			{ YAMPGeneral::GameId::StF, LJ_TITLES, std::size(LJ_TITLES) },
+			{ YAMPGeneral::GameId::StF_GAIDEN, GAIDEN_TITLES, std::size(GAIDEN_TITLES) },
 			{ YAMPGeneral::GameId::FV, LJ_TITLES, std::size(LJ_TITLES) },
 			{ YAMPGeneral::GameId::MR, LJ_TITLES, std::size(LJ_TITLES) },
 			{ YAMPGeneral::GameId::MR_GAIDEN, GAIDEN_TITLES, std::size(GAIDEN_TITLES) },

@@ -255,7 +255,7 @@ bool m2ftg::ResetBoard()
 
 void m2ftg::UpdateDamageAssignment()
 {
-	if (gGeneral.GetGameId() != YAMPGeneral::GameId::StF)
+	if (!gGeneral.IsSonicTheFighters())
 	{
 		return;
 	}
@@ -272,8 +272,9 @@ void m2ftg::UpdateDamageAssignment()
 		return;
 	}
 	// Before the board is up there is no block to write, and the ROM's own init_game_assignments
-	// runs during boot - a write landing before it would simply be overwritten.
-	if (*reinterpret_cast<const uint32_t*>(base + DW_STF.rvaBootState) != 2)
+	// runs during boot - a write landing before it would simply be overwritten. Through the
+	// descriptor, not DW_STF: the boot-state RVA moved in Like a Dragon Gaiden's build.
+	if (!BoardBooted(CurrentDw(), base))
 	{
 		return;
 	}

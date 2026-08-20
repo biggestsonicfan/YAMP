@@ -50,7 +50,7 @@ inline const ImVec4 WARNING_COLOUR { 1.000f, 1.000f, 0.000f, 1.000f };
 inline bool IsLJm2ftgGame()
 {
 	const auto id = gGeneral.GetGameId();
-	return id == YAMPGeneral::GameId::StF
+	return gGeneral.IsSonicTheFighters()
 		|| id == YAMPGeneral::GameId::FV
 		|| id == YAMPGeneral::GameId::MR
 		|| id == YAMPGeneral::GameId::MR_GAIDEN;
@@ -145,7 +145,8 @@ inline RoomSetting CurrentRoomSetting()
 {
 	switch (gGeneral.GetGameId())
 	{
-	case YAMPGeneral::GameId::StF:     return RoomSetting::Damage;
+	case YAMPGeneral::GameId::StF:
+	case YAMPGeneral::GameId::StF_GAIDEN: return RoomSetting::Damage;
 	case YAMPGeneral::GameId::VF2:
 	case YAMPGeneral::GameId::VF2_K2:  return RoomSetting::Vf2Version;
 	case YAMPGeneral::GameId::FV2:     return RoomSetting::Pre3Start;

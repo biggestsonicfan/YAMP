@@ -142,7 +142,7 @@ void YAMPUserInterface::DrawDebug()
 	// The DLL debug-menu windows and the emulated-RAM debug flag are reconstructed from
 	// StF-specific DLL data/addresses; the loose-ROM bypass is generic across the LJ m2ftg
 	// games (archive name and image list come from the GameDesc table).
-	const bool isStf = gGeneral.GetGameId() == YAMPGeneral::GameId::StF;
+	const bool isStf = gGeneral.IsSonicTheFighters();
 	const bool isLJm2ftg = IsLJm2ftgGame();
 
 	if (isStf)

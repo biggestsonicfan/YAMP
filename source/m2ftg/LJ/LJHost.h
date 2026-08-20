@@ -126,6 +126,9 @@ namespace m2ftg
         // BUILD loaded is resolved by SetCurrentModuleBuild like Gaiden StF. Bring-up of that
         // build is its own project - this routing just lets it load and identify itself.
         case YAMPGeneral::GameId::MR_GAIDEN: return GAME_MR;
+        // ...and the same for Gaiden's Sonic the Fighters, whose ROM and assets are byte-identical
+        // to Lost Judgment's - GAME_STF describes both, SetCurrentModuleBuild says which is loaded.
+        case YAMPGeneral::GameId::StF_GAIDEN: return GAME_STF;
         default: return GAME_STF;
         }
     }

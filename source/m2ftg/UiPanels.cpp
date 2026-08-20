@@ -154,7 +154,7 @@ void YAMPUserInterface::DrawGameStF()
 		}
 		if (ImGui::IsItemHovered())
 		{
-			if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+			if (gGeneral.IsSonicTheFighters())
 			{
 				ImGui::SetTooltip("Region the arcade board boots as. USA runs the game as\n"
 					"Sonic Championship, its western release.\nRequires a restart.");
@@ -179,7 +179,7 @@ void YAMPUserInterface::DrawGameStF()
 	// StF's own GAME ASSIGNMENTS page has a DAMAGE item; the other m2ftg games do not, and it is
 	// not part of the module's config block either - it is a byte of the ROM's live game
 	// assignments, which is why this one applies immediately (see m2ftg::UpdateDamageAssignment).
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	if (gGeneral.IsSonicTheFighters())
 	{
 		const char* labels[] = { "Normal", "Real" };
 

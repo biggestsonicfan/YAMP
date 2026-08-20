@@ -4,12 +4,18 @@
 
 namespace GameRegistry
 {
-	// One row per game. Sonic the Fighters is the one arcade game shipping in more than one
-	// title, and owning either is enough - so its parent must not tell a Like a Dragon Gaiden
-	// owner they need Lost Judgment; which build actually loaded is reported separately, by
-	// the module verdict.
+	// One row per game AND per title it ships in. Sonic the Fighters and Motor Raid each come out
+	// of two titles, and a row that named both ("Lost Judgment or Like a Dragon Gaiden") could
+	// answer neither question properly: the launcher needs to verify a specific module build
+	// against a specific parent executable, and the user needs to be told which install a row is
+	// offering. So each build gets its own row.
+	//
+	// StF and StF-Gaiden deliberately share the TAG "StF": it names the ini section, the HLE-key
+	// scope and the system_<tag>.dat backup RAM, and the two builds are the same game down to the
+	// byte — settings and save data must follow the game, not the install they were launched from.
 	static constexpr Entry ENTRIES[] = {
-		{ YAMPGeneral::GameId::StF,        "StF",        "Sonic the Fighters",               "Lost Judgment or Like a Dragon Gaiden", L"-stf",        true  },
+		{ YAMPGeneral::GameId::StF,        "StF",        "Sonic the Fighters",               "Lost Judgment",                         L"-stf",        true  },
+		{ YAMPGeneral::GameId::StF_GAIDEN, "StF",        "Sonic the Fighters",               "Like a Dragon Gaiden",                  L"-stf-gaiden", true  },
 		{ YAMPGeneral::GameId::FV,         "FV",         "Fighting Vipers",                  "Lost Judgment",                         L"-fv",         true  },
 		{ YAMPGeneral::GameId::MR,         "MR",         "Motor Raid",                       "Lost Judgment",                         L"-mr",         true  },
 		{ YAMPGeneral::GameId::MR_GAIDEN,  "MR-Gaiden",  "Motor Raid",                       "Like a Dragon Gaiden",                  L"-mr-gaiden",  true  },

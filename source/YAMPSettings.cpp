@@ -24,10 +24,12 @@ static constexpr uint32_t SETTINGS_VERSION = 1;
 // index, which for a Core hook is a hang.
 //
 // StF keeps the bare name so ini files written before Fighting Vipers had a hook table keep
-// working; every other game gets a ".<tag>" suffix.
+// working; every other game gets a ".<tag>" suffix. Both StF builds answer here: the hook table
+// is the same 76 records in the same order, so a mask written under Lost Judgment is exactly the
+// mask Like a Dragon Gaiden's build wants.
 static std::wstring HleKeyW(const wchar_t* base)
 {
-	if (gGeneral.GetGameId() == YAMPGeneral::GameId::StF)
+	if (gGeneral.IsSonicTheFighters())
 	{
 		return base;
 	}
