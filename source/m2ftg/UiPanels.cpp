@@ -4,6 +4,7 @@
 
 #include "../YAMPUserInterface.h"
 #include "../ui/UiInternal.h"
+#include "../input/BlissBox.h"
 
 
 void YAMPUserInterface::DrawGameStF()
@@ -281,6 +282,12 @@ void YAMPUserInterface::DrawGameStF()
 	// selection every frame from execute_info's assign[0][4] byte, so the choice applies live -
 	// see the frame-loop note in K2Host.cpp for the per-entry decode. Order and numbering are the
 	// module's own table; renumbering here would misdocument what the byte actually selects.
+	//
+	// The list carries ONE extra entry that is not a module scheme: the Sega Saturn Twin Stick
+	// override. It sits here because it answers the question the player is actually asking ("what
+	// am I playing this with"), but it is a different KIND of answer - a real twin stick has one
+	// switch per cabinet input, so it replaces the pad fill instead of remapping it, and pins the
+	// module to the discrete entry while it is live. See m2ftg/K2/VonTwinStick.cpp.
 	if (gGeneral.GetGameId() == YAMPGeneral::GameId::VON_K2)
 	{
 		static const char* const SCHEME_NAMES[] = {
@@ -290,16 +297,28 @@ void YAMPUserInterface::DrawGameStF()
 			"Type 4 - full twin-stick",
 			"Type 5 - partial sticks",
 		};
-		const uint32_t current = m_vonControlScheme < std::size(SCHEME_NAMES) ? m_vonControlScheme : 3;
-		if (ImGui::BeginCombo("Control type", SCHEME_NAMES[current]))
+		static const char* const TWIN_STICK_NAME = "Sega Saturn Twin Stick (Bliss-Box)";
+		const uint32_t TWIN_STICK_INDEX = static_cast<uint32_t>(std::size(SCHEME_NAMES));
+
+		const uint32_t scheme = m_vonControlScheme < std::size(SCHEME_NAMES) ? m_vonControlScheme : 3;
+		const uint32_t current = m_vonTwinStick ? TWIN_STICK_INDEX : scheme;
+		if (ImGui::BeginCombo("Control type", m_vonTwinStick ? TWIN_STICK_NAME : SCHEME_NAMES[scheme]))
 		{
-			for (uint32_t index = 0; index < std::size(SCHEME_NAMES); index++)
+			for (uint32_t index = 0; index <= TWIN_STICK_INDEX; index++)
 			{
 				const bool isSelected = index == current;
-				if (ImGui::Selectable(SCHEME_NAMES[index], isSelected))
+				const char* label = index == TWIN_STICK_INDEX ? TWIN_STICK_NAME : SCHEME_NAMES[index];
+				if (ImGui::Selectable(label, isSelected))
 				{
 					m_pageModified = true;
-					m_vonControlScheme = index;
+					m_vonTwinStick = index == TWIN_STICK_INDEX;
+					if (!m_vonTwinStick)
+					{
+						// Picking a module scheme is also how the override is turned off. The
+						// scheme is left alone when the override is picked, so switching back
+						// lands on whatever the player had before.
+						m_vonControlScheme = index;
+					}
 				}
 				if (isSelected)
 					ImGui::SetItemDefaultFocus();
@@ -317,9 +336,168 @@ void YAMPUserInterface::DrawGameStF()
 				"Type 4: every stick direction is discrete - D-pad drives the left lever, face\n"
 				"buttons the right, shoulders the triggers and turbos. The cabinet's actual\n"
 				"control set: harder, but every stick position can be produced.\n"
-				"Types 3/5: partial mappings - most directions unrouted in the module's table.");
+				"Types 3/5: partial mappings - most directions unrouted in the module's table.\n"
+				"Twin Stick: a real Saturn twin stick on a Bliss-Box drives the levers directly,\n"
+				"one switch per cabinet input, and the module's mapping stops being involved.");
+		}
+
+		if (m_vonTwinStick)
+		{
+			DrawVonTwinStick();
 		}
 	}
+}
+
+
+// The Saturn Twin Stick panel: which port drives which player, and a live view of what the
+// adapter is actually reporting.
+//
+// THE MONITOR IS NOT A LUXURY. Two links in the chain are decoded from documentation rather than
+// from the hardware in this room - the Bliss-Box's HID button numbering for a Saturn pad, and
+// which of each lever's two buttons is the weapon trigger and which is the dash. Both are settled
+// in about ten seconds by pressing something and watching this light up, and neither is settleable
+// any other way. It also answers the ordinary questions: is the adapter seen at all, is a
+// controller detected on the port, is the firmware talking.
+void YAMPUserInterface::DrawVonTwinStick()
+{
+	// The backend only runs while somebody wants it, and looking at this panel counts.
+	Input::BlissBox::Start();
+
+	ImGui::Separator();
+
+	Input::BlissBox::PortState ports[Input::BlissBox::MAX_PORTS];
+	bool present[Input::BlissBox::MAX_PORTS] = {};
+	int capable = 0;
+	for (int port = 0; port < Input::BlissBox::MAX_PORTS; port++)
+	{
+		present[port] = Input::BlissBox::GetPort(port, ports[port]);
+		capable += present[port] && ports[port].IsTwinStickCapable() ? 1 : 0;
+	}
+
+	if (capable == 0)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "No Saturn controller detected.");
+		ImGui::TextWrapped(
+			"Virtual On falls back to the control type above until a stick appears, so the game "
+			"stays playable. Check that the Bliss-Box is plugged in and that the stick is in one "
+			"of its ports - the adapter reports what is on each port itself, so nothing here "
+			"needs to be bound by hand.");
+	}
+
+	// Port assignment. Auto is the first entry and the default: one stick on any port plays, two
+	// sticks play as P1 and P2 in port order, and neither case needs touching.
+	for (int player = 0; player < 2; player++)
+	{
+		char label[32];
+		snprintf(label, sizeof(label), "Player %d stick", player + 1);
+
+		auto portLabel = [&](int port, char* out, size_t outBytes)
+			{
+				if (port < 0)
+				{
+					snprintf(out, outBytes, "Auto");
+					return;
+				}
+				snprintf(out, outBytes, "Port %d - %s", port + 1,
+					present[port] ? Input::BlissBox::ControllerTypeName(ports[port].controllerType)
+						: "not connected");
+			};
+
+		char preview[64];
+		portLabel(m_vonTwinStickPort[player], preview, sizeof(preview));
+		if (ImGui::BeginCombo(label, preview))
+		{
+			for (int port = -1; port < Input::BlissBox::MAX_PORTS; port++)
+			{
+				char entry[64];
+				portLabel(port, entry, sizeof(entry));
+				const bool isSelected = port == m_vonTwinStickPort[player];
+				if (ImGui::Selectable(entry, isSelected))
+				{
+					m_pageModified = true;
+					m_vonTwinStickPort[player] = port;
+				}
+				if (isSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+	}
+
+	if (!ImGui::TreeNode("Adapter / live input"))
+	{
+		return;
+	}
+
+	// One lamp per cabinet input, lit while held. Named for the CABINET, not for the Saturn button
+	// underneath, because what is being checked is "does pushing this move that".
+	auto lamp = [](const char* name, bool held)
+		{
+			ImGui::TextColored(held ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f)
+				: ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", name);
+			ImGui::SameLine();
+		};
+
+	for (int port = 0; port < Input::BlissBox::MAX_PORTS; port++)
+	{
+		if (!present[port])
+		{
+			continue;
+		}
+		const Input::BlissBox::PortState& state = ports[port];
+		ImGui::Text("Port %d: %s   firmware %u.%u   (updates %llu, dropped transfers %llu)",
+			port + 1, Input::BlissBox::ControllerTypeName(state.controllerType),
+			static_cast<unsigned>(state.firmwareMajor), static_cast<unsigned>(state.firmwareMinor),
+			static_cast<unsigned long long>(state.updates),
+			static_cast<unsigned long long>(state.errors));
+
+		// THE MODES BYTE, decoded, because two of its bits change what the payload MEANS and a
+		// driver reading the payload without knowing them is guessing.
+		//
+		// Bits 1-2 are the adapter's ALT MAPPING selector (0 = the default global mapping, 1-3 =
+		// alternates). Every HID button number this driver decodes comes from the vendor's default
+		// mapping sheet, so on a non-zero alt map the Saturn buttons are somewhere else entirely
+		// and the lamps below will not line up. Bit 5 (Analog-to-D-pad) moves the d-pad off the
+		// analog axes, which is the source DecodeDirections reads.
+		ImGui::Text("  modes 0x%02X: alt map %u%s%s%s", state.modes,
+			static_cast<unsigned>((state.modes >> 1) & 3),
+			(state.modes & 0x10) ? ", UDLR" : "",
+			(state.modes & 0x20) ? ", analog-to-dpad" : "",
+			(state.modes & 0x80) ? ", d-pad only" : "");
+		if (((state.modes >> 1) & 3) != 0)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+				"  ^ NOT the default button mapping - HID numbers will not match the decode.");
+		}
+
+		if (!state.IsTwinStickCapable())
+		{
+			continue;
+		}
+
+		const Input::BlissBox::TwinStickState& stick = state.stick;
+		ImGui::Text("  Left lever :"); ImGui::SameLine();
+		lamp("Up", stick.leftUp); lamp("Down", stick.leftDown);
+		lamp("Left", stick.leftLeft); lamp("Right", stick.leftRight);
+		lamp("Trigger", stick.leftTrigger); lamp("Dash", stick.leftThumb);
+		ImGui::NewLine();
+		ImGui::Text("  Right lever:"); ImGui::SameLine();
+		lamp("Up", stick.rightUp); lamp("Down", stick.rightDown);
+		lamp("Left", stick.rightLeft); lamp("Right", stick.rightRight);
+		lamp("Trigger", stick.rightTrigger); lamp("Dash", stick.rightThumb);
+		ImGui::NewLine();
+		ImGui::Text("  Start      :"); ImGui::SameLine();
+		lamp("Start", stick.start);
+		ImGui::NewLine();
+
+		// The undecoded payload, for when a lamp does not light: this says whether the adapter
+		// reported the press at all (a bit moved in a button row) or whether it landed somewhere
+		// this driver is not looking.
+		ImGui::Text("  raw: rows %02X %02X %02X  axes %02X %02X  hat %02X",
+			state.payload.buttons[0], state.payload.buttons[1], state.payload.buttons[2],
+			state.payload.x, state.payload.y, state.payload.hat);
+	}
+	ImGui::TreePop();
 }
 
 

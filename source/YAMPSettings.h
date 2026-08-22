@@ -96,6 +96,19 @@ public:
 	// assign[0][4] note in K2Host's frame loop for the per-entry decode.
 	uint32_t m_vonControlScheme = 3;
 
+	// Virtual On — the SEGA SATURN TWIN STICK OVERRIDE. On, and with a stick attached to a
+	// Bliss-Box, a player's pad is filled from the real levers instead of from their key/pad
+	// bindings, and m_vonControlScheme is forced to the full twin-stick entry for that frame. It
+	// is an override rather than a sixth control scheme because it does not go through the
+	// module's mapping table in the sense the other five do: the stick has one switch per cabinet
+	// input, so there is nothing to map. See m2ftg/K2/VonTwinStick.cpp.
+	//
+	// The port per player: -1 = Auto (first capable port to P1, the next to P2), otherwise a
+	// Bliss-Box port index 0..3. Explicit picks are honoured even when that port is empty — see
+	// TwinStick::PortForPlayer for why sliding a player onto another port would be worse.
+	bool m_vonTwinStick = false;
+	int32_t m_vonTwinStickPort[2] = { -1, -1 };
+
 	// Debug settings
 	bool m_dontApplyPatches = false;
 	bool m_useD3DDebugLayer = false;

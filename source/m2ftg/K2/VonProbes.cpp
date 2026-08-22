@@ -28,6 +28,7 @@
 #include "../DisplayModes.h"
 #include "../../input/Input.h"
 #include "../HostUI.h"
+#include "../../imgui/imgui.h"   // the -von-modes overlay
 #include "../../DebugLog.h"
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
@@ -282,5 +283,59 @@ namespace m2ftg
 		//     alloc: (**(code **)(*obj + 0x08))(obj, size, align)     -> vtable slot 1
 		//     free:  (**(code **)(*obj + 0x18))(obj, ptr)             -> vtable slot 3
 		// The module allocates every shader/resource object through it, so it runs hundreds of
+	}
+}
+
+namespace m2ftg
+{
+	namespace K2
+	{
+		// See the WantModeOverlay note in VonBoard.h for why this is an overlay and not a page.
+		void DrawModeOverlay(bool switchesSuppressed)
+		{
+			auto read = [](uint32_t address) -> long long
+				{
+					uint32_t value = 0;
+					return ReadEmulatedRam32(address, value) ? static_cast<long long>(value) : -1;
+				};
+
+			ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+			ImGui::SetNextWindowBgAlpha(0.75f);
+			if (ImGui::Begin("Virtual On board state", nullptr,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing
+				| ImGuiWindowFlags_NoNav))
+			{
+				// -1 means the read failed, which before the board has booted is the normal
+				// answer rather than an error - printed as "--" so it is not mistaken for a mode.
+				auto mode = [](long long v, char* out, size_t bytes)
+					{
+						if (v < 0) snprintf(out, bytes, "--");
+						else snprintf(out, bytes, "%lld", v);
+					};
+				char main[16], sub[16], versus[16];
+				mode(read(OmgRva::SYM_MAINMODE), main, sizeof(main));
+				mode(read(OmgRva::SYM_SUBMODE), sub, sizeof(sub));
+				mode(read(OmgRva::SYM_VERSUSMODE), versus, sizeof(versus));
+				ImGui::Text("MainMode %s   SubMode %s   VersusMode %s", main, sub, versus);
+
+				// The switch lines as YAMP is driving them THIS frame. Either player's binding
+				// closes the one cabinet switch, which is why both are tested.
+				const bool test = Input::ActionDown(0, Input::Action_Test)
+					|| Input::ActionDown(1, Input::Action_Test);
+				const bool service = Input::ActionDown(0, Input::Action_Service)
+					|| Input::ActionDown(1, Input::Action_Service);
+				const ImVec4 lit(0.4f, 1.0f, 0.4f, 1.0f);
+				const ImVec4 dim(0.5f, 0.5f, 0.5f, 1.0f);
+				ImGui::Text("Switches:"); ImGui::SameLine();
+				ImGui::TextColored(test ? lit : dim, "TEST"); ImGui::SameLine();
+				ImGui::TextColored(service ? lit : dim, "SERVICE");
+				if (switchesSuppressed)
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+						"(suppressed - close the pause menu)");
+				}
+			}
+			ImGui::End();
+		}
 	}
 }

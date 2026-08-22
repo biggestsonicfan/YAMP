@@ -295,6 +295,9 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 
 	m_vf2Version20 = settings->m_vf2Version20;
 	m_vonControlScheme = settings->m_vonControlScheme;
+	m_vonTwinStick = settings->m_vonTwinStick;
+	m_vonTwinStickPort[0] = settings->m_vonTwinStickPort[0];
+	m_vonTwinStickPort[1] = settings->m_vonTwinStickPort[1];
 
 	// Netplay: settings hold std::strings, the page edits fixed buffers (no std::string InputText
 	// in this ImGui build), so the two are copied across at the page's edges.
@@ -608,6 +611,11 @@ void YAMPUserInterface::ApplySettings()
 	// Re-read by the K2 frame loop every frame (the module latches the scheme byte per frame
 	// too), so it applies live - deliberately absent from the needsRestart test above.
 	settings->m_vonControlScheme = m_vonControlScheme;
+	// Same story for the twin-stick override and its port assignment: the frame loop reads
+	// them fresh every frame, so plugging a stick in and switching to it is a live change.
+	settings->m_vonTwinStick = m_vonTwinStick;
+	settings->m_vonTwinStickPort[0] = m_vonTwinStickPort[0];
+	settings->m_vonTwinStickPort[1] = m_vonTwinStickPort[1];
 
 	// Netplay: read when a session connects and when a round starts, so no restart is needed —
 	// which is why none of these appear in the needsRestart test above.

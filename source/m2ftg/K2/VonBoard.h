@@ -157,6 +157,7 @@ namespace m2ftg
 			constexpr uint32_t SYM_SYNCHTIME = 0x5024E4;
 			constexpr uint32_t SYM_GLOBCNTR  = 0x5024E8;   // the ROM's own shared frame counter
 			constexpr uint32_t SYM_MAINMODE  = 0x5039F4;
+			constexpr uint32_t SYM_SUBMODE   = 0x503A00;
 			constexpr uint32_t SYM_VERSUSMODE= 0x503A7C;
 			constexpr uint32_t SYM_NET_FLAG  = 0x5770B0;
 			constexpr uint32_t SYM_LINK_ID   = 0x5770B1;
@@ -322,6 +323,26 @@ namespace m2ftg
 		void LinkTransferWithResetSemantics();             // VonLink.cpp
 		extern void (*g_origLinkTransfer)();               // VonLink.cpp
 		void LogTwoBoardState(int frame, uint32_t texid);  // VonProbes.cpp
+
+		// "-von-modes": a small always-on overlay reporting the ROM's own mode machine and the
+		// cabinet switch lines, live.
+		//
+		// THIS EXISTS TO TELL TWO FAILURES APART when the operator menu does not appear. The
+		// TEST line reaching the emulated I/O board and the ROM acting on it are different
+		// things, and on screen they look identical - nothing happens. MainMode moving when TEST
+		// closes says the ROM saw the switch; MainMode sitting still says the switch never got
+		// there. Sega Racing Classic 2 has an open regression of exactly this shape (TEST soft
+		// resets instead of opening the menu), which is why it is worth being able to see.
+		//
+		// Overlay rather than a settings-page panel on purpose: Cabinet::PollSystemSwitches
+		// SUPPRESSES both switches while the pause menu is open, so a readout you have to pause
+		// to look at can never show you a TEST press.
+		inline bool WantModeOverlay()
+		{
+			static const bool wanted = wcsstr(GetCommandLineW(), L"-von-modes") != nullptr;
+			return wanted;
+		}
+		void DrawModeOverlay(bool switchesSuppressed);     // VonProbes.cpp
 		namespace FindCtr
 		{
 			void Sample(uint8_t* dllBase, int board);

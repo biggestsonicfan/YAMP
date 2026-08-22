@@ -1,5 +1,6 @@
 ﻿#include "Input.h"
 #include "DirectInputPad.h"
+#include "BlissBox.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -384,6 +385,9 @@ namespace Input
 		s_devices.clear();
 		s_states.clear();
 		DI::Shutdown();
+		// The Bliss-Box backend owns a polling thread rather than being driven from PollPads, so
+		// it has to be joined here or the process outlives it. Harmless when it never started.
+		BlissBox::Shutdown();
 	}
 
 	bool ActionDown(unsigned int player, uint32_t action)

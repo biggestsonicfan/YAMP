@@ -29,6 +29,7 @@ private:
 	void DrawGraphics();
 	void DrawGame();
 	void DrawGameStF();
+	void DrawVonTwinStick();   // the Saturn Twin Stick sub-panel of the Virtual On section
 	// The two Model 3 games (pre3). See the comment on the definition.
 	void DrawGamePre3();
 	void DrawControls();
@@ -131,6 +132,8 @@ private:
 
 	// Virtual On (see YAMPSettings for field semantics)
 	uint32_t m_vonControlScheme = 3;
+	bool m_vonTwinStick = false;
+	int32_t m_vonTwinStickPort[2] = { -1, -1 };
 
 	// Netplay (see YAMPSettings for field semantics). Char buffers rather than std::string:
 	// this ImGui build ships no std::string InputText helper, and the sizes double as the limits

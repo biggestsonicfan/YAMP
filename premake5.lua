@@ -27,7 +27,11 @@ project "YAMP"
 	-- bcrypt: SHA-256 for the arcade module integrity check (source/GameVerify.cpp).
 	-- dinput8/dxguid: the non-XInput half of the controller layer (source/input/DirectInputPad.cpp)
 	-- — arcade encoders, fight sticks and most third-party pads are HID-only and invisible to XInput.
-	links { "bcrypt", "dinput8", "dxguid" }
+	-- hid/setupapi: raw HID, for the Bliss-Box backend (source/input/BlissBox.cpp). DirectInput can
+	-- read that adapter's ports as anonymous gamepads; only its own feature-report API says WHICH
+	-- console controller is plugged into each one, which is what makes a Saturn Twin Stick
+	-- detectable rather than something the player has to hand-map.
+	links { "bcrypt", "dinput8", "dxguid", "hid", "setupapi" }
 
 
 workspace "*"

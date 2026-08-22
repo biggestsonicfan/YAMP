@@ -38,6 +38,8 @@
 #include "../../wil/resource.h"
 
 #include "VonBoard.h"
+#include "VonTwinStick.h"          // the Saturn Twin Stick override, via source/input/BlissBox
+#include "../../input/BlissBox.h"
 namespace m2ftg
 {
 	namespace K2
@@ -708,6 +710,23 @@ namespace m2ftg
 			Input::PollPads();
 			static pxd::csl_pad s_pads[2];
 			Cabinet::RoutePads(s_pads, false, -1);   // no netplay on this host - no slot swap
+
+			// THE SEGA SATURN TWIN STICK OVERRIDE. A real twin stick has one switch per cabinet
+			// input, so when one is attached it replaces that player's binding-driven pad outright
+			// rather than being mapped onto it - see VonTwinStick.cpp. Runs after RoutePads (which
+			// it overwrites) and before the coin/start dance (which still ORs its own bits in, so
+			// starting a credit works exactly as it does on a pad).
+			bool twinStickActive = false;
+			if (TwinStick::Enabled())
+			{
+				Input::BlissBox::Start();   // idempotent; the worker only exists while wanted
+				for (int p = 0; p < 2; p++)
+				{
+					const int port = TwinStick::PortForPlayer(p);
+					twinStickActive |= port >= 0 && TwinStick::SetPadState(s_pads[p], port);
+				}
+			}
+
 			for (int p = 0; p < 2; p++)
 			{
 				execute_info.pad[p] = s_pads[p];
@@ -761,9 +780,18 @@ namespace m2ftg
 			if (gGeneral.GetGameId() == YAMPGeneral::GameId::VON_K2)
 			{
 				const auto* settings = gGeneral.GetSettings();
-				const uint32_t scheme =
+				uint32_t scheme =
 					settings != nullptr && settings->m_vonControlScheme <= 4
 						? settings->m_vonControlScheme : 3;
+				// A live twin stick pins the scheme to the discrete entry, whatever the combo
+				// says: the beginner entries route the stick's own directions into pre-composed
+				// gestures, which is precisely the translation a real lever exists to avoid.
+				// THE BYTE IS PER CABINET, NOT PER PLAYER, so a stick on either side puts both on
+				// entry 3 - the module has one scheme selector and no way to split it.
+				if (twinStickActive)
+				{
+					scheme = 3;
+				}
 				execute_info.assign[0][4] = static_cast<unsigned char>(scheme);
 			}
 
@@ -805,6 +833,14 @@ namespace m2ftg
 			if (s_pause.open && !DrawPauseMenu(window, s_pause.open))
 			{
 				return false;   // Quit picked
+			}
+
+			// -von-modes: the ROM's mode machine and the cabinet switch lines, live. Drawn here
+			// rather than on the settings page because the switches are suppressed while that page
+			// is open - see WantModeOverlay in VonBoard.h.
+			if (WantModeOverlay())
+			{
+				DrawModeOverlay(s_pause.open);
 			}
 
 			// The two-board gate is a LAUNCH-TIME choice (-von-2board), never a live toggle: an

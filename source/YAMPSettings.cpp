@@ -398,6 +398,19 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		{
 			m_vonControlScheme = 3;
 		}
+
+		m_vonTwinStick = GetPrivateProfileIntW(SECTION_NAME, L"TwinStick",
+			m_vonTwinStick, iniPath.c_str()) != 0;
+		// STORED ONE-BASED, with 0 meaning Auto — deliberately not the in-memory -1, because
+		// GetPrivateProfileIntW documents a negative value as returning zero, so "-1" written out
+		// would read back as port 0 and silently pin both players to the same stick.
+		for (int player = 0; player < 2; player++)
+		{
+			const std::wstring key = L"TwinStickPort" + std::to_wstring(player + 1);
+			const int stored = static_cast<int>(GetPrivateProfileIntW(SECTION_NAME, key.c_str(),
+				m_vonTwinStickPort[player] + 1, iniPath.c_str()));
+			m_vonTwinStickPort[player] = stored >= 1 && stored <= 4 ? stored - 1 : -1;
+		}
 	}
 }
 
@@ -522,5 +535,12 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 	{
 		const wchar_t* SECTION_NAME = L"VirtualOn";
 		WritePrivateProfileIntW(SECTION_NAME, L"ControlScheme", m_vonControlScheme, iniPath.c_str());
+		WritePrivateProfileIntW(SECTION_NAME, L"TwinStick", m_vonTwinStick, iniPath.c_str());
+		for (int player = 0; player < 2; player++)
+		{
+			const std::wstring key = L"TwinStickPort" + std::to_wstring(player + 1);
+			WritePrivateProfileIntW(SECTION_NAME, key.c_str(), m_vonTwinStickPort[player] + 1,
+				iniPath.c_str());
+		}
 	}
 }
