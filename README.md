@@ -144,14 +144,13 @@ Two different netcodes, chosen per game by what the board actually needs:
 | Fighting Vipers 2 | lockstep |
 | Sega Racing Classic 2 | linked cabinet |
 | Motor Raid (Lost Judgment) | linked cabinet |
-| Cyber Troopers Virtual-On | linked cabinet — see below |
+| Cyber Troopers Virtual-On | linked cabinet |
 | Virtua Fighter 2 (Kiwami 2), Motor Raid (Gaiden) | none |
 
-Virtual On is the awkward one. Its lockstep netplay was **abandoned and removed** after four
+Virtual On took the longest road. Its lockstep netplay was **abandoned and removed** after four
 failed two-machine attempts, and replaced by a linked-cabinet implementation that has been run
-across two machines. The in-game Netplay page, however, does not currently appear for it — the
-check deciding whether to show that page has a branch for every other linked game and none for
-this one — so its cabinet role has to be set in `settings.ini` or on the command line.
+across two machines — the ROM's own link check is what starts play, so there is no barrier to
+open and no shared seed to agree on.
 
 ### Module verification
 
@@ -202,8 +201,6 @@ so in the UI rather than pretending to apply.
 
 * **Netplay is experimental.** It needs an RPCN account, and that account's password is stored in
   plain text in `settings.ini`. Two players / two machines only.
-* **Virtual On's Netplay page does not appear**, as described above. The link itself works; the UI
-  route to it does not.
 * **Virtua Fighter 2 from Kiwami 2 and Motor Raid from Like a Dragon Gaiden have no netplay.** The
   Gaiden Motor Raid build is recognised and explicitly refused by the link layer rather than being
   allowed to half-work.
