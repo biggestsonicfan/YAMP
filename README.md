@@ -42,6 +42,36 @@ different checksums, and each row checks that *its* parent game is the one insta
 
 ## Getting started
 
+### Getting a build
+
+You do not have to build YAMP yourself. Every push to `master` is compiled by GitHub Actions and
+the resulting binaries are attached to the run:
+
+1. Open the [**Actions**](https://github.com/biggestsonicfan/YAMP/actions) tab.
+2. Click the newest **build** run with a green tick. A red cross means that commit did not
+   compile — take the newest green run below it instead.
+3. Scroll to **Artifacts** at the bottom of the run summary and download **`YAMP-Release`**.
+
+`YAMP-Release` is the one to play with. `YAMP-Debug` is the same commit built unoptimized with
+debug logging compiled in — bigger and slower, but the one to grab when something misbehaves and
+you want a log to attach to an issue.
+
+GitHub hands you a `.zip` containing `YAMP.exe` and `YAMP.pdb`. Only the `.exe` is needed to run;
+the `.pdb` carries the symbols that turn a crash address into a function name and a line number,
+so keep it beside the `.exe` if you might report a crash.
+
+Two things that routinely catch people out, neither of which is a setting in this repository:
+
+* **You must be signed in to GitHub to download an artifact.** The links do nothing for logged-out
+  visitors, even though this repository is public.
+* **Artifacts are deleted after 90 days.** Past that the run is still listed but its downloads are
+  gone; use a newer run, or build from source.
+
+These builds are not code-signed, so Windows may show a SmartScreen warning the first time you run
+one. That is expected for an unsigned executable downloaded from the internet.
+
+### Running it
+
 Put `YAMP.exe` anywhere and run it with no arguments. It opens a launcher that goes looking for
 what you own: the folder it is sitting in, the working directory, **every Steam library** (read
 out of `libraryfolders.vdf`), **every GOG install** from the registry, and every folder sitting
@@ -122,6 +152,18 @@ the board expects to find them.
 Netplay ships as an **optional** `yampnet.dll`, built from its own repository,
 [YAMPnet](https://github.com/biggestsonicfan/YAMPnet). If it is absent the entire feature
 disappears cleanly and everything else works.
+
+To add it, download **`yampnet-Release`** from that repository's
+[Actions](https://github.com/biggestsonicfan/YAMPnet/actions) tab — the same procedure as
+[Getting a build](#getting-a-build) — and drop `yampnet.dll` beside `YAMP.exe`. Restart YAMP; the
+Netplay settings page reports whether it loaded.
+
+**Pair it with a YAMP of about the same age.** The plugin writes the emulator's pad structures
+itself, so it declares the struct layouts it was compiled against and YAMP refuses one whose
+layouts or ABI version disagree. The refusal is deliberate — the alternative is silent memory
+corruption — and it is visible rather than mysterious: the Netplay page says *"The plugin was found
+but rejected"* and names the reason. If you hit it, take a newer `yampnet.dll`, or a YAMP build
+from nearer the plugin's date.
 
 Matchmaking runs over **RPCN**, the community server for PlayStation Network emulation: a TLS
 session for login and the room list, a UDP address-discovery exchange, and then **direct
@@ -218,6 +260,9 @@ so in the UI rather than pretending to apply.
 * Windows x64 only, MSVC only.
 
 ## Building
+
+Only if you want to — [Getting a build](#getting-a-build) has prebuilt binaries for every commit.
+CI builds the `Debug` and `Release` configurations; `Master` is source-only.
 
 ```
 premake5.exe vs2022
