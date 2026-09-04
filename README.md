@@ -235,8 +235,8 @@ build without netplay. Drop the DLL next to `YAMP.exe` to turn the feature on.
 `premake5.lua` is the source of truth for the project files. Do not hand-edit anything under
 `build/`; edit the Lua and regenerate.
 
-One submodule, `source/Utils` ([our fork of Silent's
-ModUtils](https://github.com/biggestsonicfan/ModUtils)) — `git clone --recursive`, or
+One submodule, `source/Utils` ([Silent's
+ModUtils](https://github.com/CookiePLMonster/ModUtils)) — `git clone --recursive`, or
 `git submodule update --init` after the fact. ImGui, WIL and D3D12MemoryAllocator are vendored
 in-tree. There is no package manager step and nothing to install beyond the Windows SDK.
 

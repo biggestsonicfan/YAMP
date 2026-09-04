@@ -1,0 +1,85 @@
+# Builds YAMP.exe on a clean machine.
+#
+# source/Utils (ModUtils) is a submodule and YAMP genuinely needs it - MemoryMgr.h, Patterns.h,
+# ScopedUnprotect.hpp and Trampoline.h are used across every host - so the checkout below is
+# recursive. It points at the public upstream, which needs no credentials; a workflow's default
+# GITHUB_TOKEN reaches only THIS repository, so if the submodule is ever repointed at a private
+# fork this job will start failing on a 401 and will need a PAT in a secret.
+#
+# The netplay plugin is NOT built here - it moved to its own repository, which has its own
+# workflow and builds against this one's headers. See the note at the bottom of premake5.lua.
+
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned rather than "latest" on purpose: premake betas have changed API behaviour between
+  # releases, and CI should build the way a developer's machine does.
+  PREMAKE_VERSION: 5.0.0-beta7
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    # pwsh is already the default shell on Windows runners; saying so keeps the download step from
+    # depending on that staying true.
+    defaults:
+      run:
+        shell: pwsh
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debug is the fast "does it still compile" signal; Release additionally exercises the
+        # optimizer and link-time codegen. Master is Release plus stripped diagnostics - add it
+        # here if a release build ever breaks in a way Release did not catch.
+        configuration: [Debug, Release]
+
+    steps:
+      - name: Check out YAMP
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify the submodule actually came down
+        # Without this, a missing source/Utils surfaces as a wall of "cannot open include file"
+        # several minutes into the compile, which reads like a code problem rather than a
+        # credentials one.
+        run: |
+          if (-not (Test-Path "source/Utils/MemoryMgr.h")) {
+            throw "source/Utils is empty - the ModUtils submodule did not check out. Check .gitmodules: the URL must be a repository this workflow's token can read."
+          }
+
+      - name: Fetch premake5
+        run: |
+          $url = "https://github.com/premake/premake-core/releases/download/v$env:PREMAKE_VERSION/premake-$env:PREMAKE_VERSION-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile premake.zip
+          Expand-Archive -Path premake.zip -DestinationPath . -Force
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate project files
+        run: .\premake5.exe vs2022
+
+      # The vcxproj, not the sln: premake maps the "Debug"/"Win64" solution configuration onto a
+      # "Debug Win64"/x64 project configuration, and MSBuild wants the project's own names.
+      - name: Build
+        run: msbuild build\YAMP.vcxproj -p:Configuration="${{ matrix.configuration }} Win64" -p:Platform=x64 -m
+
+      - name: Upload YAMP.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAMP-${{ matrix.configuration }}
+          path: |
+            build/bin/Win64/${{ matrix.configuration }}/YAMP.exe
+            build/bin/Win64/${{ matrix.configuration }}/YAMP.pdb
+          if-no-files-found: error
