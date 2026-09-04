@@ -10,6 +10,7 @@
 #include "../../YAMPSettings.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/Patterns.h"
+#include "../../pxd/PatternHelpers.h"
 #include "../../Utils/Trampoline.h"
 
 #include "../../pxd/LJ/sys_util.h"
@@ -241,7 +242,7 @@ namespace m2ftg
 			constexpr ptrdiff_t IMMEDIATE_OFFSET = 27;  // the 0x1E, from the pattern's first byte
 			constexpr uint8_t TIME_INDEX_30S = 0x02;    // init_game_assignments' own default
 
-			hook::txn::pattern injector(dll,
+			hook::txn::pattern injector(pxd::module_scan(dll),
 				"C7 45 20 16 16 16 36 48 8D 83 ? ? ? ? 66 C7 45 24 36 36 C6 45 26 1F C6 45 18 1E");
 			// size() is the non-throwing accessor - a module that does not match (a different
 			// m2ftg build, or a future one where SEGA fixed this) simply keeps its own value.

@@ -479,8 +479,8 @@ namespace vf5fs
 				return false;
 			}
 
-			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+			const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+			const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 			auto Import = [&symbolMap](auto& var, auto symbol)
 				{

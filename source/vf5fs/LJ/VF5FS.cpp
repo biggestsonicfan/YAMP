@@ -197,8 +197,8 @@ namespace vf5fs
 			}
 			DebugLogFile("[vf5fs::LJ] all required symbols resolved (dll base %p)\n", dll);
 
-			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+			const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+			const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 			ImportFunctions(symbolMap);
 			DebugLogFile("[vf5fs::LJ] imports bound: sl ctx %p, gs ctx %p\n",

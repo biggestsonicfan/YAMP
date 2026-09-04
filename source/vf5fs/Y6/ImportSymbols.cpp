@@ -62,22 +62,22 @@ namespace vf5fs
 			};
 
 			// Other special cases
-			auto cs_switch_mapping_override = make_module_pattern(dll, "66 42 89 84 33").count(8);
+			auto cs_switch_mapping_override = pattern(pxd::module_scan(dll), "66 42 89 84 33").count(8);
 			cs_switch_mapping_override.for_each_result([&symbols](hook::pattern_match match) {
 				symbols.Add(S::CS_SWITCH_MAPPING_OVERRIDE_PATCH, match.get<void>());
 				});
 
-			auto sys_util_is_enter_circle = make_module_pattern(dll, "57 48 83 EC 20 E8 ? ? ? ? 84 C0").count(3); // + 2 from a different pattern
+			auto sys_util_is_enter_circle = pattern(pxd::module_scan(dll), "57 48 83 EC 20 E8 ? ? ? ? 84 C0").count(3); // + 2 from a different pattern
 			sys_util_is_enter_circle.for_each_result([&symbols](hook::pattern_match match) {
 				symbols.Add(S::SYS_UTIL_IS_ENTER_CIRCLE_PATCH, match.get<void>(1 + 4));
 				});
 
-			auto task_pause_ctrl_countdown = make_module_pattern(dll, "C5 FA 10 71 ? E8 ? ? ? ? C5 CA 5C D0").count(2);
+			auto task_pause_ctrl_countdown = pattern(pxd::module_scan(dll), "C5 FA 10 71 ? E8 ? ? ? ? C5 CA 5C D0").count(2);
 			task_pause_ctrl_countdown.for_each_result([&symbols](hook::pattern_match match) {
 				symbols.Add(S::TASK_PAUSE_CTRL_COUNTDOWN_PATCH, match.get<void>(5));
 				});
 
-			auto press_start_pos_x_ptr = make_module_pattern(dll, "C5 FA 10 05 ? ? ? ? 41 B8 09 00 00 00 E8 ? ? ? ? B9 19 00 00 00").count(3);
+			auto press_start_pos_x_ptr = pattern(pxd::module_scan(dll), "C5 FA 10 05 ? ? ? ? 41 B8 09 00 00 00 E8 ? ? ? ? B9 19 00 00 00").count(3);
 			press_start_pos_x_ptr.for_each_result([&symbols](hook::pattern_match match) {
 				symbols.Add(S::PRESS_START_POS_X_PTR_PATCH, match.get<void>(4));
 				});

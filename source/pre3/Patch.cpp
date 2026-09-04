@@ -200,7 +200,7 @@ namespace pre3
 
 		{
 			// The table is in .rdata.
-			ScopedUnprotect::Section unprotect(GetModuleHandleW(L"pre3-pxd-w64-d3d12_retail.dll"),
+			const auto unprotect = ScopedUnprotect::Section(GetModuleHandleW(L"pre3-pxd-w64-d3d12_retail.dll"),
 				".rdata");
 			entry[1] = reinterpret_cast<uint64_t>(&Read8);
 			entry[2] = reinterpret_cast<uint64_t>(&Write8);

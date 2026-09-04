@@ -514,8 +514,8 @@ namespace m2ftg
 				return false;
 			}
 
-			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+			const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+			const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 			// Lets YAMP's command line reach the module's own option parser, which module_start
 			// otherwise calls with an empty argv. Must be before module_start - the parse happens

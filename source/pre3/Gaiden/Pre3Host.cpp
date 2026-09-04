@@ -293,8 +293,8 @@ namespace pre3
 			return false;
 		}
 
-		const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-		const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+		const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+		const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 		ImportFunctions(symbolMap);
 		PrefillVariables(symbolMap, window);

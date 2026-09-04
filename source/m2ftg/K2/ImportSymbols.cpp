@@ -95,7 +95,7 @@ namespace m2ftg
 			//
 			// OPTIONAL: one hit in omg (gate 0x1806910DE) and one in mr; zero in StF/FV/VF2.
 			{
-				hook::pattern boardTail(dll,
+				hook::pattern boardTail(pxd::module_scan(dll),
 					"80 3D ? ? ? ? 00 74 ? B9 01 00 00 00 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 33 C9 E8");
 				if (boardTail.size() == 1)
 				{
@@ -121,7 +121,7 @@ namespace m2ftg
 			// unique - the same three-call shape appears in the board-1 tail, which is followed by
 			// the bank switch back to 0 instead.
 			{
-				hook::pattern board0(dll, "33 C9 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 80 3D");
+				hook::pattern board0(pxd::module_scan(dll), "33 C9 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 80 3D");
 				if (board0.size() == 1)
 				{
 					symbols.Add(S::I960_IO_REFRESH_CALL, board0.get(0).get<void>(7));
@@ -132,7 +132,7 @@ namespace m2ftg
 			// transfer / XOR ECX,ECX / CALL bank_switch`. The INC is what anchors it - the
 			// board-0 pattern above starts at that same XOR, so the two agree on the same site.
 			{
-				hook::pattern linkXfer(dll, "FF 05 ? ? ? ? E8 ? ? ? ? 33 C9 E8");
+				hook::pattern linkXfer(pxd::module_scan(dll), "FF 05 ? ? ? ? E8 ? ? ? ? 33 C9 E8");
 				if (linkXfer.size() == 1)
 				{
 					symbols.Add(S::LINK_TRANSFER_CALL, linkXfer.get(0).get<void>(6));
@@ -144,7 +144,7 @@ namespace m2ftg
 			// exact register allocation occurs once. The IAT displacement is wildcarded because it
 			// is the one part that moves between builds.
 			{
-				hook::pattern clock(dll,
+				hook::pattern clock(pxd::module_scan(dll),
 					"48 83 EC 28 48 8D 4C 24 30 48 C7 44 24 30 00 00 00 00 FF 15 ? ? ? ? "
 					"48 8B 44 24 30 48 83 C4 28 C3");
 				if (clock.size() == 1)

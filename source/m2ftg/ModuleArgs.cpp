@@ -2,6 +2,7 @@
 
 #include "../Utils/MemoryMgr.h"
 #include "../Utils/Patterns.h"
+#include "../pxd/PatternHelpers.h"
 #include "../Utils/Trampoline.h"
 #include "../DebugLog.h"
 #include "../YAMPGeneral.h"
@@ -139,7 +140,7 @@ namespace m2ftg
 			// Verified unique in .text in all five m2ftg modules (stf/fv/mr/vf2/omg), which is
 			// what makes this safe to anchor on: the immediate 3 is the "-xga" table index, so
 			// the pattern is really "the one place the default resolution is chosen".
-			auto found = hook::make_module_pattern(dll, "C7 05 ? ? ? ? 03 00 00 00 E8");
+			auto found = hook::pattern(pxd::module_scan(dll), "C7 05 ? ? ? ? 03 00 00 00 E8");
 			if (found.size() != 1)
 			{
 				DebugLog("[%s::args] option-parser call site not found (%zu matches), module keeps its defaults\n",

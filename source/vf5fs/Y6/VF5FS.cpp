@@ -163,8 +163,8 @@ namespace vf5fs
 		{
 			const Imports symbolMap = BuildSymbolMap(dll);
 
-			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+			const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+			const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 			// Patch up structures and do post-DllMain work here
 			// Saves having to reimplement all the complex constructors and data types

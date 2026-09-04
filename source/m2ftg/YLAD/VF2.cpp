@@ -111,7 +111,7 @@ namespace m2ftg
 			// so the call lands at +0x21 rather than +0x25. That four-byte difference is the whole
 			// reason the shared pattern missed here and the switches were assumed unavailable.
 			{
-				hook::pattern frameStep(dll,
+				hook::pattern frameStep(pxd::module_scan(dll),
 					"40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 3D ? ? ? ? 00 48 89 43 60 74 ? FF 05 ? ? ? ? E8");
 				if (frameStep.size() == 1)
 				{
@@ -240,8 +240,8 @@ namespace m2ftg
 		{
 			const Imports symbolMap = BuildVF2SymbolMap(dll);
 
-			const ScopedUnprotect::Section text(static_cast<HMODULE>(dll), ".text");
-			const ScopedUnprotect::Section rdata(static_cast<HMODULE>(dll), ".rdata");
+			const auto text = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".text");
+			const auto rdata = ScopedUnprotect::Section(static_cast<HMODULE>(dll), ".rdata");
 
 			// Lets YAMP's command line reach the module's own option parser, which module_start
 			// otherwise calls with an empty argv. Must be before module_start - the parse happens

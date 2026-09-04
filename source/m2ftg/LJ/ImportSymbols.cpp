@@ -90,8 +90,8 @@ namespace m2ftg
 
 				for (const LockPattern& candidate : LOCK_PATTERNS)
 				{
-					hook::pattern wlock(dll, candidate.wlock);
-					hook::pattern wunlock(dll, candidate.wunlock);
+					hook::pattern wlock(pxd::module_scan(dll), candidate.wlock);
+					hook::pattern wunlock(pxd::module_scan(dll), candidate.wunlock);
 					if (wlock.size() == 1 && wunlock.size() == 1)
 					{
 						symbols.Add(S::ARCHIVE_LOCK_WLOCK, wlock.get(0).get<void>());
@@ -106,7 +106,7 @@ namespace m2ftg
 			// Motor Raid's CPU core inlines fetch+decode into its execution loop (FUN_18002CAC0), so no
 			// function of this shape exists there. Absent symbol => InstallRamExecFetch does nothing.
 			{
-				hook::pattern fetchExec(dll, "48 83 EC 28 48 8B 05 ? ? ? ? 4C 8D 15 ? ? ? ? 44 8B 48 08 4C 03 08 41 0F B6 41 03");
+				hook::pattern fetchExec(pxd::module_scan(dll), "48 83 EC 28 48 8B 05 ? ? ? ? 4C 8D 15 ? ? ? ? 44 8B 48 08 4C 03 08 41 0F B6 41 03");
 				if (fetchExec.size() == 1)
 				{
 					symbols.Add(S::I960_FETCH_EXEC, fetchExec.get(0).get<void>());
@@ -118,7 +118,7 @@ namespace m2ftg
 			// (0x180053DC0) share this shape, Motor Raid and the YLAD VF2 build do not. Absent
 			// symbol => InstallSystemSwitches does nothing and the switches stay released.
 			{
-				hook::pattern frameStep(dll,
+				hook::pattern frameStep(pxd::module_scan(dll),
 					"40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 3D ? ? ? ? 00 48 89 43 60 0F 84 ? ? ? ? FF 05 ? ? ? ? E8");
 				if (frameStep.size() == 1)
 				{
