@@ -9,6 +9,12 @@
 | Delta | 29 commits, 159 files, **+50,242 / −4,628** lines (see §16 for the one change still outside git) |
 | Platform | Windows x64, MSVC (VS2022), C++17, premake5 |
 
+> **Note, 2026-09-04.** Every `plugin/yampnet/...` path in this document — and in the other
+> `docs/` files that mention one — described the netplay plugin while it still lived inside this
+> repository. It has since moved out to its own: <https://github.com/biggestsonicfan/YAMPnet>,
+> where those files sit under `source/`. Nothing about the design changed, only the location; the
+> paths are left as written because this is a record of the work as it was done.
+
 At the baseline, YAMP was a single-purpose launcher: it hosted **one** arcade module — Virtua Fighter 5: Final Showdown extracted from Yakuza 6 — with no audio, one hard-coded keyboard layout, and a DX11 render path. This branch turns it into a **multi-title, multi-engine-generation arcade module host** with audio, configurable input, integrity verification, a game launcher, homebrew ROM support and online play.
 
 ---

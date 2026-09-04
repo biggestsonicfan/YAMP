@@ -66,8 +66,8 @@ workspace "*"
 	-- into engine pad state). Moved up out of source/m2ftg on 2026-07-30: all three VF5FS hosts use
 	-- it too, and YAMPSettings.h itself includes it, so it was never m2ftg-specific.
 	-- source/net = the netplay PLUGIN LOADER only (NetPlugin.cpp + the shared YampNet.h ABI). The
-	-- netcode itself is a separate DLL project (see "YampNet" at the bottom of this file) so it can
-	-- be rebuilt, replaced or omitted entirely without touching YAMP.
+	-- netcode itself is a separate DLL, built from its own repository (see the note at the bottom
+	-- of this file) so it can be rebuilt, replaced or omitted entirely without touching YAMP.
 
 	cppdialect "C++17"
 	staticruntime "on"
@@ -122,37 +122,20 @@ filter { "files:**HcaDecoder.cpp or **AdxDecoder.cpp or **AtomEngine.cpp" }
 filter {}
 
 -- ------------------------------------------------------------------------------------------------
--- YampNet - the OPTIONAL netplay plugin, built as its own DLL.
+-- YampNet - the OPTIONAL netplay plugin - is NOT built here any more.
 --
--- Kept a separate project on purpose: the netcode is expected to churn long after the rest of YAMP
--- is stable, and a release must be able to ship with no netplay in it at all. YAMP never links
--- against this - it LoadLibrary's it at runtime (source/net/NetPlugin.cpp) and disables netplay
--- when it is absent - so simply not shipping yampnet.dll is the "exclude it" switch. Building this
--- project is likewise optional; YAMP.vcxproj does not depend on it.
+-- It moved out to its own repository: https://github.com/biggestsonicfan/YAMPnet
 --
--- It lands in the same output directory as YAMP.exe, which is where the loader looks.
+-- Nothing about the arrangement changed, only where the sources live. YAMP never linked against
+-- the plugin; it LoadLibrary's yampnet.dll at runtime (source/net/NetPlugin.cpp) and disables
+-- netplay when it is absent, so shipping a build without the DLL in it is still the whole
+-- "exclude netplay" switch. Building it was likewise always optional and YAMP.vcxproj never
+-- depended on it - which is exactly why it could leave without this project noticing.
 --
--- NOTE it includes source/m2ftg + source/pxd headers: the plugin writes execute_info.pad[] itself
--- (that was a deliberate scope choice), so it is coupled to those layouts. The yampnet_layout
--- handshake in YampNet.h is what turns a stale-layout plugin into a clean refusal at load instead
--- of silent memory corruption - keep it honest.
+-- source/net stays: the loader, the UI and the shared YampNet.h ABI header are YAMP's half of the
+-- contract. The plugin repository resolves YampNet.h (plus pxd/LJ/sl.h and m2ftg/m2ftg.h, which
+-- it is coupled to because it writes execute_info.pad[] itself) out of a YAMP checkout rather
+-- than vendoring copies, so a layout change here reaches it on its next rebuild. If only one of
+-- the two halves gets rebuilt, the yampnet_layout handshake in YampNet.h refuses the load - keep
+-- that honest when either layout changes.
 -- ------------------------------------------------------------------------------------------------
-workspace "YAMP"
-
-project "YampNet"
-	kind "SharedLib"
-	language "C++"
-	targetname "yampnet"
-
-	files { "plugin/yampnet/**.h", "plugin/yampnet/**.cpp",
-			"source/net/YampNet.h" }
-
-	includedirs { "source/net", "source" }
-
-	-- ws2_32: the UDP/TCP transport. crypt32/secur32: TLS to the RPCN server.
-	links { "ws2_32", "crypt32", "secur32" }
-
-	vpaths { ["Headers/*"] = { "plugin/yampnet/**.h", "source/net/*.h" },
-			["Sources/*"] = "plugin/yampnet/**.cpp" }
-
-filter {}

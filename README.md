@@ -119,8 +119,9 @@ the board expects to find them.
 
 ### Netplay — experimental
 
-Netplay ships as an **optional** `yampnet.dll`. If it is absent the entire feature disappears
-cleanly and everything else works.
+Netplay ships as an **optional** `yampnet.dll`, built from its own repository,
+[YAMPnet](https://github.com/biggestsonicfan/YAMPnet). If it is absent the entire feature
+disappears cleanly and everything else works.
 
 Matchmaking runs over **RPCN**, the community server for PlayStation Network emulation: a TLS
 session for login and the room list, a UDP address-discovery exchange, and then **direct
@@ -224,8 +225,12 @@ msbuild build/YAMP.sln -p:Configuration="Debug Win64" -p:Platform=x64 -m
 ```
 
 C++17, Visual Studio 2022, `Debug` / `Release` / `Master` configurations on the `Win64` platform.
-Output is `YAMP.exe`; `yampnet.dll` builds from the same solution and is optional — YAMP does not
-link against it.
+Output is `YAMP.exe`.
+
+The netplay plugin is **not** built here — it lives in
+[YAMPnet](https://github.com/biggestsonicfan/YAMPnet) and builds against this checkout's headers.
+YAMP does not link against it, so a build with no `yampnet.dll` beside the `.exe` is simply a
+build without netplay. Drop the DLL next to `YAMP.exe` to turn the feature on.
 
 `premake5.lua` is the source of truth for the project files. Do not hand-edit anything under
 `build/`; edit the Lua and regenerate.
