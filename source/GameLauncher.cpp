@@ -15,7 +15,9 @@
 
 #include "YAMPGeneral.h"
 #include "GameVerify.h"
+#include "GameRegistry.h"
 #include "RenderWindow.h"
+#include "StringUtil.h"
 #include "DebugLog.h"
 #include "imgui/imgui.h"
 #include "m2ftg/DisplayModes.h"
@@ -611,8 +613,34 @@ namespace Launcher
 					quitRequested = true;
 				}
 				ImGui::SameLine();
-				ImGui::TextDisabled("Esc - exit, F1 - settings. Games can also be booted directly with "
-					"-stf / -fv / -mr / -vf2 / -vf2-k2 / -von-k2 / -vf5fs / -vf5fs-lj / -vf5fs-ylad.");
+				ImGui::TextDisabled("Esc - exit, F1 - settings.");
+
+				// BUILT FROM THE REGISTRY, NOT TYPED OUT. The hand-written version of this line
+				// listed nine of the thirteen switches - it was written when there were nine, and
+				// -stf-gaiden, -mr-gaiden, -fv2 and -src2 arrived without anyone thinking to come
+				// back to it. GameRegistry is the one table that has to be right for a switch to
+				// work at all, so a row that boots is now a row that appears, and this cannot
+				// drift again. Built once - the table is constexpr and never changes at runtime.
+				static const std::string bootArgs = []
+				{
+					std::string list;
+					size_t count = 0;
+					const GameRegistry::Entry* entries = GameRegistry::Entries(count);
+					for (size_t i = 0; i < count; ++i)
+					{
+						if (entries[i].bootArg == nullptr)
+						{
+							continue;   // the launcher's own row, which has no switch
+						}
+						if (!list.empty())
+						{
+							list += " / ";
+						}
+						list += WcharToUTF8(entries[i].bootArg);
+					}
+					return "Games can also be booted directly with " + list + ".";
+				}();
+				ImGui::TextDisabled("%s", bootArgs.c_str());
 			}
 			ImGui::End();
 		}
