@@ -486,6 +486,17 @@ namespace m2ftg
 			net::DriveSession();   // -net-host / -net-join; idempotent, inert for a lobby session
 		}
 
+		// THE TITLE, AND NOTHING ELSE - the same shape as pre3's CommBoard::LinkedCabinetSupported.
+		// This answers "can this game do linked-cabinet play at all", which is what decides whether
+		// the Netplay page exists; it must NOT consult the role or whether the board has booted,
+		// because the page is where the role is chosen and it is opened before the board is up.
+		// Virtual On is the only title in this module with a ring to talk through - VF2 from Kiwami
+		// 2 shares the host and has no comm board - so the game id is the whole answer.
+		bool LinkedCabinetSupported()
+		{
+			return gGeneral.GetGameId() == YAMPGeneral::GameId::VON_K2;
+		}
+
 		// Reported to the netplay overlay - see K2Host.h. Reads the ROM's own answers rather than
 		// YAMP's intentions: node id/count are what `Net_check` copied out of the ring, and
 		// `checkDone` is net_flag, so an overlay saying "linked" is saying what the CABINET

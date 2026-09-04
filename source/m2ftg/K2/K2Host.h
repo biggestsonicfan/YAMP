@@ -71,5 +71,10 @@ namespace m2ftg
 		// checkDone is the ROM's own Net_check completing (net_flag).
 		using LinkedCabinet = net::LinkedCabinetStatus;
 		bool GetLinkedCabinet(LinkedCabinet& out);
+
+		// "Does this title have a ring at all", asked before the board is up and before a role is
+		// chosen - so it is a title check, not a status check, and GetLinkedCabinet above is not a
+		// substitute for it. This is what puts the Netplay page in front of the player.
+		bool LinkedCabinetSupported();
 	}
 }

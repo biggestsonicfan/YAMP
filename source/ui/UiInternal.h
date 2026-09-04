@@ -103,15 +103,21 @@ inline bool IsPre3Game()
 // determinism set is already in its DwGame row), so "has a measured counter" is exactly "can\n// sustain a session" - and a game that gets one starts offering the page automatically.
 inline bool IsNetplayGame()
 {
-	// THREE ANSWERS, NOT TWO, and the third is a different question entirely. The first two ask
+	// TWO KINDS OF ANSWER, and the second is a different question entirely. The first two calls ask
 	// "can this game sustain a LOCKSTEP round", which is derived from having a measured ROM frame
 	// counter (m2ftg) or a pinnable deterministic clock (pre3, FV2 only). A LINKED-CABINET game
 	// needs none of that and would fail both tests forever - so Sega Racing Classic 2 showed no
-	// Netplay page and no overlay at all while its link worked perfectly, which is the same gap
-	// Virtual On had on the m2ftg side before `GetLinkedCabinet` existed.
+	// Netplay page and no overlay at all while its link worked perfectly.
+	//
+	// Virtual On had exactly that gap for longer, and less visibly: GetLinkedCabinetStatus() below
+	// has always asked K2, so the OVERLAY worked while the page that chooses the cabinet role was
+	// unreachable, leaving settings.ini and the command line as the only way in. Every linked game
+	// must be named here as well as there - the two lists answer different questions and neither
+	// implies the other.
 	return m2ftg::NetplaySupported() || pre3::NetplaySupported()
 		|| pre3::CommBoard::LinkedCabinetSupported()
-		|| m2ftg::MrLink::LinkedCabinetSupported();
+		|| m2ftg::MrLink::LinkedCabinetSupported()
+		|| m2ftg::K2::LinkedCabinetSupported();
 }
 
 // The linked-cabinet report, whichever emulator is running. All three games fill the shared
