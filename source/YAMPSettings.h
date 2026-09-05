@@ -178,9 +178,16 @@ public:
 	std::string m_netNpid;
 	std::string m_netToken;
 	std::string m_netCertFingerprint;
-	// Title id the rooms are scoped to. Any well-formed comm id works (9 uppercase/digits, '_',
-	// 2 digits) because the server auto-registers unknown titles when CreateMissing is on.
-	std::string m_netComId = "NPWR02113_00";
+	// Which lobby space the rooms live in. EMPTY IS THE NORMAL VALUE and means "this game's own":
+	// the plugin turns the running game's name into a per-game communication id (yampnet's
+	// ComId.h). Filling it in overrides that with a literal comm id or a game key, which is only
+	// wanted for testing against someone on a different game.
+	//
+	// It used to default to "NPWR02113_00" - one hardcoded id for every game YAMP hosts, so a
+	// Virtual On cabinet advertised in the same room list as a Sonic the Fighters one and the
+	// mismatch only showed up once the netcodes were talking. See kLegacyComId in YAMPSettings.cpp
+	// for what happens to an ini that still carries it.
+	std::string m_netComId;
 	// Frames of input delay. Higher hides more latency at the cost of feel; the lockstep engine
 	// stalls rather than desyncs if this is too low for the link.
 	int m_netFrameDelay = 3;

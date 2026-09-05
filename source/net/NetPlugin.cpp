@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "../DebugLog.h"
+#include "../GameRegistry.h"
 #include "../YAMPGeneral.h"
 #include "../m2ftg/m2ftg.h"
 #include "../pre3/pre3.h"
@@ -268,6 +269,11 @@ namespace net
         }
     }
 
+    const char* AutoComIdKey()
+    {
+        return GameRegistry::Find(gGeneral.GetGameId())->arcadeName;
+    }
+
     void ParseCommandLine()
     {
         if (s_parsed)
@@ -364,7 +370,8 @@ namespace net
             rc.port = 0;                     // plugin default (31313)
             rc.npid = s_cfg.npid;
             rc.token = s_cfg.password;
-            rc.communication_id = s_cfg.com_id;
+            // Empty is the normal case: the game names itself and the plugin derives the id.
+            rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
             rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
 
             if (s_api->connect(s_session, &rc) != YAMPNET_OK)
@@ -602,15 +609,17 @@ namespace net
         CopyArg(s_cfg.npid, sizeof(s_cfg.npid), npid);
         CopyArg(s_cfg.password, sizeof(s_cfg.password), token);
         CopyArg(s_cfg.fingerprint, sizeof(s_cfg.fingerprint), fingerprint);
-        if (comId != nullptr && *comId != '\0')
-            CopyArg(s_cfg.com_id, sizeof(s_cfg.com_id), comId);
+        // Copied even when EMPTY, unlike before: empty now MEANS something - this game's own
+        // lobby space - so clearing the field has to clear the config, not leave the last value
+        // it was connected with standing.
+        CopyArg(s_cfg.com_id, sizeof(s_cfg.com_id), comId);
 
         yampnet_rpcn_config rc = {};
         rc.server = s_cfg.server;
         rc.port = 0;                     // plugin default (31313)
         rc.npid = s_cfg.npid;
         rc.token = s_cfg.password;
-        rc.communication_id = s_cfg.com_id;
+        rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
         rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
 
         if (s_api->connect(s_session, &rc) != YAMPNET_OK)

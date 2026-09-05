@@ -2,6 +2,8 @@
 // Split out of YAMPUserInterface.cpp (2026-08-09); the class and its page-copy state stay
 // in YAMPUserInterface.h - this file only defines the panel methods.
 
+#include <cstdio>
+
 #include "../YAMPUserInterface.h"
 #include "../ui/UiInternal.h"
 
@@ -191,12 +193,24 @@ void YAMPUserInterface::DrawNetplay()
 	ImGui::Checkbox("Show", &m_netShowToken);
 
 	ImGui::PushItemWidth(-180.0f);
-	if (ImGui::InputText("Communication ID", m_netComId, sizeof(m_netComId), lockFlag)) m_pageModified = true;
+	// Empty is the normal state, so the hint has to say what empty DOES - a blank box that
+	// silently picks something is worse than no box at all. It names the actual game rather than
+	// "automatic" so the player can see which lobby space they are about to be in.
+	char comIdHint[96] = {};
+	snprintf(comIdHint, sizeof(comIdHint), "automatic - %s", net::AutoComIdKey());
+	if (ImGui::InputTextWithHint("Communication ID", comIdHint, m_netComId, sizeof(m_netComId),
+		lockFlag)) m_pageModified = true;
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("The title the rooms are scoped to. Both players must match.\n"
-			"Any well-formed ID works (9 uppercase letters/digits, '_', 2 digits) -\n"
-			"the server registers an unknown title on first use.");
+		ImGui::SetTooltip("Which lobby space the rooms live in. Both players must match.\n"
+			"\n"
+			"LEAVE IT EMPTY. Each game then gets a space of its own, so a room list only\n"
+			"ever shows matches you can actually play - which is what a blank box means\n"
+			"here, not that nothing is set.\n"
+			"\n"
+			"Fill it in only to meet someone outside that: a game's NAME works as well as\n"
+			"a literal comm id (9 uppercase letters/digits, '_', 2 digits), and the server\n"
+			"registers an unknown one on first use.");
 	}
 
 	if (ImGui::InputText("Certificate SHA-256", m_netFingerprint, sizeof(m_netFingerprint), lockFlag)) m_pageModified = true;

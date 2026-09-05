@@ -219,7 +219,19 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_netNpid = GetPrivateProfileStdStringA("Netplay", "Npid", "", iniPath);
 		m_netToken = GetPrivateProfileStdStringA("Netplay", "Token", "", iniPath);
 		m_netCertFingerprint = GetPrivateProfileStdStringA("Netplay", "CertFingerprint", "", iniPath);
-		m_netComId = GetPrivateProfileStdStringA("Netplay", "CommunicationId", "NPWR02113_00", iniPath);
+		m_netComId = GetPrivateProfileStdStringA("Netplay", "CommunicationId", "", iniPath);
+		// Every ini written before per-game lobby spaces carries the old default, and nobody chose
+		// it - it was simply what the field started as. Left alone it would pin that install to the
+		// one shared lobby list this replaced, so it is read as "unset" and the game picks its own.
+		// A player who genuinely wants those rooms can type it back in; anything else the field
+		// holds is honoured untouched.
+		{
+			static constexpr char kLegacyComId[] = "NPWR02113_00";
+			if (m_netComId == kLegacyComId)
+			{
+				m_netComId.clear();
+			}
+		}
 		m_netFrameDelay = GetPrivateProfileIntW(L"Netplay", L"FrameDelay", 3, iniPath.c_str());
 		if (m_netFrameDelay < 0 || m_netFrameDelay > 20)
 		{

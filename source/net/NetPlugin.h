@@ -39,7 +39,7 @@ namespace net
     //   -net-user <npid>     override the account
     //   -net-pass <secret>
     //   -net-fp <64 hex>     server cert SHA-256; omit for a normally-validated certificate
-    //   -net-comid <id>      title comm id, defaults to NPWR02113_00
+    //   -net-comid <id>      lobby space: a comm id or a game key; empty = this game's own
     // One of -net-host / -net-join is what arms this path; a configured account on its own leaves
     // netplay to the lobby.
     struct SessionConfig
@@ -48,11 +48,23 @@ namespace net
         char npid[24] = {};
         char password[64] = {};
         char fingerprint[72] = {};
-        char com_id[16] = "NPWR02113_00";
+        // Empty means AUTOMATIC - AutoComIdKey() supplies the running game's own lobby space.
+        // Wide enough for a game name, because that is what a key normally is.
+        char com_id[64] = {};
         unsigned long long room_id = 0;
         bool host = false;
         bool enabled = false;      // true once -net-server was supplied
     };
+
+    // The lobby space this game plays in when nothing is configured: the arcade game's name,
+    // which yampnet's ComId.h turns into a per-game communication id. Never null.
+    //
+    // A NAME rather than an id on purpose - the standard for turning one into the other lives in
+    // the plugin, next to the netcode whose compatibility it partitions, and duplicating it here
+    // would mean two copies to keep in step. Both builds of a game answer the same name (Sonic the
+    // Fighters out of Lost Judgment and out of Gaiden are one lobby), because the arcade game is
+    // what a match is played against, not the title it shipped in.
+    const char* AutoComIdKey();
 
     // Fills the config from GetCommandLineW(). Safe to call before Load().
     void ParseCommandLine();

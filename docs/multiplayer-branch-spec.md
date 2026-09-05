@@ -1028,7 +1028,7 @@ Loads `yampnet.dll` from the YAMP.exe directory, negotiates the ABI, builds the 
 **Two drive paths, sharing one session** (only one may be in use at a time — the UI refuses to act while `Config().enabled` is set):
 
 1. **Command line** — the two-machine regression harness, deliberately hands-free and auto-starting:
-   `-net-host`, `-net-join <roomId>`, `-net-server <host>`, `-net-user <npid>`, `-net-pass <secret>`, `-net-fp <64 hex>`, `-net-comid <id>`. One of `-net-host`/`-net-join` arms the path. Keeping this means adding the lobby cannot silently break the only test that proves the netcode end to end.
+   `-net-host`, `-net-join <roomId>`, `-net-server <host>`, `-net-user <npid>`, `-net-pass <secret>`, `-net-fp <64 hex>`, `-net-comid <id>` (a comm id or a game key; omitted = this game's own lobby space). One of `-net-host`/`-net-join` arms the path. Keeping this means adding the lobby cannot silently break the only test that proves the netcode end to end.
 2. **Lobby** (Settings → Netplay) — the same steps under explicit control, one click at a time. Sits in the lobby until the host presses Start (`RequestStartRound()`).
 
 `DriveSession()` (connect → discovery → host/join, idempotent, called every frame), `Connect/Disconnect/HostRoom/JoinRoom/RefreshRooms/GetRooms/LeaveRoom`, and a flattened `Status` struct so the UI never touches the plugin ABI directly (state, room id, local player, stall count, `peer_lost` + reason, `desynced` + frame/local/remote, status text, error text).
@@ -1434,7 +1434,7 @@ re-pumped between steps, render on the last only, debt dropped past the cap). Vi
 | | `Npid` | string | `""` | |
 | | `Token` | string | `""` | Account **password** — RPCN's Login takes (npid, password, token) and the token is only used with email validation enabled, which is off by default |
 | | `CertFingerprint` | 64 hex | `""` | **Leave empty** unless the server is self-signed (§14.6) |
-| | `CommunicationId` | string | `NPWR02113_00` | Any well-formed comm id works with `CreateMissing` on |
+| | `CommunicationId` | string | `""` | **Empty is the normal value**: each game gets a lobby space of its own, because `net::AutoComIdKey()` sends the running game's arcade name and the plugin turns it into a per-game comm id (yampnet `source/ComId.h`). A value here overrides that with a literal comm id or another game's key, which is only wanted to meet someone outside your game. An ini still carrying the old `NPWR02113_00` default is read as empty — it was one shared lobby list for every game YAMP hosts, and nobody chose it |
 | | `FrameDelay` | int | 3 | Higher hides more latency; too low stalls rather than desyncs |
 | | `TimerTrace` | 0/1 | 0 | **Diagnostic, no UI.** One line per emulated frame to `yampnet.log` carrying the i960's four timer channels and the instructions charged to them. The timers count INSTRUCTIONS, not wall clock, so the line is a direct readout of instructions-per-frame and two peers' logs diff line-for-line (§14.8d). Runs in and out of a round, so it can be validated on one machine. Costs a file open/append/close per frame — leave off for ordinary play |
 | | `ForceUnsupported` | 0/1 | 0 | **Diagnostic, no UI.** Lets a game whose `netplayReady` is false still open a round, so a game that is measured but not yet trusted can be observed at all — which is what §14.8d was found with. A round run under it is expected to be wrong |

@@ -142,7 +142,8 @@ private:
 	char m_netNpid[24] = {};
 	char m_netToken[64] = {};
 	char m_netFingerprint[72] = {};
-	char m_netComId[16] = {};
+	// Wider than a comm id because it also takes a GAME KEY, which is normally a game's name.
+	char m_netComId[64] = {};
 	int m_netFrameDelay = 3;
 	// pre3 only: what this machine publishes as the round-start state when it HOSTS.
 	bool m_netPre3VsStart = false;
