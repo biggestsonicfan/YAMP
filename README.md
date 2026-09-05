@@ -242,8 +242,9 @@ so in the UI rather than pretending to apply.
 
 ## Known issues and limitations
 
-* **Netplay is experimental.** It needs an RPCN account, and that account's password is stored in
-  plain text in `settings.ini`. Two players / two machines only.
+* **Netplay is experimental.** It needs an RPCN account — the Netplay page will register one for
+  you on the default server (**Create a new account**), so no other client is needed — and that
+  account's password is stored in plain text in `settings.ini`. Two players / two machines only.
 * **Virtua Fighter 2 from Kiwami 2 and Motor Raid from Like a Dragon Gaiden have no netplay.** The
   Gaiden Motor Raid build is recognised and explicitly refused by the link layer rather than being
   allowed to half-work.

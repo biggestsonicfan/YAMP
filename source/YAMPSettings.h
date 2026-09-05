@@ -174,7 +174,12 @@ public:
 	// (and in yampnet.log), which is where the value to paste here comes from. Never pin a
 	// publicly issued certificate - it is reissued at every renewal and the pin would then reject
 	// the very server it protects.
-	std::string m_netServer;
+	//
+	// The default is the community server YAMP's netplay is actually played on, and where the
+	// Netplay page's "Create a new account" registers one. It has a real certificate on a real
+	// domain, so nothing needs pinning.
+	static constexpr const char* kDefaultRpcnServer = "rpcn.sonicthefighte.rs";
+	std::string m_netServer = kDefaultRpcnServer;
 	std::string m_netNpid;
 	std::string m_netToken;
 	std::string m_netCertFingerprint;

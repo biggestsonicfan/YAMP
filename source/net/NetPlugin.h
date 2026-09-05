@@ -164,6 +164,25 @@ namespace net
     bool Connect(const char* server, const char* npid, const char* token,
                  const char* fingerprint, const char* comId);
     void Disconnect();
+
+    // ---- Account creation -------------------------------------------------------------------
+    //
+    // Registering an RPCN account from inside YAMP, so a player whose only PlayStation-anything is
+    // this emulator does not have to find another client to sign up with first. It runs on the
+    // plugin's own connection with no login, leaves any session alone, and needs nothing more than
+    // a reachable server.
+    //
+    // Asynchronous: CreateAccount() starts it, PumpAccount() every frame advances it, and
+    // AccountState() says how it went. AccountError() is filled only on FAILED.
+    bool CreateAccount(const char* server, const char* npid, const char* password,
+                       const char* email, const char* fingerprint);
+    yampnet_account_state AccountState();
+    const char* AccountError();
+    // Drives an in-flight sign-up. Called from the Netplay page rather than the game loop
+    // because that is the only place it can be started from, and because it must work with no
+    // game running at all - the launcher has no round to poll from. Inert when nothing is in
+    // flight, so calling it every frame the page is open costs nothing.
+    void PumpAccount();
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage. `src2` is the linked-cabinet equivalent:
     // the host's live GAME ASSIGNMENTS, published so the browser can list what the race IS.

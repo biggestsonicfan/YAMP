@@ -215,7 +215,10 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		m_stfFixBackupTimeIndex = GetPrivateProfileIntW(SECTION_NAME, L"FixBackupRamTimeIndex", 1, iniPath.c_str()) != 0;
 		// Netplay lives in its own ini section: it is host configuration, not per-title state,
 		// and keeping it separate means a credential never lands in a game's settings block.
-		m_netServer = GetPrivateProfileStdStringA("Netplay", "Server", "", iniPath);
+		// Defaulted rather than empty: there is one server YAMP's netplay is actually played on,
+		// and a blank box gives a player nothing to type - the host name is not something anyone
+		// can guess, and account creation needs it before there is an account at all.
+		m_netServer = GetPrivateProfileStdStringA("Netplay", "Server", kDefaultRpcnServer, iniPath);
 		m_netNpid = GetPrivateProfileStdStringA("Netplay", "Npid", "", iniPath);
 		m_netToken = GetPrivateProfileStdStringA("Netplay", "Token", "", iniPath);
 		m_netCertFingerprint = GetPrivateProfileStdStringA("Netplay", "CertFingerprint", "", iniPath);

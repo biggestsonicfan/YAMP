@@ -63,7 +63,11 @@ extern "C" {
 // against another. Two peers on different builds still have to be updated together. That is
 // survivable rather than silent - a mismatched packet decodes to the wrong length, is dropped,
 // and the link simply never comes up.
-#define YAMPNET_ABI_VERSION 10u
+// ABI 11 adds ACCOUNT CREATION - create_account / get_account_state / get_account_error at the
+// end of the table. An RPCN account had to be made with some other client before YAMP could be
+// used at all, which is a strange first step for a player whose only PlayStation-anything is this
+// emulator. The plugin already spoke the server's Create command; nothing exposed it.
+#define YAMPNET_ABI_VERSION 11u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -184,6 +188,34 @@ typedef struct yampnet_rpcn_config
     // which is how you obtain the value to pin.
     const char* cert_fingerprint;
 } yampnet_rpcn_config;
+
+// ---------------------------------------------------------------------------------------------
+// Account creation
+// ---------------------------------------------------------------------------------------------
+//
+// RPCN's Create command, which runs on its own connection BEFORE any login - so this needs no
+// account and works from a session that has never connected. The server reads all five string
+// fields with get_string(false): an empty one is rejected as Malformed rather than defaulted,
+// which is why the plugin fills in a default for the two YAMP does not ask a player about.
+typedef struct yampnet_account_config
+{
+    const char* server;              // RPCN host; the same one the account will log in to
+    uint16_t port;                   // 0 = the plugin's default (31313)
+    const char* cert_fingerprint;    // as in yampnet_rpcn_config; empty for a real certificate
+    const char* npid;                // 3-16 chars of [A-Za-z0-9_-]; this is the login name
+    const char* password;
+    const char* email;               // must parse as an address even where validation is off
+    const char* online_name;         // null/empty = the npid, which is what YAMP passes
+    const char* avatar_url;          // null/empty = a plugin default; never sent empty
+} yampnet_account_config;
+
+typedef enum yampnet_account_state
+{
+    YAMPNET_ACCOUNT_IDLE = 0,        // nothing has been asked for
+    YAMPNET_ACCOUNT_WORKING,         // connected or connecting; the reply has not arrived
+    YAMPNET_ACCOUNT_CREATED,         // the server accepted it - the account can now log in
+    YAMPNET_ACCOUNT_FAILED,          // see get_account_error
+} yampnet_account_state;
 
 // ---------------------------------------------------------------------------------------------
 // Room game flags
@@ -449,6 +481,21 @@ typedef struct yampnet_api
     // nothing new has arrived. Newest-wins, deliberately: an older datagram carries nothing a
     // newer one does not. 0 means "keep what you have" - never hand the hardware a gap.
     int32_t (*link_take)(yampnet_session* s, void* out, uint32_t cap);
+
+    // --- ABI 11: account creation ---
+    //
+    // Asynchronous, like everything else here, and INDEPENDENT of the session: it runs on its own
+    // connection, needs no login, and leaves get_state() alone - a session that is IDLE stays
+    // IDLE while an account is being made, and one that is in a room is not disturbed by it.
+    //
+    // Call it, then poll() every frame and watch get_account_state(). The request carries its own
+    // timeout, so WORKING always resolves; it cannot sit there for good because a server stopped
+    // answering. A second call while one is in flight replaces it.
+    yampnet_result (*create_account)(yampnet_session* s, const yampnet_account_config* cfg);
+    yampnet_account_state (*get_account_state)(yampnet_session* s);
+    // Why the last attempt failed, or "" when it did not. Never NULL. Separate from get_error()
+    // on purpose: a rejected sign-up is not a failed netplay session, and must not read as one.
+    const char* (*get_account_error)(yampnet_session* s);
 } yampnet_api;
 
 // The single exported symbol. Returns NULL if the plugin cannot satisfy `requested_abi`.

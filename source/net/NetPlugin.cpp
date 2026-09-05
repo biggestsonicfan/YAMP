@@ -635,6 +635,51 @@ namespace net
         return true;
     }
 
+    bool CreateAccount(const char* server, const char* npid, const char* password,
+                       const char* email, const char* fingerprint)
+    {
+        if (!IsAvailable())
+            return false;
+
+        yampnet_account_config ac = {};
+        ac.server = server;
+        ac.port = 0;                     // plugin default (31313)
+        ac.cert_fingerprint = (fingerprint != nullptr && *fingerprint != '\0') ? fingerprint
+                                                                              : nullptr;
+        ac.npid = npid;
+        ac.password = password;
+        ac.email = email;
+        // online_name and avatar_url are left null on purpose: the plugin fills both in. A second
+        // display name is a question with no useful answer for a player with one account.
+        if (s_api->create_account(s_session, &ac) != YAMPNET_OK)
+        {
+            NetLog("ui: account not created: %hs", AccountError());
+            return false;
+        }
+        NetLog("ui: creating account %hs on %hs", npid != nullptr ? npid : "?",
+               server != nullptr ? server : "?");
+        return true;
+    }
+
+    yampnet_account_state AccountState()
+    {
+        return IsAvailable() ? s_api->get_account_state(s_session) : YAMPNET_ACCOUNT_IDLE;
+    }
+
+    const char* AccountError()
+    {
+        return IsAvailable() ? s_api->get_account_error(s_session) : "";
+    }
+
+    void PumpAccount()
+    {
+        // Only while something is in flight. poll() also drives a live session, and pumping that
+        // from the settings page - on top of the game loop that already owns it - is not this
+        // function's business.
+        if (IsAvailable() && s_api->get_account_state(s_session) == YAMPNET_ACCOUNT_WORKING)
+            s_api->poll(s_session);
+    }
+
     void Disconnect()
     {
         if (!IsAvailable() || s_cfg.enabled)

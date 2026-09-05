@@ -10,6 +10,11 @@
 // that can sit pending until the user remembers to press Apply.
 void YAMPUserInterface::DrawNetplay()
 {
+	// A sign-up in flight is advanced from here: this page is where it can be started, it must
+	// work with no game running (the launcher has no round loop to poll from), and the exchange
+	// is over in a second or two. Inert when nothing is in flight.
+	net::PumpAccount();
+
 	ImGui::PushTextWrapPos();
 	ImGui::TextColored(WARNING_COLOUR, "Netplay is experimental. It plays against one other machine "
 		"over an RPCN server - delay-based lockstep for the fighting games (the scheme Sonic the "
@@ -226,6 +231,59 @@ void YAMPUserInterface::DrawNetplay()
 			"\n"
 			"Do not pin a real certificate: it is reissued every renewal and the pin would then\n"
 			"start rejecting the server.");
+	}
+
+	// ---- Create an account --------------------------------------------------------------------
+	//
+	// An RPCN account had to be made with some other client before any of this was usable, which
+	// is a strange first step for a player whose only PlayStation-anything is this emulator. It
+	// reuses the name and password typed above rather than asking for them twice: what is being
+	// registered IS the account this page will log in with.
+	if (!accountLocked && ImGui::CollapsingHeader("Create a new account"))
+	{
+		ImGui::PushTextWrapPos();
+		ImGui::TextUnformatted("Registers the account name and password above on the server above. The e-mail address is stored by the server and is not saved in your settings.");
+		ImGui::PopTextWrapPos();
+
+		ImGui::PushItemWidth(-180.0f);
+		// Not m_pageModified: this is never saved, so there is nothing pending to Apply.
+		ImGui::InputText("E-mail", m_netEmail, sizeof(m_netEmail));
+		ImGui::PopItemWidth();
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("The server stores one for every account and rejects an address that\n"
+				"cannot be a real one. Whether it ever gets mail depends on the server.");
+		}
+
+		const yampnet_account_state acct = net::AccountState();
+		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
+			&& m_netToken[0] != '\0' && m_netEmail[0] != '\0'
+			&& acct != YAMPNET_ACCOUNT_WORKING;
+		if (ImGuiCustom::ButtonToggleable("Create account", ready))
+		{
+			net::CreateAccount(m_netServer, m_netNpid, m_netToken, m_netEmail, m_netFingerprint);
+		}
+		if (!ready && ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Fill in the server, account, password and e-mail first.");
+		}
+
+		switch (acct)
+		{
+		case YAMPNET_ACCOUNT_WORKING:
+			ImGui::TextDisabled("Creating the account...");
+			break;
+		case YAMPNET_ACCOUNT_CREATED:
+			ImGui::TextUnformatted("Account created. Press Connect to use it.");
+			break;
+		case YAMPNET_ACCOUNT_FAILED:
+			ImGui::PushTextWrapPos();
+			ImGui::TextColored(WARNING_COLOUR, "%s", net::AccountError());
+			ImGui::PopTextWrapPos();
+			break;
+		default:
+			break;
+		}
 	}
 
 	// The delay is read when a round starts, not when the session connects, so it stays editable
