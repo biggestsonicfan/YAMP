@@ -896,7 +896,7 @@ YAMP.exe                                     yampnet.dll (optional)
 
 **Why a plugin.** Netcode is expected to churn long after the rest of YAMP is stable, and a release must be able to ship with **no netcode at all**. Omitting `yampnet.dll` is the "exclude it" switch: `IsAvailable()` stays false, `Api()` stays null, every netplay entry point in the UI hides itself, and nothing else notices.
 
-### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 10`)
+### 14.2 The ABI (`source/net/YampNet.h`, `YAMPNET_ABI_VERSION 12`)
 
 Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exported symbol**, `YampNet_GetApi(uint32_t requested_abi)`, returning a `yampnet_api` function table, so the loader does exactly one `GetProcAddress` and every later addition is a version bump rather than a new symbol.
 
@@ -913,6 +913,8 @@ Plain C — no STL, no exceptions, no C++ classes across the boundary. **One exp
 - ABI 9 added the **linked-cabinet channel** — `link_ready` / `link_send` / `link_take` — see §14.10. Appended to the table and adding no struct, but a bump all the same: a stale plugin simply would not have the three entries, and calling through a null tail pointer is not a failure mode worth allowing.
 - ABI 10 changed **no signature at all** — it changed the linked-cabinet channel's WIRE format to an RLE-coded payload (§14.10). The function table is untouched, so the bump exists purely to stop a `YAMP.exe` and a `yampnet.dll` from different builds pairing up: they would agree on every call and disagree on the bytes. Note what a version cannot do here — it guards YAMP against ITS plugin, not one machine against another. **Two peers still have to be updated together.**
 - ABI 6 added **room game flags**: `yampnet_room_config::game_flags` (in), `yampnet_room_info::game_flags` (out, per browser row) and `get_room_flags(session)`. These carry the **cabinet settings a match is played under**, which are properties of the *room*, not of a machine — see §14.9.
+- ABI 11 added **account creation** — `create_account` / `get_account_state` / `get_account_error`, appended to the table. An RPCN account had to be registered with some other client before YAMP was usable at all, which is a strange first step for a player whose only PlayStation-anything is this emulator.
+- ABI 12 added the **verification token**, and is the one bump here that **renames** a field rather than appending: `yampnet_rpcn_config::token` was carrying the account *password*, so it becomes `password` and the name `token` goes to what RPCN calls a token — the 16 hex characters a server with e-mail validation mails at sign-up and demands back at login. Renaming rather than adding a second name is the point: out-of-tree code that assigns a password to `token` must stop *compiling*, because it would otherwise keep compiling and send the password as the token. It also adds `resend_token` (RPCN's `SendToken`, which authenticates on name and password alone — you do not need the token to ask for the token) and `YAMPNET_ACCOUNT_TOKEN_SENT`, so a resend does not report itself as an account being created.
 
 > **Adding a flag BIT is not an ABI change.** The plugin carries `game_flags` verbatim between the
 > room and its peers (`dst.game_flags = src.flag_attr`) and never interprets it, so
@@ -1028,7 +1030,7 @@ Loads `yampnet.dll` from the YAMP.exe directory, negotiates the ABI, builds the 
 **Two drive paths, sharing one session** (only one may be in use at a time — the UI refuses to act while `Config().enabled` is set):
 
 1. **Command line** — the two-machine regression harness, deliberately hands-free and auto-starting:
-   `-net-host`, `-net-join <roomId>`, `-net-server <host>`, `-net-user <npid>`, `-net-pass <secret>`, `-net-fp <64 hex>`, `-net-comid <id>` (a comm id or a game key; omitted = this game's own lobby space). One of `-net-host`/`-net-join` arms the path. Keeping this means adding the lobby cannot silently break the only test that proves the netcode end to end.
+   `-net-host`, `-net-join <roomId>`, `-net-server <host>`, `-net-user <npid>`, `-net-pass <secret>`, `-net-token <16 hex>` (RPCN's e-mail verification token; wanted only on a server that validates accounts, empty everywhere else), `-net-fp <64 hex>`, `-net-comid <id>` (a comm id or a game key; omitted = this game's own lobby space). One of `-net-host`/`-net-join` arms the path. Keeping this means adding the lobby cannot silently break the only test that proves the netcode end to end.
 2. **Lobby** (Settings → Netplay) — the same steps under explicit control, one click at a time. Sits in the lobby until the host presses Start (`RequestStartRound()`).
 
 `DriveSession()` (connect → discovery → host/join, idempotent, called every frame), `Connect/Disconnect/HostRoom/JoinRoom/RefreshRooms/GetRooms/LeaveRoom`, and a flattened `Status` struct so the UI never touches the plugin ABI directly (state, room id, local player, stall count, `peer_lost` + reason, `desynced` + frame/local/remote, status text, error text).
@@ -1432,7 +1434,8 @@ re-pumped between steps, render on the last only, debt dropped past the cap). Vi
 | `HleRetarget` | `Hook<i>` | text | `""` | Per-hook site: literal offset, `off`/`none`/`-`, or `symbol[+hexoff]`. Read once before `module_start`; **never written back**, so a hand-authored section survives Apply |
 | `Netplay` | `Server` | string | `rpcn.sonicthefighte.rs` | RPCN host. Defaulted rather than blank: it is where YAMP's netplay is played, and **Create a new account** needs a server before an account exists to configure one with |
 | | `Npid` | string | `""` | |
-| | `Token` | string | `""` | Account **password** — RPCN's Login takes (npid, password, token) and the token is only used with email validation enabled, which is off by default |
+| | `Password` | string | `""` | The account password. Read from the legacy `Token` key when absent — that is where the password used to live — and Save then writes `Password` and deletes `Token`, so the migration happens once |
+| | `EmailToken` | string | `""` | RPCN's **verification token**, and not a second password: the 16 hex characters a server mails when the account is created. **Empty is the normal value** — only a server with e-mail validation on ever checks it (`cmd_account.rs` passes `is_email_validated()` as `check_user`'s `check_token`), and one that wants a token and gets none refuses the login saying so. Not under the name `Token`, which every ini written before this carries holding a password |
 | | `CertFingerprint` | 64 hex | `""` | **Leave empty** unless the server is self-signed (§14.6) |
 | | `CommunicationId` | string | `""` | **Empty is the normal value**: each game gets a lobby space of its own, because `net::AutoComIdKey()` sends the running game's arcade name and the plugin turns it into a per-game comm id (yampnet `source/ComId.h`). A value here overrides that with a literal comm id or another game's key, which is only wanted to meet someone outside your game. An ini still carrying the old `NPWR02113_00` default is read as empty — it was one shared lobby list for every game YAMP hosts, and nobody chose it |
 | | `FrameDelay` | int | 3 | Higher hides more latency; too low stalls rather than desyncs |

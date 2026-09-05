@@ -220,7 +220,17 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		// can guess, and account creation needs it before there is an account at all.
 		m_netServer = GetPrivateProfileStdStringA("Netplay", "Server", kDefaultRpcnServer, iniPath);
 		m_netNpid = GetPrivateProfileStdStringA("Netplay", "Npid", "", iniPath);
-		m_netToken = GetPrivateProfileStdStringA("Netplay", "Token", "", iniPath);
+		// "Token" is where the PASSWORD lived until the e-mail verification token got a field of
+		// its own, so it is read as the fallback for "Password" and an existing ini keeps logging
+		// in untouched. Save writes "Password" and deletes "Token", so the migration happens once
+		// and the two keys can never end up disagreeing about which is current.
+		const std::string legacyPassword =
+			GetPrivateProfileStdStringA("Netplay", "Token", "", iniPath);
+		m_netPassword =
+			GetPrivateProfileStdStringA("Netplay", "Password", legacyPassword.c_str(), iniPath);
+		// The real token, under a name that cannot collide with the legacy key above. Empty is
+		// the normal value: only a server that verifies accounts by e-mail ever asks for one.
+		m_netToken = GetPrivateProfileStdStringA("Netplay", "EmailToken", "", iniPath);
 		m_netCertFingerprint = GetPrivateProfileStdStringA("Netplay", "CertFingerprint", "", iniPath);
 		m_netComId = GetPrivateProfileStdStringA("Netplay", "CommunicationId", "", iniPath);
 		// Every ini written before per-game lobby spaces carries the old default, and nobody chose
@@ -464,7 +474,12 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		WritePrivateProfileIntW(SECTION_NAME, L"FixBackupRamTimeIndex", m_stfFixBackupTimeIndex, iniPath.c_str());
 		WritePrivateProfileStdStringA("Netplay", "Server", m_netServer, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "Npid", m_netNpid, iniPath);
-		WritePrivateProfileStdStringA("Netplay", "Token", m_netToken, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "Password", m_netPassword, iniPath);
+		WritePrivateProfileStdStringA("Netplay", "EmailToken", m_netToken, iniPath);
+		// Removes the pre-migration key (a null value deletes it) rather than leaving a stale
+		// copy of the password sitting in a file people hand-edit, where the next reader would
+		// have no way to tell which of the two was the live one.
+		WritePrivateProfileStringW(L"Netplay", L"Token", nullptr, iniPath.c_str());
 		WritePrivateProfileStdStringA("Netplay", "CertFingerprint", m_netCertFingerprint, iniPath);
 		WritePrivateProfileStdStringA("Netplay", "CommunicationId", m_netComId, iniPath);
 		WritePrivateProfileIntW(L"Netplay", L"FrameDelay", m_netFrameDelay, iniPath.c_str());

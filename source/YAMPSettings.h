@@ -162,9 +162,19 @@ public:
 	std::string m_stfHleRetarget[m2ftg::HleHooks::MAX_COUNT];
 
 	// --- Netplay (RPCN) ---------------------------------------------------------------------
-	// Persisted so a session can be resumed without retyping. m_netToken is the account
-	// password: RPCN's Login takes (npid, password, token) and the token is only used when the
-	// server has email validation enabled, which it is not by default.
+	// Persisted so a session can be resumed without retyping.
+	//
+	// RPCN's Login takes THREE things - (npid, password, token) - and the last two are different
+	// in kind. m_netPassword is the account's password. m_netToken is the e-mail VERIFICATION
+	// token: 16 hex characters the server mails when the account is created, checked only by a
+	// server that has e-mail validation switched on (off by default, and off on most), and empty
+	// everywhere else. A server that wants one and gets none refuses the login saying so.
+	//
+	// The ini keys do not match the member names, and cannot be made to: "Token" was written by
+	// every build up to now holding the PASSWORD, so the password reads "Password" with "Token" as
+	// its fallback (Load migrates and Save clears the old key), and the real token lives under
+	// "EmailToken". Reusing "Token" for what it is named after would have read every existing
+	// install's password as a token and left it with no password at all.
 	//
 	// NOTE the fingerprint: leave it EMPTY for a server with a real certificate on a real domain,
 	// which the plugin then validates (chain + host name) like any HTTPS client. It exists for
@@ -181,6 +191,7 @@ public:
 	static constexpr const char* kDefaultRpcnServer = "rpcn.sonicthefighte.rs";
 	std::string m_netServer = kDefaultRpcnServer;
 	std::string m_netNpid;
+	std::string m_netPassword;
 	std::string m_netToken;
 	std::string m_netCertFingerprint;
 	// Which lobby space the rooms live in. EMPTY IS THE NORMAL VALUE and means "this game's own":

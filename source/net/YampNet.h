@@ -67,7 +67,16 @@ extern "C" {
 // end of the table. An RPCN account had to be made with some other client before YAMP could be
 // used at all, which is a strange first step for a player whose only PlayStation-anything is this
 // emulator. The plugin already spoke the server's Create command; nothing exposed it.
-#define YAMPNET_ABI_VERSION 11u
+// ABI 12 adds the RPCN VERIFICATION TOKEN, and is the one bump here that RENAMES a field rather
+// than appending: yampnet_rpcn_config::token was carrying the account PASSWORD, so it becomes
+// `password` and the name `token` is given to the thing RPCN actually calls a token - the 16 hex
+// characters a server with e-mail validation mails when the account is created, and demands back
+// at login before that account may be used. Renaming rather than adding a second name is the
+// point: an out-of-tree caller that assigns a password to `token` must stop compiling, because
+// the same code would otherwise keep compiling and send the password as the token.
+// It also adds resend_token, which asks the server to mail that token again for a player who
+// never received it, and YAMPNET_ACCOUNT_TOKEN_SENT so its success reads as what it is.
+#define YAMPNET_ABI_VERSION 12u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -172,7 +181,20 @@ typedef struct yampnet_rpcn_config
     const char* server;              // RPCN host, e.g. "np.rpcs3.net"
     uint16_t port;
     const char* npid;                // account id
-    const char* token;               // auth token / password
+    const char* password;            // the account password (this field was named `token` before
+                                     // ABI 12, when it already carried the password)
+    // RPCN'S E-MAIL VERIFICATION TOKEN, and NOT a second password: 16 hexadecimal characters the
+    // server mails when the account is created.
+    //
+    // NULL/EMPTY IS THE NORMAL VALUE. The server compares it only when IT has e-mail validation
+    // switched on, which is off by default and off on most community servers; there is no way for
+    // a client to ask which sort of server it has, so it sends whatever the player has and lets
+    // the server decide. A server that wanted one and got none answers LoginInvalidToken, which
+    // the plugin turns into a message saying exactly that.
+    //
+    // Whitespace and case are tidied by the plugin - it is a value people paste out of an e-mail.
+    // A token that has been lost can be re-sent with resend_token.
+    const char* token;
     const char* communication_id;    // title comm id used for room scoping
     // SHA-256 of the server certificate as 64 hex chars, or null/empty.
     //
@@ -215,6 +237,11 @@ typedef enum yampnet_account_state
     YAMPNET_ACCOUNT_WORKING,         // connected or connecting; the reply has not arrived
     YAMPNET_ACCOUNT_CREATED,         // the server accepted it - the account can now log in
     YAMPNET_ACCOUNT_FAILED,          // see get_account_error
+    // --- ABI 12 ---
+    // resend_token succeeded: the server has sent the e-mail. Distinct from CREATED because the
+    // two are told apart by what the player does next - one waits for a message, the other logs
+    // in - and one state for both would leave the UI guessing which had just happened.
+    YAMPNET_ACCOUNT_TOKEN_SENT,
 } yampnet_account_state;
 
 // ---------------------------------------------------------------------------------------------
@@ -496,6 +523,23 @@ typedef struct yampnet_api
     // Why the last attempt failed, or "" when it did not. Never NULL. Separate from get_error()
     // on purpose: a rejected sign-up is not a failed netplay session, and must not read as one.
     const char* (*get_account_error)(yampnet_session* s);
+
+    // --- ABI 12: e-mail verification token ---
+    //
+    // Asks the server to mail the account's token again, for a player who signed up and never
+    // received it - on a server with e-mail validation that account cannot log in until it comes
+    // back, so without this the only remedy was another sign-up under another address.
+    //
+    // Shares the account machinery above: same connection, same timeout, and progress is watched
+    // through get_account_state() / get_account_error(). Success shows as
+    // YAMPNET_ACCOUNT_TOKEN_SENT rather than CREATED. Only server, port, cert_fingerprint, npid
+    // and password are read from `cfg`; the rest is ignored, because SendToken authenticates
+    // WITHOUT the token - a player who has lost it could not otherwise ask for it.
+    //
+    // The server refuses this outright if it does not verify accounts by e-mail (there is no
+    // token), and refuses a second request inside 24 hours. Both arrive as FAILED with a message
+    // that says which, so neither needs a state of its own.
+    yampnet_result (*resend_token)(yampnet_session* s, const yampnet_account_config* cfg);
 } yampnet_api;
 
 // The single exported symbol. Returns NULL if the plugin cannot satisfy `requested_abi`.

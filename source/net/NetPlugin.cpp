@@ -291,7 +291,8 @@ namespace net
         {
             strncpy_s(s_cfg.server, s->m_netServer.c_str(), _TRUNCATE);
             strncpy_s(s_cfg.npid, s->m_netNpid.c_str(), _TRUNCATE);
-            strncpy_s(s_cfg.password, s->m_netToken.c_str(), _TRUNCATE);
+            strncpy_s(s_cfg.password, s->m_netPassword.c_str(), _TRUNCATE);
+            strncpy_s(s_cfg.token, s->m_netToken.c_str(), _TRUNCATE);
             strncpy_s(s_cfg.fingerprint, s->m_netCertFingerprint.c_str(), _TRUNCATE);
             if (!s->m_netComId.empty())
                 strncpy_s(s_cfg.com_id, s->m_netComId.c_str(), _TRUNCATE);
@@ -301,6 +302,7 @@ namespace net
         ArgStr(cmd, L"-net-server", s_cfg.server, sizeof(s_cfg.server));
         ArgStr(cmd, L"-net-user", s_cfg.npid, sizeof(s_cfg.npid));
         ArgStr(cmd, L"-net-pass", s_cfg.password, sizeof(s_cfg.password));
+        ArgStr(cmd, L"-net-token", s_cfg.token, sizeof(s_cfg.token));
         ArgStr(cmd, L"-net-fp", s_cfg.fingerprint, sizeof(s_cfg.fingerprint));
         ArgStr(cmd, L"-net-comid", s_cfg.com_id, sizeof(s_cfg.com_id));
 
@@ -369,7 +371,9 @@ namespace net
             rc.server = s_cfg.server;
             rc.port = 0;                     // plugin default (31313)
             rc.npid = s_cfg.npid;
-            rc.token = s_cfg.password;
+            rc.password = s_cfg.password;
+            // Empty is the normal case, and what a server without e-mail validation wants.
+            rc.token = s_cfg.token;
             // Empty is the normal case: the game names itself and the plugin derives the id.
             rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
             rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
@@ -591,23 +595,27 @@ namespace net
         return st;
     }
 
-    bool Connect(const char* server, const char* npid, const char* token,
+    bool Connect(const char* server, const char* npid, const char* password, const char* token,
                  const char* fingerprint, const char* comId)
     {
         if (!UiMayAct())
             return false;
         if (server == nullptr || *server == '\0' || npid == nullptr || *npid == '\0'
-            || token == nullptr || *token == '\0')
+            || password == nullptr || *password == '\0')
         {
             SetActionError("server, account and password are all required");
             return false;
         }
+        // The TOKEN is not in that test on purpose: empty is its normal value, and only a server
+        // that verifies accounts by e-mail wants one. Requiring it here would lock every player
+        // out of every server that does not.
 
         // Copied into the session config rather than used in place: the caller's strings are
         // ImGui edit buffers that it is free to reuse, and the overlay reads these later.
         CopyArg(s_cfg.server, sizeof(s_cfg.server), server);
         CopyArg(s_cfg.npid, sizeof(s_cfg.npid), npid);
-        CopyArg(s_cfg.password, sizeof(s_cfg.password), token);
+        CopyArg(s_cfg.password, sizeof(s_cfg.password), password);
+        CopyArg(s_cfg.token, sizeof(s_cfg.token), token);
         CopyArg(s_cfg.fingerprint, sizeof(s_cfg.fingerprint), fingerprint);
         // Copied even when EMPTY, unlike before: empty now MEANS something - this game's own
         // lobby space - so clearing the field has to clear the config, not leave the last value
@@ -618,7 +626,8 @@ namespace net
         rc.server = s_cfg.server;
         rc.port = 0;                     // plugin default (31313)
         rc.npid = s_cfg.npid;
-        rc.token = s_cfg.password;
+        rc.password = s_cfg.password;
+        rc.token = s_cfg.token;
         rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
         rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
 
@@ -658,6 +667,31 @@ namespace net
         }
         NetLog("ui: creating account %hs on %hs", npid != nullptr ? npid : "?",
                server != nullptr ? server : "?");
+        return true;
+    }
+
+    bool ResendToken(const char* server, const char* npid, const char* password,
+                     const char* fingerprint)
+    {
+        if (!IsAvailable())
+            return false;
+
+        yampnet_account_config ac = {};
+        ac.server = server;
+        ac.port = 0;                     // plugin default (31313)
+        ac.cert_fingerprint = (fingerprint != nullptr && *fingerprint != '\0') ? fingerprint
+                                                                              : nullptr;
+        ac.npid = npid;
+        ac.password = password;
+        // email, online_name and avatar_url are not read for this command: the server already has
+        // the address, and SendToken authenticates on the name and password alone.
+        if (s_api->resend_token(s_session, &ac) != YAMPNET_OK)
+        {
+            NetLog("ui: token not sent: %hs", AccountError());
+            return false;
+        }
+        NetLog("ui: asking %hs to re-send the token for %hs",
+               server != nullptr ? server : "?", npid != nullptr ? npid : "?");
         return true;
     }
 

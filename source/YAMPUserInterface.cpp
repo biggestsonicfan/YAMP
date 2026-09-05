@@ -307,6 +307,7 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	};
 	copyToBuffer(m_netServer, sizeof(m_netServer), settings->m_netServer);
 	copyToBuffer(m_netNpid, sizeof(m_netNpid), settings->m_netNpid);
+	copyToBuffer(m_netPassword, sizeof(m_netPassword), settings->m_netPassword);
 	copyToBuffer(m_netToken, sizeof(m_netToken), settings->m_netToken);
 	copyToBuffer(m_netFingerprint, sizeof(m_netFingerprint), settings->m_netCertFingerprint);
 	copyToBuffer(m_netComId, sizeof(m_netComId), settings->m_netComId);
@@ -621,6 +622,7 @@ void YAMPUserInterface::ApplySettings()
 	// which is why none of these appear in the needsRestart test above.
 	settings->m_netServer = m_netServer;
 	settings->m_netNpid = m_netNpid;
+	settings->m_netPassword = m_netPassword;
 	settings->m_netToken = m_netToken;
 	settings->m_netCertFingerprint = m_netFingerprint;
 	settings->m_netComId = m_netComId;

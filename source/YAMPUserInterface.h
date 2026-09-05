@@ -140,7 +140,11 @@ private:
 	// the RPCN protocol imposes anyway.
 	char m_netServer[64] = {};
 	char m_netNpid[24] = {};
-	char m_netToken[64] = {};
+	char m_netPassword[64] = {};
+	// RPCN's e-mail verification token, normally EMPTY - see YAMPSettings for what it is and
+	// which servers ask for one. Sized for the 16 characters the server mails, with room for a
+	// longer one if RPCN ever changes it.
+	char m_netToken[40] = {};
 	char m_netFingerprint[72] = {};
 	// Wider than a comm id because it also takes a GAME KEY, which is normally a game's name.
 	char m_netComId[64] = {};
@@ -152,7 +156,7 @@ private:
 	// pre3 only: what this machine publishes as the round-start state when it HOSTS.
 	bool m_netPre3VsStart = false;
 	// Lobby-only state: never persisted, never part of the Apply flow.
-	bool m_netShowToken = false;
+	bool m_netShowPassword = false;
 	char m_netJoinRoomId[24] = {};
 	// RPCN passwords are a fixed 8 bytes (SceNpMatching2SessionPassword); anything longer is
 	// truncated on the wire, so the field says so rather than silently losing characters.

@@ -38,6 +38,8 @@ namespace net
     //   -net-server <host>   override the configured RPCN server
     //   -net-user <npid>     override the account
     //   -net-pass <secret>
+    //   -net-token <16 hex>  RPCN's e-mail verification token; only wanted on a server that
+    //                        validates accounts by e-mail, and empty everywhere else
     //   -net-fp <64 hex>     server cert SHA-256; omit for a normally-validated certificate
     //   -net-comid <id>      lobby space: a comm id or a game key; empty = this game's own
     // One of -net-host / -net-join is what arms this path; a configured account on its own leaves
@@ -47,6 +49,10 @@ namespace net
         char server[64] = {};
         char npid[24] = {};
         char password[64] = {};
+        // RPCN's e-mail verification token (16 hex characters), or empty - which is the normal
+        // state, because most servers do not validate accounts by e-mail at all. See
+        // yampnet_rpcn_config::token: it is NOT a second password.
+        char token[32] = {};
         char fingerprint[72] = {};
         // Empty means AUTOMATIC - AutoComIdKey() supplies the running game's own lobby space.
         // Wide enough for a game name, because that is what a key normally is.
@@ -161,7 +167,7 @@ namespace net
 
     // Each returns false and fills LastActionError() if the plugin rejected the call. Progress is
     // asynchronous: watch GetStatus().state, exactly as DriveSession does.
-    bool Connect(const char* server, const char* npid, const char* token,
+    bool Connect(const char* server, const char* npid, const char* password, const char* token,
                  const char* fingerprint, const char* comId);
     void Disconnect();
 
@@ -176,6 +182,15 @@ namespace net
     // AccountState() says how it went. AccountError() is filled only on FAILED.
     bool CreateAccount(const char* server, const char* npid, const char* password,
                        const char* email, const char* fingerprint);
+    // Has the server mail the account's verification token again. Same machinery as CreateAccount
+    // - PumpAccount() drives it, AccountState() reports it - and success shows as
+    // YAMPNET_ACCOUNT_TOKEN_SENT rather than CREATED.
+    //
+    // For the player who signed up here and never got the e-mail: on a server that validates
+    // accounts, that account cannot log in until its token comes back, and the only other way out
+    // was to sign up again under another address.
+    bool ResendToken(const char* server, const char* npid, const char* password,
+                     const char* fingerprint);
     yampnet_account_state AccountState();
     const char* AccountError();
     // Drives an in-flight sign-up. Called from the Netplay page rather than the game loop

@@ -185,9 +185,9 @@ void YAMPUserInterface::DrawNetplay()
 
 	if (ImGui::InputText("Account (NPID)", m_netNpid, sizeof(m_netNpid), lockFlag)) m_pageModified = true;
 
-	const ImGuiInputTextFlags tokenFlags =
-		lockFlag | (m_netShowToken ? 0 : ImGuiInputTextFlags_Password);
-	if (ImGui::InputText("Password", m_netToken, sizeof(m_netToken), tokenFlags)) m_pageModified = true;
+	const ImGuiInputTextFlags passwordFlags =
+		lockFlag | (m_netShowPassword ? 0 : ImGuiInputTextFlags_Password);
+	if (ImGui::InputText("Password", m_netPassword, sizeof(m_netPassword), passwordFlags)) m_pageModified = true;
 	if (ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("Stored in plain text in the settings file, like every other setting.\n"
@@ -195,7 +195,26 @@ void YAMPUserInterface::DrawNetplay()
 	}
 	ImGui::PopItemWidth();
 	ImGui::SameLine();
-	ImGui::Checkbox("Show", &m_netShowToken);
+	ImGui::Checkbox("Show", &m_netShowPassword);
+
+	// The verification token. A SEPARATE thing from the password above, and empty for almost
+	// everyone: only a server that validates accounts by e-mail ever checks it. It gets a box
+	// of its own rather than a "having trouble?" link because a player who needs one cannot
+	// log in at all until it is filled in, and the login error names this field.
+	ImGui::PushItemWidth(-180.0f);
+	if (ImGui::InputTextWithHint("Verification token", "usually empty", m_netToken,
+		sizeof(m_netToken), lockFlag)) m_pageModified = true;
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("LEAVE IT EMPTY unless the server asked for one. This is not a second\n"
+			"password: it is the 16-character code some servers e-mail when an account\n"
+			"is created, and only those servers check it.\n"
+			"\n"
+			"If yours does, Connect fails saying the token is missing or wrong - that\n"
+			"is when to paste it here. The sign-up section below can have a fresh copy\n"
+			"e-mailed if the message never arrived.");
+	}
+	ImGui::PopItemWidth();
 
 	ImGui::PushItemWidth(-180.0f);
 	// Empty is the normal state, so the hint has to say what empty DOES - a blank box that
@@ -239,10 +258,15 @@ void YAMPUserInterface::DrawNetplay()
 	// is a strange first step for a player whose only PlayStation-anything is this emulator. It
 	// reuses the name and password typed above rather than asking for them twice: what is being
 	// registered IS the account this page will log in with.
-	if (!accountLocked && ImGui::CollapsingHeader("Create a new account"))
+	//
+	// The token resend lives here too, because it is the same account being made and the same
+	// e-mail that has to arrive: on a server that verifies accounts, a sign-up whose message got
+	// lost leaves an account that can never log in, and this is where its owner is standing.
+	if (!accountLocked && ImGui::CollapsingHeader("Create a new account, or re-send its token"))
 	{
 		ImGui::PushTextWrapPos();
 		ImGui::TextUnformatted("Registers the account name and password above on the server above. The e-mail address is stored by the server and is not saved in your settings.");
+		ImGui::TextUnformatted("Some servers then e-mail a verification token that the account cannot log in without. If one never arrives, ask for another below - that needs no e-mail address, only the account and password above.");
 		ImGui::PopTextWrapPos();
 
 		ImGui::PushItemWidth(-180.0f);
@@ -257,24 +281,55 @@ void YAMPUserInterface::DrawNetplay()
 
 		const yampnet_account_state acct = net::AccountState();
 		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
-			&& m_netToken[0] != '\0' && m_netEmail[0] != '\0'
+			&& m_netPassword[0] != '\0' && m_netEmail[0] != '\0'
 			&& acct != YAMPNET_ACCOUNT_WORKING;
 		if (ImGuiCustom::ButtonToggleable("Create account", ready))
 		{
-			net::CreateAccount(m_netServer, m_netNpid, m_netToken, m_netEmail, m_netFingerprint);
+			net::CreateAccount(m_netServer, m_netNpid, m_netPassword, m_netEmail, m_netFingerprint);
 		}
 		if (!ready && ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip("Fill in the server, account, password and e-mail first.");
 		}
 
+		// Only the account name and password are needed to ask for a token - that is the whole
+		// point of the command, since a player who lost the e-mail has no token to prove anything
+		// with. It sits under the sign-up header because this is where an account is made, and a
+		// message that never arrives is the very next thing that can go wrong.
+		const bool resendReady = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
+			&& m_netPassword[0] != '\0' && acct != YAMPNET_ACCOUNT_WORKING;
+		if (ImGuiCustom::ButtonToggleable("Have the token e-mailed again", resendReady))
+		{
+			net::ResendToken(m_netServer, m_netNpid, m_netPassword, m_netFingerprint);
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("For an account that already exists on this server and never got its\n"
+				"verification e-mail. Uses the account and password above - no token is\n"
+				"needed to ask for the token, which is the point.\n"
+				"\n"
+				"A server that does not verify accounts by e-mail has nothing to send and\n"
+				"says so. One e-mail per account per 24 hours.");
+		}
+
 		switch (acct)
 		{
 		case YAMPNET_ACCOUNT_WORKING:
-			ImGui::TextDisabled("Creating the account...");
+			ImGui::TextDisabled("Talking to the server...");
 			break;
 		case YAMPNET_ACCOUNT_CREATED:
-			ImGui::TextUnformatted("Account created. Press Connect to use it.");
+			ImGui::PushTextWrapPos();
+			// Says to look for the e-mail without promising one: whether a token is mailed at all
+			// is the server's setting, and the plugin is never told which sort it just used.
+			ImGui::TextUnformatted("Account created. Press Connect to use it - and if the server "
+				"e-mails a verification token, paste that into the token box above first.");
+			ImGui::PopTextWrapPos();
+			break;
+		case YAMPNET_ACCOUNT_TOKEN_SENT:
+			ImGui::PushTextWrapPos();
+			ImGui::TextUnformatted("Token sent. Check the e-mail the account was registered with, "
+				"then paste the code into the token box above.");
+			ImGui::PopTextWrapPos();
 			break;
 		case YAMPNET_ACCOUNT_FAILED:
 			ImGui::PushTextWrapPos();
@@ -379,13 +434,17 @@ void YAMPUserInterface::DrawNetplay()
 	case YAMPNET_STATE_IDLE:
 	case YAMPNET_STATE_FAILED:
 	{
-		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0' && m_netToken[0] != '\0';
+		// The token is NOT part of this test: empty is its normal value, and a server that wants
+		// one says so when it refuses the login.
+		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
+			&& m_netPassword[0] != '\0';
 		if (ImGuiCustom::ButtonToggleable("Connect", ready))
 		{
 			// Deliberately the page's live buffers rather than the saved settings: connecting is
 			// how you find out a credential is wrong, and having to Apply first would make fixing
 			// it a two-step dance.
-			net::Connect(m_netServer, m_netNpid, m_netToken, m_netFingerprint, m_netComId);
+			net::Connect(m_netServer, m_netNpid, m_netPassword, m_netToken, m_netFingerprint,
+				m_netComId);
 		}
 		if (!ready && ImGui::IsItemHovered())
 		{
