@@ -133,10 +133,11 @@ namespace m2ftg
 		// pxd allocator objects. Zero-fill like the host csl_allocator (the pxd engine expects
 		// zeroed allocations). Two vtable conventions observed:
 		//  - shared-symbol slot [5] (g_p_allocator): assumed {[0]=alloc(this,size,align), [1]=free}
-		//  - gs context +0xB0: verified {[1]=alloc(this,size,align,tag), [2]=free?} — the shader
+		//  - gs context +0xB0: verified {[1]=alloc(this,size,align), [3]=free(this,ptr)} — the shader
 		//    create FUN_18008d270 calls vtbl+8 with (this, 0x40, 0x10, name)
 		// The zero-filling allocator trio is shared (pxd/GsBringup.h); the two vtable ORDERS are
-		// this module's own measured facts (and K2's differ - it frees at slot 3, not 2).
+		// this module's own measured facts — and the gs one matches K2 after all: BOTH free at
+		// slot 3.
 		static void* s_allocatorVtbl[4] = {
 			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),
 			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),
@@ -145,12 +146,23 @@ namespace m2ftg
 		};
 		static void* s_allocator[2] = { s_allocatorVtbl, nullptr };
 
-		// gs-context allocator (ctx+0xB0): vtbl slot 1 = alloc, slot 2 = free
+		// gs-context allocator (ctx+0xB0): vtbl slot 1 = alloc, slot 3 = free.
+		//
+		// Slot 3, NOT slot 2 - measured live, and it was worth 2 MB a frame. Both of the module's
+		// release sites (vf2+0x38a20 and vf2+0xd3a71, live addresses) end in
+		//     mov rcx,[gs_ctx+0xB0]; mov rax,[rcx]; call qword ptr [rax+18h]
+		// with rdx = the pointer slot 1 handed back, which is exactly AlignedFree(this, p). With
+		// slot 3 wired to the no-op, every one of those frees silently did nothing while the
+		// per-frame display-list allocation at vf2+0x3a4dd (0x1FFFE0 bytes, align 0x10, straight
+		// through slot 1) kept succeeding: private bytes climbed ~105 MB/s - 0.5 GB to 38 GB over a
+		// six-minute attract run - and 37 of 37 sampled large heap allocations came from that one
+		// call site. So this generation frees where K2 frees; the earlier [2]=free? was a guess,
+		// and the question mark was the honest part of it.
 		static void* s_gsAllocatorVtbl[4] = {
-			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
-			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),
-			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),
-			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),    // slot 0
+			reinterpret_cast<void*>(&pxd::GsBringup::ZeroAlloc),    // slot 1 (+0x08) — alloc(this, size, align)
+			reinterpret_cast<void*>(&pxd::GsBringup::AllocNoop),    // slot 2
+			reinterpret_cast<void*>(&pxd::GsBringup::AlignedFree),  // slot 3 (+0x18) — free(this, ptr)
 		};
 		static void* s_gsAllocator[2] = { s_gsAllocatorVtbl, nullptr };
 
