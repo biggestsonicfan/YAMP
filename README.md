@@ -82,15 +82,18 @@ out of `libraryfolders.vdf`), **every GOG install** from the registry, and every
 beside `YAMP.exe`. Matching is by module layout rather than folder name, so a renamed or moved
 install is still found.
 
-Each row shows where the game was found and whether it verified. Pick one and press **Play** —
-YAMP relaunches itself with that game's switch and the working directory set to the game's own
-folder, which is what the module needs in order to find its ROM and sound assets.
+The launcher is a tree. Each top-level row is a parent title and says whether you **own** it —
+because the signed-in Steam account holds it, or because an installation was found on disk. The
+rows beneath are the arcade games that title supplies, each saying whether its **module** was
+found in one of the search locations and where. Pick a game and press **Play** — YAMP relaunches
+itself with that game's switch and the working directory set to the game's own folder, which is
+what the module needs in order to find its ROM and sound assets.
 
-If Steam is running, the launcher also asks it which parent games your account owns. A game the
-account owns needs no installation at all: copy its arcade module folder (the DLL together with
-its `rom/` and `w64/` or sound files, e.g. Lost Judgment's `runtime/media/m2ftg/`) next to
-`YAMP.exe` and it verifies and plays. The line under the launcher's heading says whether Steam
-answered; **Rescan** asks again after you sign in.
+A title you own on Steam needs no installation at all: copy its arcade module folder (the DLL
+together with its `rom/` and `w64/` or sound files, e.g. Lost Judgment's `runtime/media/m2ftg/`)
+next to `YAMP.exe` and the game verifies and plays. When something is missing, the details under
+the tree say exactly what to do — which folder to copy, or which account to sign in with. The
+line under the heading says whether Steam answered; **Rescan** asks again after you sign in.
 
 You can skip the launcher entirely by passing a switch from the table above.
 

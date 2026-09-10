@@ -26,8 +26,10 @@
 #include "StringUtil.h"
 #include "DebugLog.h"
 #include "imgui/imgui.h"
+#include "imgui/imgui_internal.h"   // PushItemFlag(ImGuiItemFlags_NoNav) for the title rows
 #include "m2ftg/DisplayModes.h"
 
+#include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -182,6 +184,37 @@ namespace Launcher
 			bool CanPlay() const { return found && !module.Blocks() && !parent.Blocks(); }
 		};
 
+		// One parent title and the games it supplies - the tree's top level. Ownership is a
+		// property of the TITLE, not of any one module, so it is checked once here even when
+		// none of the title's modules turned up: that is exactly the case where "you own it,
+		// copy the module folder next to YAMP.exe" is the useful thing to say.
+		struct ParentGroup
+		{
+			const char* name = nullptr;
+			Verify::ParentResult ownership;
+			std::vector<size_t> games;   // indices into Catalogue::games, in GAMES order
+		};
+
+		struct Catalogue
+		{
+			std::vector<FoundGame> games;
+			std::vector<ParentGroup> parents;
+		};
+
+		// Stronger proof ranks higher. A row's own check can beat the title-level one (its
+		// module-relative probes see folders the title-level search does not), never the reverse.
+		int OwnershipRank(Verify::ParentStatus status)
+		{
+			switch (status)
+			{
+			case Verify::ParentStatus::Verified:     return 4;
+			case Verify::ParentStatus::OwnedOnSteam: return 3;
+			case Verify::ParentStatus::UnknownBuild: return 2;
+			case Verify::ParentStatus::NotChecked:   return 1;
+			default:                                 return 0;
+			}
+		}
+
 		std::vector<SearchRoot> CollectSearchRoots()
 		{
 			std::vector<SearchRoot> roots;
@@ -227,7 +260,7 @@ namespace Launcher
 			return roots;
 		}
 
-		std::vector<FoundGame> DiscoverGames()
+		Catalogue DiscoverGames()
 		{
 			// Ask Steam afresh on every scan, so Rescan picks up an account that signed in after
 			// the launcher opened. The connection is made once per scan, lazily, by the first
@@ -285,7 +318,43 @@ namespace Launcher
 					Verify::Describe(result.module.status), Verify::Describe(result.parent.status));
 				games.push_back(std::move(result));
 			}
-			return games;
+
+			// File each game under its title, in GAMES order, and settle each title's ownership:
+			// the title-level check (no module folder to probe around) as the floor, raised by
+			// any found module's own check when that saw more.
+			Catalogue catalogue;
+			catalogue.games = std::move(games);
+			for (size_t i = 0; i < catalogue.games.size(); i++)
+			{
+				const FoundGame& game = catalogue.games[i];
+				ParentGroup* group = nullptr;
+				for (ParentGroup& existing : catalogue.parents)
+				{
+					if (strcmp(existing.name, game.info->parent) == 0)
+					{
+						group = &existing;
+						break;
+					}
+				}
+				if (group == nullptr)
+				{
+					catalogue.parents.emplace_back();
+					group = &catalogue.parents.back();
+					group->name = game.info->parent;
+					group->ownership = Verify::CheckParentGame(game.info->id, {});
+				}
+				group->games.push_back(i);
+				if (game.found && OwnershipRank(game.parent.status) > OwnershipRank(group->ownership.status))
+				{
+					group->ownership = game.parent;
+				}
+			}
+			for (const ParentGroup& group : catalogue.parents)
+			{
+				DebugLog("[launcher] title %s: %s (%zu games)\n", group.name,
+					Verify::Describe(group.ownership.status), group.games.size());
+			}
+			return catalogue;
 		}
 
 		// ---- Model 2 render resolution --------------------------------------------------
@@ -409,9 +478,149 @@ namespace Launcher
 			}
 		}
 
-		void DrawLauncherUI(const std::vector<FoundGame>& games, int& selected, int& displayMode,
+		// ---- The tree: one row per parent title, its games beneath ------------------------
+		// The gate asks two independent questions, and the launcher used to squash both into one
+		// "Status" cell, so "Lost Judgment not found" sat on a row whose module was the one thing
+		// that WAS present. Now the title row answers "do you own it?" (Steam account, or an
+		// installation found on disk) and each game row under it answers "is its module in one
+		// of the search locations?". Read together they say what is missing and what to do.
+
+		const ImVec4 GOOD { 0.3f, 0.9f, 0.3f, 1.0f };
+		const ImVec4 WARN { 0.9f, 0.8f, 0.35f, 1.0f };
+		const ImVec4 BAD { 0.95f, 0.35f, 0.35f, 1.0f };
+
+		struct Verdict
+		{
+			const char* label;
+			ImVec4 colour;
+		};
+
+		Verdict OwnershipVerdict(const Verify::ParentResult& parent)
+		{
+			const Steamworks::Report& steam = Steamworks::LastReport();
+			switch (parent.status)
+			{
+			case Verify::ParentStatus::Verified:
+				return { parent.steamOwned ? "Installed, owned on Steam" : "Installed", GOOD };
+			case Verify::ParentStatus::OwnedOnSteam:
+				return { "Owned on Steam", GOOD };
+			case Verify::ParentStatus::UnknownBuild:
+				return { "Installed, unrecognised version", WARN };
+			case Verify::ParentStatus::NotFound:
+				// "Not owned" only when Steam actually answered; otherwise all YAMP knows is
+				// that it found nothing.
+				return { steam.available ? "Not owned" : "Not found", BAD };
+			default:
+				return { "Not checked", ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) };
+			}
+		}
+
+		Verdict ModuleVerdict(const FoundGame& game)
+		{
+			if (!game.found) return { "Not found", ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) };
+			switch (game.module.status)
+			{
+			case Verify::ModuleStatus::Verified:      return { "Verified", GOOD };
+			case Verify::ModuleStatus::NotChecked:    return { "Found, unverified", WARN };
+			case Verify::ModuleStatus::OutdatedBuild: return { "Outdated build", BAD };
+			case Verify::ModuleStatus::Unreadable:    return { "Unreadable", BAD };
+			default:                                  return { "Wrong build", BAD };
+			}
+		}
+
+		// What proved (or failed to prove) a title's ownership, for its "Where" cell.
+		std::string OwnershipSource(const Verify::ParentResult& parent)
+		{
+			const Steamworks::Report& steam = Steamworks::LastReport();
+			switch (parent.status)
+			{
+			case Verify::ParentStatus::Verified:
+			case Verify::ParentStatus::UnknownBuild:
+				return WcharToUTF8(parent.exePath.parent_path().wstring());
+			case Verify::ParentStatus::OwnedOnSteam:
+				return "Steam account " + steam.personaName;
+			case Verify::ParentStatus::NotFound:
+				return steam.available ? "not in " + steam.personaName + "'s Steam library, no installation found"
+					: steam.failure;
+			default:
+				return "";
+			}
+		}
+
+		// The folder inside the parent game's own install that holds this module, so the advice
+		// can name it: the deepest candidate path is the as-shipped layout (runtime\media\m2ftg
+		// for Lost Judgment), the shallower ones are the portable shapes.
+		std::string ModuleFolderHint(const GameInfo& info)
+		{
+			fs::path best;
+			size_t bestDepth = 0;
+			for (size_t c = 0; c < info.candidateCount; c++)
+			{
+				const fs::path dll = info.candidates[c].dll;
+				const size_t depth = static_cast<size_t>(std::distance(dll.begin(), dll.end()));
+				if (depth > bestDepth)
+				{
+					bestDepth = depth;
+					best = dll.parent_path();
+				}
+			}
+			return WcharToUTF8(best.wstring());
+		}
+
+		const ParentGroup& GroupOf(const Catalogue& catalogue, const FoundGame& game)
+		{
+			for (const ParentGroup& group : catalogue.parents)
+			{
+				if (strcmp(group.name, game.info->parent) == 0) return group;
+			}
+			return catalogue.parents.front();   // unreachable: every game was filed under its title
+		}
+
+		// The one sentence that gets from the row's state to a playable one. Empty when there is
+		// nothing to do, or when the module verdict line above it already said what to do.
+		std::string WhatToDo(const FoundGame& game, const ParentGroup& group)
+		{
+			const Steamworks::Report& steam = Steamworks::LastReport();
+			const std::string parent = game.info->parent;
+
+			if (!game.found)
+			{
+				const std::string folder = ModuleFolderHint(*game.info);
+				const bool owned = !group.ownership.Blocks()
+					&& group.ownership.status != Verify::ParentStatus::NotChecked;
+				if (owned)
+				{
+					return "You own " + parent + ". Copy its " + folder + " folder (the module DLL with its "
+						"rom and sound files) next to YAMP.exe, or install the game, then Rescan.";
+				}
+				if (steam.available)
+				{
+					return "Install " + parent + ", or sign in to Steam with the account that owns it and "
+						"put its " + folder + " folder next to YAMP.exe, then Rescan.";
+				}
+				return "Install " + parent + ", or start Steam, sign in with the account that owns it and "
+					"put its " + folder + " folder next to YAMP.exe, then Rescan.";
+			}
+			if (game.module.Blocks()) return "";
+			if (game.parent.Blocks())
+			{
+				if (steam.available)
+				{
+					return "Sign in to Steam with the account that owns " + parent + " (" + steam.personaName +
+						" does not), or install " + parent + ", then Rescan.";
+				}
+				return "Start Steam and sign in with the account that owns " + parent + ", or install " +
+					parent + ", then Rescan.";
+			}
+			return "";
+		}
+
+		void DrawLauncherUI(const Catalogue& catalogue, int& selected, int& displayMode,
 			bool& matchWindow, bool& playRequested, bool& rescanRequested, bool& quitRequested)
 		{
+			const std::vector<FoundGame>& games = catalogue.games;
+			const Steamworks::Report& steam = Steamworks::LastReport();
+
 			const ImVec2& displaySize = ImGui::GetIO().DisplaySize;
 			ImGui::SetNextWindowPos({ 0.0f, 0.0f });
 			ImGui::SetNextWindowSize(displaySize);
@@ -420,91 +629,86 @@ namespace Launcher
 				ImGuiWindowFlags_NoBringToFrontOnFocus))
 			{
 				ImGui::Text("Yakuza Arcade Machines Player");
-				ImGui::TextDisabled("Select an arcade game. Games are located automatically: next to "
-					"YAMP.exe, in any folder beside it, and in your Steam and GOG installs of the "
-					"parent games.");
-				// The state of the second ownership proof, up front: it decides whether a module
-				// folder on its own is enough, and "Steam is not running" is the one thing about a
-				// failed check the user can fix without touching a file.
+				// Steam first: it is the proof that needs no files, and "not running" is the one
+				// failure the user can fix from right here with Rescan.
+				if (steam.available)
 				{
-					const Steamworks::Report& steam = Steamworks::LastReport();
-					if (steam.available)
-					{
-						ImGui::TextDisabled("Steam: signed in as %s. Games this account owns verify "
-							"without an installation - the arcade module folder is enough.",
-							steam.personaName.c_str());
-					}
-					else
-					{
-						ImGui::TextDisabled("Steam: %s. Ownership is proven by locating each parent "
-							"game's executable instead.", steam.failure.c_str());
-					}
+					ImGui::TextColored(GOOD, "Steam: signed in as %s", steam.personaName.c_str());
+					ImGui::SameLine();
+					ImGui::TextDisabled("- games this account owns play from just their module folder.");
 				}
+				else
+				{
+					ImGui::TextColored(WARN, "Steam: %s", steam.failure.c_str());
+					ImGui::SameLine();
+					ImGui::TextDisabled("- ownership is proven by finding each game on disk instead.");
+				}
+				ImGui::TextDisabled("Each title shows whether you own it. The games under it show whether "
+					"their module was found: next to YAMP.exe, in a folder beside it, or in a Steam or "
+					"GOG install.");
 				ImGui::Separator();
 
-				// Reserve room for the details block (path, source, checksum verdict, parent
-				// game verdict — the wrapped ones can take two lines) + buttons below the table.
-				// ... plus the resolution combo, which sits between the details block and the buttons.
-				const float footerHeight = 7.0f * ImGui::GetTextLineHeightWithSpacing()
+				// Footer: the details block (name, module path, source, module verdict, ownership
+				// verdict, advice - the wrapped ones can take two lines), the resolution combo and
+				// its checkbox, then the buttons.
+				const float footerHeight = 9.0f * ImGui::GetTextLineHeightWithSpacing()
 					+ 2.0f * ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 3.0f;
 				if (ImGui::BeginTable("##games", 3,
 					ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY,
 					{ 0.0f, -footerHeight }))
 				{
-					// Status carries the longest strings now ("Lost Judgment not found",
-					// "Unrecognised build"), so it gets a share to match.
-					ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch, 0.40f);
-					ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch, 0.32f);
-					ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.28f);
+					ImGui::TableSetupColumn("Title / game", ImGuiTableColumnFlags_WidthStretch, 0.38f);
+					ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+					ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthStretch, 0.36f);
 					ImGui::TableSetupScrollFreeze(0, 1);
 					ImGui::TableHeadersRow();
 
-					for (int i = 0; i < static_cast<int>(games.size()); i++)
+					for (const ParentGroup& group : catalogue.parents)
 					{
-						const FoundGame& game = games[i];
 						ImGui::TableNextRow();
 						ImGui::TableSetColumnIndex(0);
-						ImGui::PushID(i);
-						if (ImGui::Selectable(game.info->name, selected == i,
-							ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
-						{
-							selected = i;
-							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && game.CanPlay())
-							{
-								playRequested = true;
-							}
-						}
-						ImGui::PopID();
-
+						// Open by default: the tree exists to state ownership once per title, not
+						// to hide the games. Title rows are MOUSE-ONLY: keyboard and pad navigation
+						// moves between the game rows and never lands on a title, so ImGui's
+						// nav-left ("collapse the focused node") cannot fold the tree. Seen on this
+						// machine, where an idle analogue stick walks the nav cursor by itself and
+						// had every title folded within ten seconds of opening the launcher.
+						ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+						const bool open = ImGui::TreeNodeEx(group.name,
+							ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanFullWidth);
+						ImGui::PopItemFlag();
 						ImGui::TableSetColumnIndex(1);
-						ImGui::TextUnformatted(game.info->parent);
-
+						const Verdict ownership = OwnershipVerdict(group.ownership);
+						ImGui::TextColored(ownership.colour, "%s", ownership.label);
 						ImGui::TableSetColumnIndex(2);
-						if (!game.found)
+						ImGui::TextDisabled("%s", OwnershipSource(group.ownership).c_str());
+						if (!open) continue;
+
+						for (const size_t index : group.games)
 						{
-							ImGui::TextDisabled("Not found");
+							const FoundGame& game = games[index];
+							ImGui::TableNextRow();
+							ImGui::TableSetColumnIndex(0);
+							ImGui::PushID(static_cast<int>(index));
+							if (ImGui::Selectable(game.info->name, selected == static_cast<int>(index),
+								ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
+							{
+								selected = static_cast<int>(index);
+								if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && game.CanPlay())
+								{
+									playRequested = true;
+								}
+							}
+							ImGui::PopID();
+
+							ImGui::TableSetColumnIndex(1);
+							const Verdict module = ModuleVerdict(game);
+							ImGui::TextColored(module.colour, "%s", module.label);
+
+							ImGui::TableSetColumnIndex(2);
+							ImGui::TextDisabled("%s", game.found ? game.sourceLabel.c_str() : "-");
 						}
-						else if (game.module.Blocks())
-						{
-							ImGui::TextColored({ 0.95f, 0.35f, 0.35f, 1.0f }, "%s",
-								Verify::Describe(game.module.status));
-						}
-						else if (game.parent.Blocks())
-						{
-							// Name the parent game: "not found" on its own reads as if the
-							// arcade module were missing, which is the one thing that IS present.
-							ImGui::TextColored({ 0.95f, 0.35f, 0.35f, 1.0f }, "%s not found",
-								game.info->parent);
-						}
-						else if (game.module.status == Verify::ModuleStatus::Verified)
-						{
-							ImGui::TextColored({ 0.3f, 0.9f, 0.3f, 1.0f }, "Verified");
-						}
-						else
-						{
-							// No checksum table for this game yet — found, but unverified.
-							ImGui::TextColored({ 0.9f, 0.8f, 0.35f, 1.0f }, "Found");
-						}
+						ImGui::TreePop();
 					}
 					ImGui::EndTable();
 				}
@@ -512,15 +716,18 @@ namespace Launcher
 				if (selected >= 0 && selected < static_cast<int>(games.size()))
 				{
 					const FoundGame& game = games[selected];
+					const ParentGroup& group = GroupOf(catalogue, game);
+
+					ImGui::Text("%s", game.info->name);
+					ImGui::SameLine();
+					ImGui::TextDisabled("from %s", game.info->parent);
+
 					if (!game.found)
 					{
-						ImGui::TextWrapped("%s was not found. Install %s, or place its arcade module "
-							"folder (the DLL with its rom and sound files) next to YAMP.exe.",
-							game.info->name, game.info->parent);
+						ImGui::TextDisabled("Module: not found in any search location.");
 					}
 					else
 					{
-						const ImVec4 BAD { 0.95f, 0.35f, 0.35f, 1.0f };
 						ImGui::TextWrapped("Module: %s", game.dllPathUtf8.c_str());
 						ImGui::TextDisabled("Located: %s", game.sourceLabel.c_str());
 
@@ -533,52 +740,65 @@ namespace Launcher
 							break;
 						case Verify::ModuleStatus::OutdatedBuild:
 							ImGui::TextColored(BAD, "This module is from an older version of %s. "
-								"Update the game through Steam.", game.info->parent);
+								"Update the game through Steam or GOG, then Rescan.", game.info->parent);
 							break;
 						case Verify::ModuleStatus::Unreadable:
-							ImGui::TextColored(BAD, "The module file could not be read.");
+							ImGui::TextColored(BAD, "The module file could not be read. Check that nothing "
+								"else has it open, then Rescan.");
 							break;
 						case Verify::ModuleStatus::UnknownBuild:
 							ImGui::TextColored(BAD, "Checksum mismatch - this is not a build of %s "
 								"that YAMP supports. Restore the original DLL from your own copy of "
-								"the game.", game.info->name);
+								"the game, then Rescan.", game.info->name);
 							break;
 						default:
 							ImGui::TextDisabled("Checksum: no reference for this game yet.");
 							break;
 						}
 
-						const Steamworks::Report& steam = Steamworks::LastReport();
+						// This copy's own ownership check - the one its boot repeats. Normally the
+						// title row's verdict; it differs only when the executable turned up next
+						// to this copy of the module and nowhere else.
 						switch (game.parent.status)
 						{
 						case Verify::ParentStatus::Verified:
-							ImGui::TextDisabled("%s: %s%s", game.info->parent, game.parent.buildLabel,
-								game.parent.steamOwned ? " (also owned on Steam)" : "");
+							ImGui::TextDisabled("%s: installed, %s%s", game.info->parent,
+								game.parent.buildLabel, game.parent.steamOwned ? " (also owned on Steam)" : "");
 							break;
 						case Verify::ParentStatus::OwnedOnSteam:
 							ImGui::TextDisabled("%s: owned on Steam by %s - no installation needed.",
 								game.info->parent, steam.personaName.c_str());
 							break;
 						case Verify::ParentStatus::UnknownBuild:
-							ImGui::TextDisabled("%s: found, unrecognised version.", game.info->parent);
+							ImGui::TextDisabled("%s: installed, unrecognised version.", game.info->parent);
 							break;
 						case Verify::ParentStatus::NotFound:
 							if (steam.available)
 							{
-								ImGui::TextColored(BAD, "No installation of %s was found, and the Steam "
-									"account %s does not own it. You must own it to play its arcade games.",
+								ImGui::TextColored(BAD, "%s: not installed, and not owned by %s on Steam.",
 									game.info->parent, steam.personaName.c_str());
 							}
 							else
 							{
-								ImGui::TextColored(BAD, "No installation of %s was found, and Steam could "
-									"not be asked whether you own it (%s). Sign in to Steam and Rescan, or "
-									"install the game.", game.info->parent, steam.failure.c_str());
+								ImGui::TextColored(BAD, "%s: not installed, and Steam could not be asked (%s).",
+									game.info->parent, steam.failure.c_str());
 							}
 							break;
 						default:
 							break;
 						}
+					}
+
+					const std::string advice = WhatToDo(game, group);
+					if (!advice.empty())
+					{
+						ImGui::PushStyleColor(ImGuiCol_Text, WARN);
+						ImGui::TextWrapped("%s", advice.c_str());
+						ImGui::PopStyleColor();
+					}
+					else if (game.CanPlay())
+					{
+						ImGui::TextColored(GOOD, "Ready to play.");
 					}
 				}
 
@@ -699,7 +919,10 @@ namespace Launcher
 		gGeneral.SetDataPath();
 		gGeneral.LoadSettings();
 
-		std::vector<FoundGame> games = DiscoverGames();
+		Catalogue catalogue = DiscoverGames();
+		// The same vector object survives a Rescan (the catalogue is assigned into, not replaced),
+		// so this reference stays valid for the whole loop.
+		std::vector<FoundGame>& games = catalogue.games;
 
 		// Menu-only process: let the keyboard (and pad, via the Win32 backend) drive the UI.
 		ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
@@ -768,7 +991,7 @@ namespace Launcher
 			window.BeginFrame();
 			window.ClearBackbuffer();
 			window.NewImGuiFrame();
-			DrawLauncherUI(games, selected, displayMode, matchWindow, playRequested, rescanRequested,
+			DrawLauncherUI(catalogue, selected, displayMode, matchWindow, playRequested, rescanRequested,
 				quitRequested);
 			if (quitRequested && !quitPromptOpen)
 			{
@@ -783,7 +1006,7 @@ namespace Launcher
 
 			if (rescanRequested)
 			{
-				games = DiscoverGames();
+				catalogue = DiscoverGames();
 			}
 			else if (playRequested && games[selected].CanPlay() && BootGame(games[selected]))
 			{

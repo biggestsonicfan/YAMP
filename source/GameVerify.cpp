@@ -511,22 +511,34 @@ namespace Verify
 			const std::wstring name = dllPath.filename().wstring();
 			const std::wstring parent = UTF8ToWchar(gGeneral.GetParentGameName());
 
+			// Every refusal has the same shape - what happened, what YAMP found, what to do - so
+			// the useful part is never buried in a paragraph. 2022 is a bullet.
 			switch (result.status)
 			{
 			case ModuleStatus::Unreadable:
-				return name + L" could not be read.\n\nCheck that the file exists and is not locked "
-					L"by another program.";
+				return name + L" could not be read.\n\n"
+					L"YAMP found the file but could not open it to check its contents.\n\n"
+					L"What to do:\n"
+					L"  \u2022 Check that nothing else has it open (the game itself, an antivirus scan).\n"
+					L"  \u2022 If it is damaged, restore it from your own installation of " + parent + L".";
 
 			case ModuleStatus::OutdatedBuild:
-				return name + L" is of an unsupported version!\n\nPlease update your copy of " + parent +
-					L" to the latest version.";
+				return name + L" is from an older version of " + parent + L".\n\n"
+					L"YAMP hosts a module by patching it at fixed addresses, so it only loads builds it has "
+					L"verified, and this one predates the update YAMP supports.\n\n"
+					L"What to do:\n"
+					L"  \u2022 Update " + parent + L" to its latest version through Steam or GOG, then try again.";
 
 			default:
-				return name + L" does not match any build of " + parent + L" that YAMP supports, so it "
-					L"cannot be hosted safely.\n\nThis file:\n  " + UTF8ToWchar(result.sha256) +
-					L"\n\nExpected:\n  " + UTF8ToWchar(result.expectedSha256 ? result.expectedSha256 : "") +
-					L"\n\nUse the original, unmodified DLL from your own installation of " + parent +
-					L". If the game has been updated, YAMP needs an update to support the new build.";
+				return name + L" is not a build of " + parent + L"'s module that YAMP can host.\n\n"
+					L"YAMP hosts a module by patching it at fixed addresses, so it only loads builds it has "
+					L"verified, and this file's checksum matches none of them.\n\n"
+					L"This file:   " + UTF8ToWchar(result.sha256) + L"\n"
+					L"Expected:   " + UTF8ToWchar(result.expectedSha256 ? result.expectedSha256 : "") + L"\n\n"
+					L"What to do:\n"
+					L"  \u2022 Restore the original, unmodified DLL from your own installation of " + parent + L".\n"
+					L"  \u2022 If " + parent + L" was updated recently, YAMP needs an update to support the new "
+					L"build - check for one.";
 			}
 		}
 
@@ -541,21 +553,26 @@ namespace Verify
 				exeNames += (i + 1 == entry.titleCount) ? L" or " : L", ";
 				exeNames += entry.titles[i].exeName;
 			}
-			// Say what Steam had to say, because signing in to the right account is the remedy
-			// most people can apply without moving a single file.
+			// Both proofs are reported, Steam first: signing in to the right account is the remedy
+			// most people can apply without moving a single file. Same shape as the module
+			// refusals - what happened, what YAMP found, what to do.
 			const Steamworks::Report& steam = Steamworks::LastReport();
-			const std::wstring steamText = steam.available
-				? L"The Steam account signed in right now (" + UTF8ToWchar(steam.personaName) +
-					L") does not own " + parent + L"."
-				: L"Steam could not be asked whether you own it: " + UTF8ToWchar(steam.failure) + L".";
-			return parent + L" could not be found.\n\nYAMP looked for " + exeNames +
-				L" next to the arcade module, next to YAMP.exe, in every folder beside YAMP.exe, and "
-				L"in every Steam and GOG install on this system, and found no copy of it. " + steamText +
-				L"\n\nYAMP does not redistribute any game files: you must own " + parent + L" to play "
-				L"its arcade games. Sign in to Steam with an account that owns it — the arcade module "
-				L"folder is then all YAMP needs — or install it through Steam or GOG, or put YAMP.exe "
-				L"inside your existing installation, or alongside it with the game in a folder next "
-				L"to YAMP.exe.";
+			const std::wstring steamLine = steam.available
+				? L"  \u2022 Steam: the signed-in account (" + UTF8ToWchar(steam.personaName) +
+					L") does not own " + parent + L".\n"
+				: L"  \u2022 Steam: could not be asked - " + UTF8ToWchar(steam.failure) + L".\n";
+			return L"You need to own " + parent + L" to play this game.\n\n"
+				L"The arcade module is present and verified, but YAMP found no proof that you own " +
+				parent + L":\n" + steamLine +
+				L"  \u2022 Disk: no " + exeNames + L" next to the module, next to YAMP.exe, in any folder "
+				L"beside YAMP.exe, or in any Steam or GOG install on this system.\n\n"
+				L"What to do (any one of these), then try again:\n"
+				L"  \u2022 Sign in to Steam with the account that owns " + parent + L" - the module folder "
+				L"is then all YAMP needs.\n"
+				L"  \u2022 Install " + parent + L" through Steam or GOG.\n"
+				L"  \u2022 Put YAMP.exe inside your existing installation, or alongside it with the game in "
+				L"a folder next to YAMP.exe.\n\n"
+				L"YAMP does not redistribute any game files.";
 		}
 	}
 

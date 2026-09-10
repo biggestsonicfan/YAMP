@@ -77,17 +77,26 @@ They live in `source/GameVerify.cpp` next to the executable identities, one `ste
 
 ## Where it shows
 
-* **Launcher**: a line under the heading says whether Steam answered ("signed in as X — games
-  this account owns verify without an installation") or why not; each row's details say
-  "owned on Steam by X — no installation needed", "verified, <build> (also owned on Steam)", or,
-  when neither proof holds, whether the account simply does not own the title or Steam could not
-  be asked.
+* **Launcher** — redesigned around the two questions the gate asks. It is a tree: each top-level
+  row is a parent title with its ownership verdict (`Installed`, `Owned on Steam`, `Installed,
+  owned on Steam`, `Installed, unrecognised version`, `Not owned` when Steam answered, `Not found`
+  when it could not) and where that came from (the install folder, or the Steam account); the
+  rows beneath are the games that title supplies, each with its module verdict (`Verified`,
+  `Not found`, `Wrong build`, `Outdated build`, `Unreadable`) and where the module was found.
+  Ownership is checked once per title even when none of its modules turned up, because "you own
+  it, copy the module folder here" is the useful thing to say in that case. The details block
+  under the tree ends with one **what-to-do** sentence for any row that cannot play: which
+  folder to copy (named from the title's own install layout, e.g. `runtime\media\m2ftg`), which
+  account to sign in with, or which game to update. The line under the heading says whether Steam
+  answered; Rescan asks again.
 * **About panel** (F1): the same verdict for the running game.
-* **Log**: `[steam] app <id>: owned/not owned, installed at …`, `[steam] signed in as …`, and the
-  existing `[verify] parent game:` line now ends with `; owned on Steam` when it applies.
-* **The refusal message** when a boot is blocked names the signed-in account and says it does not
-  own the game, or says why Steam could not be asked, before the old "install it or put YAMP next
-  to it" advice.
+* **Log**: `[steam] app <id>: owned/not owned, installed at …`, `[steam] signed in as …`,
+  `[launcher] title <name>: <verdict>`, and the existing `[verify] parent game:` line now ends
+  with `; owned on Steam` when it applies.
+* **The refusal boxes** at boot all have one shape now — what happened, what YAMP found, what to
+  do — for the three module verdicts, the missing-module case in `ModuleLoad.cpp`, and the
+  ownership refusal, which lists both proofs (the signed-in account does not own it / Steam could
+  not be asked; no executable anywhere it looked) and the three remedies.
 
 ## Verified on 2026-09-10
 
