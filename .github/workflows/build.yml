@@ -1,10 +1,15 @@
 # Builds YAMP.exe on a clean machine.
 #
-# source/Utils (ModUtils) is a submodule and YAMP genuinely needs it - MemoryMgr.h, Patterns.h,
-# ScopedUnprotect.hpp and Trampoline.h are used across every host - so the checkout below is
-# recursive. It points at the public upstream, which needs no credentials; a workflow's default
-# GITHUB_TOKEN reaches only THIS repository, so if the submodule is ever repointed at a private
-# fork this job will start failing on a 401 and will need a PAT in a secret.
+# Two submodules, both needed, so the checkout below is recursive:
+#   source/Utils (ModUtils) - MemoryMgr.h, Patterns.h, ScopedUnprotect.hpp and Trampoline.h are
+#     used across every host.
+#   external/SteamworksSDK - the Steamworks headers source/SteamOwnership.cpp compiles against,
+#     and the steam_api64.dll redistributable the build copies next to YAMP.exe (it is loaded at
+#     runtime, never linked, so the exe runs without it - but the Steam ownership check needs it,
+#     which is why the artifact carries it).
+# Both point at public upstreams, which need no credentials; a workflow's default GITHUB_TOKEN
+# reaches only THIS repository, so if a submodule is ever repointed at a private fork this job
+# will start failing on a 401 and will need a PAT in a secret.
 #
 # The netplay plugin is NOT built here - it moved to its own repository, which has its own
 # workflow and builds against this one's headers. See the note at the bottom of premake5.lua.
@@ -49,13 +54,16 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify the submodule actually came down
-        # Without this, a missing source/Utils surfaces as a wall of "cannot open include file"
+      - name: Verify the submodules actually came down
+        # Without this, a missing submodule surfaces as a wall of "cannot open include file"
         # several minutes into the compile, which reads like a code problem rather than a
         # credentials one.
         run: |
           if (-not (Test-Path "source/Utils/MemoryMgr.h")) {
             throw "source/Utils is empty - the ModUtils submodule did not check out. Check .gitmodules: the URL must be a repository this workflow's token can read."
+          }
+          if (-not (Test-Path "external/SteamworksSDK/public/steam/steam_api.h")) {
+            throw "external/SteamworksSDK is empty - the Steamworks SDK submodule did not check out. Check .gitmodules: the URL must be a repository this workflow's token can read."
           }
 
       - name: Fetch premake5
@@ -76,10 +84,13 @@ jobs:
         run: msbuild build\YAMP.vcxproj -p:Configuration="${{ matrix.configuration }} Win64" -p:Platform=x64 -m
 
       - name: Upload YAMP.exe
+        # steam_api64.dll rides along: the post-build step in premake5.lua puts it next to the
+        # exe, and the Steam ownership check is silently unavailable without it.
         uses: actions/upload-artifact@v4
         with:
           name: YAMP-${{ matrix.configuration }}
           path: |
             build/bin/Win64/${{ matrix.configuration }}/YAMP.exe
             build/bin/Win64/${{ matrix.configuration }}/YAMP.pdb
+            build/bin/Win64/${{ matrix.configuration }}/steam_api64.dll
           if-no-files-found: error

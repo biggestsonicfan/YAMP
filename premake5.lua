@@ -33,6 +33,23 @@ project "YAMP"
 	-- detectable rather than something the player has to hand-map.
 	links { "bcrypt", "dinput8", "dxguid", "hid", "setupapi" }
 
+	-- Steamworks (external/SteamworksSDK, a submodule of Valve's SDK): headers only. YAMP does
+	-- NOT link steam_api64.lib - source/SteamOwnership.cpp loads the DLL at runtime and proves
+	-- ownership of the parent games through the signed-in Steam account, so a build still runs
+	-- without it (GOG-only players, or a copy where the DLL got dropped) and merely falls back to
+	-- locating each game's executable. The redistributable has to sit next to YAMP.exe for the
+	-- check to work, hence the copy into the output folder after every build; the CI workflow
+	-- ships it in the artifact for the same reason. The SDK headers are marked external so their
+	-- warnings do not join /W4's list.
+	externalincludedirs { "external/SteamworksSDK/public" }
+	externalwarnings "Off"
+	-- (buildtarget.directory, not targetdir: the latter is the raw, unset-here field and
+	-- expands to nothing; the former is the computed bin/<platform>/<config> the exe lands in.)
+	postbuildcommands {
+		'{COPYFILE} "' .. path.getabsolute("external/SteamworksSDK/redistributable_bin/win64/steam_api64.dll")
+			.. '" "%{cfg.buildtarget.directory}/steam_api64.dll"'
+	}
+
 
 workspace "*"
 	configurations { "Debug", "Release", "Master" }

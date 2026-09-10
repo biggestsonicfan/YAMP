@@ -37,8 +37,10 @@ different checksums, and each row checks that *its* parent game is the one insta
 
 * Windows 10/11, x64
 * A GPU with Direct3D 12
-* A legally owned copy of at least one parent game above, installed. Steam for all of them
-  except the Kiwami 2 modules, which come from the GOG build.
+* A legally owned copy of at least one parent game above. Steam for all of them except the
+  Kiwami 2 modules, which come from the GOG build. It does **not** have to be installed: if the
+  Steam account signed in owns it, the arcade module folder on its own is enough (see
+  [Module verification](#module-verification)).
 
 ## Getting started
 
@@ -56,9 +58,11 @@ the resulting binaries are attached to the run:
 debug logging compiled in — bigger and slower, but the one to grab when something misbehaves and
 you want a log to attach to an issue.
 
-GitHub hands you a `.zip` containing `YAMP.exe` and `YAMP.pdb`. Only the `.exe` is needed to run;
-the `.pdb` carries the symbols that turn a crash address into a function name and a line number,
-so keep it beside the `.exe` if you might report a crash.
+GitHub hands you a `.zip` containing `YAMP.exe`, `YAMP.pdb` and `steam_api64.dll`. Only the
+`.exe` is needed to run. Keep `steam_api64.dll` beside it if you want ownership proven through
+your Steam account rather than by locating the game (without it YAMP still runs, but every parent
+game has to be found on disk). The `.pdb` carries the symbols that turn a crash address into a
+function name and a line number, so keep it beside the `.exe` if you might report a crash.
 
 Two things that routinely catch people out, neither of which is a setting in this repository:
 
@@ -78,9 +82,18 @@ out of `libraryfolders.vdf`), **every GOG install** from the registry, and every
 beside `YAMP.exe`. Matching is by module layout rather than folder name, so a renamed or moved
 install is still found.
 
-Each row shows where the game was found and whether it verified. Pick one and press **Play** —
-YAMP relaunches itself with that game's switch and the working directory set to the game's own
-folder, which is what the module needs in order to find its ROM and sound assets.
+The launcher is a tree. Each top-level row is a parent title and says whether you **own** it —
+because the signed-in Steam account holds it, or because an installation was found on disk. The
+rows beneath are the arcade games that title supplies, each saying whether its **module** was
+found in one of the search locations and where. Pick a game and press **Play** — YAMP relaunches
+itself with that game's switch and the working directory set to the game's own folder, which is
+what the module needs in order to find its ROM and sound assets.
+
+A title you own on Steam needs no installation at all: copy its arcade module folder (the DLL
+together with its `rom/` and `w64/` or sound files, e.g. Lost Judgment's `runtime/media/m2ftg/`)
+next to `YAMP.exe` and the game verifies and plays. When something is missing, the details under
+the tree say exactly what to do — which folder to copy, or which account to sign in with. The
+line under the heading says whether Steam answered; **Rescan** asks again after you sign in.
 
 You can skip the launcher entirely by passing a switch from the table above.
 
@@ -203,10 +216,21 @@ unrecognised build never gets to execute. Every host resolves symbols by byte pa
 hardcoded offsets, and a wrong build does not fail cleanly — it silently mis-patches, which is a
 far worse outcome than being told to update.
 
-The parent game is checked separately and more cheaply, by PE header identity rather than a hash:
-hashing a several-hundred-megabyte executable would cost seconds at every boot for no extra
-certainty. A missing parent game blocks; an unrecognised *build* of a parent game that is present
-is only a warning, because the module is what compatibility actually depends on.
+Ownership of the parent game is a separate question with two acceptable answers, either of which
+is enough:
+
+* **The signed-in Steam account owns it.** YAMP opens a brief Steamworks session with the running
+  Steam client (through `steam_api64.dll`, shipped beside the exe) and asks it whether the account
+  holds a licence for the title. Nothing of the game needs to be on disk. The session is closed as
+  soon as the answers are in, before any window exists.
+* **The game's executable is found on disk**, identified by PE header rather than a hash: hashing
+  a several-hundred-megabyte executable would cost seconds at every boot for no extra certainty.
+  This is the whole answer for GOG installs and for machines without Steam running.
+
+Neither one blocks. An unrecognised *build* of a parent game that is present is only a warning,
+because the module is what compatibility actually depends on. `-nosteam` skips the Steam question
+entirely. The design, the app ids and what was verified are in
+[`docs/steam-ownership.md`](docs/steam-ownership.md).
 
 ### Research and debugging tools
 

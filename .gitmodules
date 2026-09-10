@@ -1,3 +1,6 @@
 [submodule "source/Utils"]
 	path = source/Utils
 	url = https://github.com/CookiePLMonster/ModUtils.git
+[submodule "external/SteamworksSDK"]
+	path = external/SteamworksSDK
+	url = https://github.com/rlabrecque/SteamworksSDK

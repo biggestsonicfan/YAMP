@@ -10,15 +10,20 @@
 //    instead of failing cleanly; an exact hash is the only honest answer. A DLL that does
 //    not match is BLOCKED before LoadLibrary ever runs its DllMain.
 //
-//  * "Does the user own the parent game?"  -> PE header identity of the parent executable
-//    (LostJudgment.exe and friends). Those are hundreds of megabytes, so hashing them would
-//    add seconds to every boot for no extra certainty: the MZ/PE magic, TimeDateStamp,
-//    SizeOfImage and file size together already pin an exact retail build, and cost a couple
-//    of header reads. A missing parent game blocks; a parent game of an unrecognised build
-//    only warns, since the arcade DLL is the file compatibility actually depends on.
+//  * "Does the user own the parent game?"  -> two answers, and either one is enough:
+//      - the signed-in Steam account holds a license for the title (SteamOwnership.h: a short
+//        Steamworks session against the running client). Nothing of the game needs to be on
+//        disk — the arcade module folder is all YAMP loads.
+//      - the title's executable (LostJudgment.exe and friends) is found on disk, identified by
+//        PE header. Those are hundreds of megabytes, so hashing them would add seconds to every
+//        boot for no extra certainty: the MZ/PE magic, TimeDateStamp, SizeOfImage and file size
+//        together already pin an exact retail build, and cost a couple of header reads. This is
+//        the whole answer for GOG installs and for anyone without Steam running.
+//    Neither = block. A present executable of an unrecognised build only warns, since the
+//    arcade DLL is the file compatibility actually depends on.
 //
-// Games with no table entry yet (VF2 from Yakuza: Like a Dragon, VF5FS from Yakuza 6) report
-// NotChecked and are not gated — their hashes get added as those paths are revisited.
+// Games with no table entry yet report NotChecked and are not gated — their hashes get added as
+// those paths are revisited.
 
 #include <cstdint>
 #include <filesystem>
@@ -41,8 +46,9 @@ namespace Verify
 	enum class ParentStatus
 	{
 		Verified,        // parent executable found, PE identity matches a known build
+		OwnedOnSteam,    // no verified executable, but the signed-in Steam account owns the title
 		UnknownBuild,    // parent executable found, but a build we have no identity for -> warns
-		NotFound,        // no parent executable anywhere we looked -> blocked
+		NotFound,        // no executable anywhere we looked AND Steam did not vouch -> blocked
 		NotChecked,      // no table entry for this game yet -> not gated
 	};
 
@@ -61,9 +67,12 @@ namespace Verify
 	struct ParentResult
 	{
 		ParentStatus status = ParentStatus::NotChecked;
-		std::filesystem::path exePath;      // where it was found, empty when NotFound
+		std::filesystem::path exePath;      // where it was found, empty when no executable turned up
 		const char* exeName = nullptr;      // the executable we looked for ("LostJudgment.exe")
 		const char* buildLabel = nullptr;   // known build name, null when unrecognised
+		bool steamOwned = false;            // the Steam account owns it — set whatever the status,
+		                                    // so a Verified install can also say "and owned on Steam"
+		uint32_t steamAppId = 0;            // which app id vouched, when steamOwned
 
 		bool Blocks() const { return status == ParentStatus::NotFound; }
 	};
@@ -71,11 +80,17 @@ namespace Verify
 	// Hash + identify an arcade module DLL. Reads the file; does not load it.
 	ModuleResult CheckModule(YAMPGeneral::GameId id, const std::filesystem::path& dllPath);
 
-	// Locate and identify the parent game's executable. Searches, in order: the DLL's own
-	// folder and its two parents (LJ ships the modules in runtime/media/<module>/, next to
-	// runtime/media/LostJudgment.exe), the YAMP.exe folder and the CWD, then every Steam
-	// install found through the registry + libraryfolders.vdf.
+	// Prove the parent game is owned. Locates and identifies its executable — searching, in
+	// order, the DLL's own folder and its two parents (LJ ships the modules in
+	// runtime/media/<module>/, next to runtime/media/LostJudgment.exe), the YAMP.exe folder and
+	// the CWD, wherever the Steam client says the title is installed, then every Steam and GOG
+	// install — and asks the Steam client whether the signed-in account owns the title. A
+	// verified executable wins (it names the build); Steam ownership alone is OwnedOnSteam.
 	ParentResult CheckParentGame(YAMPGeneral::GameId id, const std::filesystem::path& dllDir);
+
+	// Forget the cached Steam answers so the next check asks the client again — the launcher's
+	// Rescan, for someone who signed in to Steam after opening YAMP.
+	void RefreshSteamOwnership();
 
 	// The gate every host runs before LoadLibrary: checks the module, then the parent game,
 	// stores both as the "last" results for the About panel, and shows an explanatory message
@@ -101,10 +116,11 @@ namespace Verify
 		                     // for the launcher's UI
 	};
 
-	// EVERY game install directory on this system: each Steam library's steamapps/common/*, every
-	// GOG game from the registry, and — for installs no store knows about — YAMP.exe's own folder
-	// plus each folder sitting beside it (one level, directories only). Both the launcher's game
-	// discovery and the parent-game ownership search run off this, so a source that is missing here
-	// makes its games both undiscoverable and unverifiable.
+	// EVERY game install directory on this system: each Steam library's steamapps/common/*, each
+	// parent game's install folder as the Steam client itself reports it, every GOG game from the
+	// registry, and — for installs no store knows about — YAMP.exe's own folder plus each folder
+	// sitting beside it (one level, directories only). Both the launcher's game discovery and the
+	// parent-game ownership search run off this, so a source that is missing here makes its games
+	// both undiscoverable and unverifiable.
 	std::vector<InstallRoot> GameInstallRoots();
 }

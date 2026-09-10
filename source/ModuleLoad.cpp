@@ -34,11 +34,18 @@ HMODULE LoadModuleDll(const wchar_t* dllName, const wchar_t* subdir, ModuleSearc
 
 	if (!std::filesystem::is_regular_file(dllFile))
 	{
+		// Same shape as the verification refusals (GameVerify.cpp): what happened, where YAMP
+		// looked, what to do. The launcher is the first suggestion because it does the looking.
 		const std::wstring str = missingMessage != nullptr
-			? (L"Could not load " + std::wstring(dllName) + L"!\n\n" + missingMessage)
-			: (L"Could not load " + std::wstring(dllName) +
-				L"!\n\nMake sure that YAMP.exe is located next to the DLL file or its \"" +
-				subdir + L"\" subdirectory contains it.");
+			? (L"Could not find " + std::wstring(dllName) + L".\n\n" + missingMessage)
+			: (L"Could not find " + std::wstring(dllName) + L".\n\n"
+				L"YAMP looked in the folder it was started from and in that folder's \"" + subdir +
+				L"\" subfolder.\n\n"
+				L"What to do:\n"
+				L"  \u2022 Run YAMP.exe with no arguments: the launcher finds games by itself - next to "
+				L"YAMP.exe, in any folder beside it, and in your Steam and GOG installs.\n"
+				L"  \u2022 Or start YAMP from the folder that holds the module, or copy that folder (the "
+				L"DLL with its rom and sound files) next to YAMP.exe.");
 		MessageBoxW(nullptr, str.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
 		return nullptr;
 	}
