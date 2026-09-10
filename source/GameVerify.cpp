@@ -13,6 +13,7 @@
 #include <Windows.h>
 #include <bcrypt.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "DebugLog.h"
+#include "SteamOwnership.h"
 #include "wil/resource.h"
 
 namespace fs = std::filesystem;
@@ -192,6 +194,11 @@ namespace Verify
 			size_t subdirCount;
 			const KnownExeBuild* builds;
 			size_t buildCount;
+			// The title's Steam app id(s): owning any one of them on the signed-in account proves
+			// ownership with nothing of the game on disk (SteamOwnership.h). A list because Steam
+			// has sold the same title under more than one app id (Kiwami 2).
+			const uint32_t* steamAppIds;
+			size_t steamAppIdCount;
 		};
 
 		struct ParentEntry
@@ -227,6 +234,17 @@ namespace Verify
 			{ 0x67A1DC3D, 0x18D15000, 387517984, "Like a Dragon Gaiden (Steam)" },
 		};
 
+		// Steam store app ids of the parent titles, checked against the store pages 2026-09-10.
+		// Kiwami 2 has TWO: the original listing (927380) was renamed "Yakuza Kiwami 2 (Legacy)"
+		// when a new listing (3717340) appeared, and a license for either is ownership of the
+		// game. Note the Kiwami 2 modules YAMP hosts are the GOG build — a Steam owner passes the
+		// ownership check here and then meets the module hash gate, which is a separate question.
+		constexpr uint32_t LJ_STEAM_APPS[] = { 2058190 };
+		constexpr uint32_t YLAD_STEAM_APPS[] = { 1235140 };
+		constexpr uint32_t Y6_STEAM_APPS[] = { 1388590 };
+		constexpr uint32_t K2_STEAM_APPS[] = { 927380, 3717340 };
+		constexpr uint32_t GAIDEN_STEAM_APPS[] = { 2375550 };
+
 		// Like a Dragon Gaiden supplies the Model 3 games, its own Motor Raid rebuild and its own
 		// Sonic the Fighters rebuild. Each of those is a SEPARATE GameId whose module table holds
 		// only that title's build, so the parent check is per-title too: a row that offered "either
@@ -234,27 +252,32 @@ namespace Verify
 		constexpr ParentTitle GAIDEN_TITLES[] = {
 			{ L"likeadragongaiden.exe", "likeadragongaiden.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS) },
+				GAIDEN_EXE_BUILDS, std::size(GAIDEN_EXE_BUILDS),
+				GAIDEN_STEAM_APPS, std::size(GAIDEN_STEAM_APPS) },
 		};
 		// FV has no Gaiden module (Gaiden ships fv_rom.par but no fv DLL), so it stays
 		// Lost-Judgment-only. The Gaiden builds of MR and StF are their own entries now.
 		constexpr ParentTitle LJ_TITLES[] = {
 			{ L"LostJudgment.exe", "LostJudgment.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS) },
+				LJ_EXE_BUILDS, std::size(LJ_EXE_BUILDS),
+				LJ_STEAM_APPS, std::size(LJ_STEAM_APPS) },
 		};
 		constexpr ParentTitle YLAD_TITLES[] = {
 			{ L"YakuzaLikeADragon.exe", "YakuzaLikeADragon.exe",
 				RUNTIME_MEDIA_SUBDIRS, std::size(RUNTIME_MEDIA_SUBDIRS),
-				YLAD_EXE_BUILDS, std::size(YLAD_EXE_BUILDS) },
+				YLAD_EXE_BUILDS, std::size(YLAD_EXE_BUILDS),
+				YLAD_STEAM_APPS, std::size(YLAD_STEAM_APPS) },
 		};
 		constexpr ParentTitle K2_TITLES[] = {
 			{ L"YakuzaKiwami2.exe", "YakuzaKiwami2.exe",
-				nullptr, 0, K2_EXE_BUILDS, std::size(K2_EXE_BUILDS) },
+				nullptr, 0, K2_EXE_BUILDS, std::size(K2_EXE_BUILDS),
+				K2_STEAM_APPS, std::size(K2_STEAM_APPS) },
 		};
 		constexpr ParentTitle Y6_TITLES[] = {
 			{ L"Yakuza6.exe", "Yakuza6.exe",
-				nullptr, 0, Y6_EXE_BUILDS, std::size(Y6_EXE_BUILDS) },
+				nullptr, 0, Y6_EXE_BUILDS, std::size(Y6_EXE_BUILDS),
+				Y6_STEAM_APPS, std::size(Y6_STEAM_APPS) },
 		};
 
 		constexpr ParentEntry PARENT_ENTRIES[] = {
@@ -289,6 +312,32 @@ namespace Verify
 				if (entry.id == id) return &entry;
 			}
 			return nullptr;
+		}
+
+		// Every Steam app id the parent tables name, asked about in ONE connection. Lazy and
+		// cached: the launcher calls CheckParentGame once per row per scan and a boot calls it
+		// once, and the client's answers are the same for all of them.
+		void EnsureSteamQueried()
+		{
+			if (Steamworks::LastReport().attempted) return;
+
+			std::vector<uint32_t> appIds;
+			for (const ParentEntry& entry : PARENT_ENTRIES)
+			{
+				for (size_t t = 0; t < entry.titleCount; t++)
+				{
+					const ParentTitle& title = entry.titles[t];
+					for (size_t a = 0; a < title.steamAppIdCount; a++)
+					{
+						const uint32_t appId = title.steamAppIds[a];
+						if (std::find(appIds.begin(), appIds.end(), appId) == appIds.end())
+						{
+							appIds.push_back(appId);
+						}
+					}
+				}
+			}
+			Steamworks::Query(appIds.data(), appIds.size());
 		}
 
 		// ---- File readers -----------------------------------------------------------------
@@ -434,6 +483,17 @@ namespace Verify
 				}
 			}
 
+			// Where the Steam client itself says this title is installed, when it is — the
+			// authoritative answer for a Steam install, ahead of the library walk below.
+			for (size_t a = 0; a < entry.steamAppIdCount; a++)
+			{
+				const Steamworks::AppOwnership* app = Steamworks::Find(entry.steamAppIds[a]);
+				if (app != nullptr && app->installed)
+				{
+					addRootAndSubdirs(app->installDir);
+				}
+			}
+
 			// Every installed game on the system, Steam AND GOG (see GameInstallRoots).
 			for (const InstallRoot& install : GameInstallRoots())
 			{
@@ -481,12 +541,21 @@ namespace Verify
 				exeNames += (i + 1 == entry.titleCount) ? L" or " : L", ";
 				exeNames += entry.titles[i].exeName;
 			}
+			// Say what Steam had to say, because signing in to the right account is the remedy
+			// most people can apply without moving a single file.
+			const Steamworks::Report& steam = Steamworks::LastReport();
+			const std::wstring steamText = steam.available
+				? L"The Steam account signed in right now (" + UTF8ToWchar(steam.personaName) +
+					L") does not own " + parent + L"."
+				: L"Steam could not be asked whether you own it: " + UTF8ToWchar(steam.failure) + L".";
 			return parent + L" could not be found.\n\nYAMP looked for " + exeNames +
 				L" next to the arcade module, next to YAMP.exe, in every folder beside YAMP.exe, and "
-				L"in every Steam and GOG install on this system, and found no copy of it.\n\nYAMP does "
-				L"not redistribute any game files: you must own " + parent + L" to play its arcade "
-				L"games. Install it through Steam or GOG, or put YAMP.exe inside your existing "
-				L"installation — or alongside it, with the game in a folder next to YAMP.exe.";
+				L"in every Steam and GOG install on this system, and found no copy of it. " + steamText +
+				L"\n\nYAMP does not redistribute any game files: you must own " + parent + L" to play "
+				L"its arcade games. Sign in to Steam with an account that owns it — the arcade module "
+				L"folder is then all YAMP needs — or install it through Steam or GOG, or put YAMP.exe "
+				L"inside your existing installation, or alongside it with the game in a folder next "
+				L"to YAMP.exe.";
 		}
 	}
 
@@ -572,6 +641,16 @@ namespace Verify
 				if (!install.is_directory(installEc) || installEc) continue;
 				add(install.path(), "Steam: " + WcharToUTF8(install.path().filename().wstring()));
 			}
+		}
+
+		// ...plus wherever the Steam client itself says each parent game is installed. Normally
+		// the same folders the walk above found, and deduplicated as such; it earns its keep when
+		// a library sits on a path the libraryfolders.vdf parse above did not yield.
+		EnsureSteamQueried();
+		for (const Steamworks::AppOwnership& app : Steamworks::LastReport().apps)
+		{
+			if (!app.installed || app.installDir.empty()) continue;
+			add(app.installDir, "Steam: " + WcharToUTF8(app.installDir.filename().wstring()));
 		}
 
 		// ---- GOG: the registry names every installed game and its exact path ------------
@@ -727,6 +806,8 @@ namespace Verify
 		const ParentEntry* entry = FindParentEntry(id);
 		if (entry == nullptr) return result;  // NotChecked: no table for this game yet
 
+		EnsureSteamQueried();
+
 		result.exeName = entry->titles[0].exeNameUtf8;
 		result.status = ParentStatus::NotFound;
 
@@ -770,7 +851,36 @@ namespace Verify
 			}
 			if (result.status == ParentStatus::Verified) break;
 		}
+
+		// Steam's answer. A verified executable keeps the verdict — it says WHICH build is
+		// installed, which a license does not — but ownership on the account is proof on its
+		// own, so it outranks both "no executable anywhere" and "an executable of a build YAMP
+		// does not recognise". An executable that was found stays in exePath for the log.
+		for (size_t t = 0; t < entry->titleCount && !result.steamOwned; t++)
+		{
+			const ParentTitle& title = entry->titles[t];
+			for (size_t a = 0; a < title.steamAppIdCount; a++)
+			{
+				const Steamworks::AppOwnership* app = Steamworks::Find(title.steamAppIds[a]);
+				if (app == nullptr || !app->owned) continue;
+
+				result.steamOwned = true;
+				result.steamAppId = app->appId;
+				if (result.status != ParentStatus::Verified)
+				{
+					result.status = ParentStatus::OwnedOnSteam;
+					result.exeName = title.exeNameUtf8;
+					result.buildLabel = nullptr;
+				}
+				break;
+			}
+		}
 		return result;
+	}
+
+	void RefreshSteamOwnership()
+	{
+		Steamworks::Refresh();
 	}
 
 	bool CheckBeforeLoad(YAMPGeneral::GameId id, const fs::path& dllPath)
@@ -793,10 +903,11 @@ namespace Verify
 			g_lastModule.buildLabel ? " — " : "", g_lastModule.buildLabel ? g_lastModule.buildLabel : "",
 			g_lastModule.sha256.empty() ? "n/a" : g_lastModule.sha256.c_str(),
 			static_cast<unsigned long long>(g_lastModule.size));
-		DebugLog("[verify] parent game: %s%s%s (%s)\n", Describe(g_lastParent.status),
+		DebugLog("[verify] parent game: %s%s%s (%s%s)\n", Describe(g_lastParent.status),
 			g_lastParent.buildLabel ? " — " : "", g_lastParent.buildLabel ? g_lastParent.buildLabel : "",
-			g_lastParent.exePath.empty() ? "not located"
-				: WcharToUTF8(g_lastParent.exePath.wstring()).c_str());
+			g_lastParent.exePath.empty() ? "executable not located"
+				: WcharToUTF8(g_lastParent.exePath.wstring()).c_str(),
+			g_lastParent.steamOwned ? "; owned on Steam" : "");
 
 		if (g_lastModule.Blocks())
 		{
@@ -839,6 +950,7 @@ namespace Verify
 		switch (status)
 		{
 		case ParentStatus::Verified:     return "Verified";
+		case ParentStatus::OwnedOnSteam: return "Owned on Steam";
 		case ParentStatus::UnknownBuild: return "Unrecognised build";
 		case ParentStatus::NotFound:     return "Not found";
 		default:                         return "Not verified";

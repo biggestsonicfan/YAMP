@@ -7,6 +7,11 @@
 // layout), every GOG game from the registry, and — for installs no store knows about — each
 // folder sitting beside YAMP.exe.
 //
+// Ownership of the parent game is what gates Play, and it has two proofs: the Steam account
+// signed in right now owns the title (SteamOwnership.h — no game files needed beyond the arcade
+// module folder), or the title's executable is found and identified (GameVerify.h). Either one
+// is enough.
+//
 // "Play" relaunches YAMP.exe as a child process with the game's command-line switch and the
 // working directory set to the discovered game folder, so the per-game boot paths (which
 // resolve the DLL and its rom/sound assets relative to the CWD) run completely unchanged.
@@ -16,6 +21,7 @@
 #include "YAMPGeneral.h"
 #include "GameVerify.h"
 #include "GameRegistry.h"
+#include "SteamOwnership.h"
 #include "RenderWindow.h"
 #include "StringUtil.h"
 #include "DebugLog.h"
@@ -223,6 +229,11 @@ namespace Launcher
 
 		std::vector<FoundGame> DiscoverGames()
 		{
+			// Ask Steam afresh on every scan, so Rescan picks up an account that signed in after
+			// the launcher opened. The connection is made once per scan, lazily, by the first
+			// check below that needs it.
+			Verify::RefreshSteamOwnership();
+
 			const std::vector<SearchRoot> roots = CollectSearchRoots();
 
 			std::vector<FoundGame> games;
@@ -412,6 +423,23 @@ namespace Launcher
 				ImGui::TextDisabled("Select an arcade game. Games are located automatically: next to "
 					"YAMP.exe, in any folder beside it, and in your Steam and GOG installs of the "
 					"parent games.");
+				// The state of the second ownership proof, up front: it decides whether a module
+				// folder on its own is enough, and "Steam is not running" is the one thing about a
+				// failed check the user can fix without touching a file.
+				{
+					const Steamworks::Report& steam = Steamworks::LastReport();
+					if (steam.available)
+					{
+						ImGui::TextDisabled("Steam: signed in as %s. Games this account owns verify "
+							"without an installation - the arcade module folder is enough.",
+							steam.personaName.c_str());
+					}
+					else
+					{
+						ImGui::TextDisabled("Steam: %s. Ownership is proven by locating each parent "
+							"game's executable instead.", steam.failure.c_str());
+					}
+				}
 				ImGui::Separator();
 
 				// Reserve room for the details block (path, source, checksum verdict, parent
@@ -486,8 +514,9 @@ namespace Launcher
 					const FoundGame& game = games[selected];
 					if (!game.found)
 					{
-						ImGui::TextWrapped("%s was not found. Install %s on Steam, or place the game "
-							"files next to YAMP.exe.", game.info->name, game.info->parent);
+						ImGui::TextWrapped("%s was not found. Install %s, or place its arcade module "
+							"folder (the DLL with its rom and sound files) next to YAMP.exe.",
+							game.info->name, game.info->parent);
 					}
 					else
 					{
@@ -519,17 +548,33 @@ namespace Launcher
 							break;
 						}
 
+						const Steamworks::Report& steam = Steamworks::LastReport();
 						switch (game.parent.status)
 						{
 						case Verify::ParentStatus::Verified:
-							ImGui::TextDisabled("%s: %s", game.info->parent, game.parent.buildLabel);
+							ImGui::TextDisabled("%s: %s%s", game.info->parent, game.parent.buildLabel,
+								game.parent.steamOwned ? " (also owned on Steam)" : "");
+							break;
+						case Verify::ParentStatus::OwnedOnSteam:
+							ImGui::TextDisabled("%s: owned on Steam by %s - no installation needed.",
+								game.info->parent, steam.personaName.c_str());
 							break;
 						case Verify::ParentStatus::UnknownBuild:
 							ImGui::TextDisabled("%s: found, unrecognised version.", game.info->parent);
 							break;
 						case Verify::ParentStatus::NotFound:
-							ImGui::TextColored(BAD, "No installation of %s was found. You must own "
-								"it to play its arcade games.", game.info->parent);
+							if (steam.available)
+							{
+								ImGui::TextColored(BAD, "No installation of %s was found, and the Steam "
+									"account %s does not own it. You must own it to play its arcade games.",
+									game.info->parent, steam.personaName.c_str());
+							}
+							else
+							{
+								ImGui::TextColored(BAD, "No installation of %s was found, and Steam could "
+									"not be asked whether you own it (%s). Sign in to Steam and Rescan, or "
+									"install the game.", game.info->parent, steam.failure.c_str());
+							}
 							break;
 						default:
 							break;

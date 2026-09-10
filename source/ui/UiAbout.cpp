@@ -2,6 +2,7 @@
 // Split out of YAMPUserInterface.cpp (2026-08-09).
 
 #include "../YAMPUserInterface.h"
+#include "../SteamOwnership.h"
 #include "UiInternal.h"
 
 
@@ -64,9 +65,16 @@ void YAMPUserInterface::DrawAbout()
 		}
 
 		const Verify::ParentResult& parent = Verify::LastParentResult();
+		const Steamworks::Report& steam = Steamworks::LastReport();
 		if (parent.status == Verify::ParentStatus::Verified)
 		{
-			ImGui::Text("Base game: verified, %s", parent.buildLabel);
+			ImGui::Text("Base game: verified, %s%s", parent.buildLabel,
+				parent.steamOwned ? " (also owned on Steam)" : "");
+		}
+		else if (parent.status == Verify::ParentStatus::OwnedOnSteam)
+		{
+			ImGui::Text("Base game: owned on Steam by %s (app %u); no installation was needed.",
+				steam.personaName.c_str(), parent.steamAppId);
 		}
 		else if (parent.status == Verify::ParentStatus::UnknownBuild)
 		{
