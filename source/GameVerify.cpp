@@ -506,6 +506,16 @@ namespace Verify
 		ModuleResult g_lastModule;
 		ParentResult g_lastParent;
 
+		// ---- Command-line bypasses --------------------------------------------------------
+		// Substring match on the raw command line, the same way every other YAMP switch is read
+		// (SteamOwnership's -nosteam, the hosts' -von-realclock and friends). None of the three
+		// is a prefix of any other switch YAMP or a host looks for.
+		bool FlagOnCommandLine(const wchar_t* flag)
+		{
+			const wchar_t* cmdLine = GetCommandLineW();
+			return cmdLine != nullptr && wcsstr(cmdLine, flag) != nullptr;
+		}
+
 		std::wstring FormatModuleFailure(const fs::path& dllPath, const ModuleResult& result)
 		{
 			const std::wstring name = dllPath.filename().wstring();
@@ -900,6 +910,35 @@ namespace Verify
 		Steamworks::Refresh();
 	}
 
+	bool ChecksumBypassed()
+	{
+		static const bool bypassed = FlagOnCommandLine(L"-nochecksum") || FlagOnCommandLine(L"-noverify");
+		return bypassed;
+	}
+
+	bool OwnershipBypassed()
+	{
+		static const bool bypassed = FlagOnCommandLine(L"-noownership") || FlagOnCommandLine(L"-noverify");
+		return bypassed;
+	}
+
+	bool AnyBypass()
+	{
+		return ChecksumBypassed() || OwnershipBypassed();
+	}
+
+	const wchar_t* BypassArgs()
+	{
+		static const std::wstring args = []
+		{
+			std::wstring list;
+			if (ChecksumBypassed()) list += L" -nochecksum";
+			if (OwnershipBypassed()) list += L" -noownership";
+			return list;
+		}();
+		return args.c_str();
+	}
+
 	bool CheckBeforeLoad(YAMPGeneral::GameId id, const fs::path& dllPath)
 	{
 		g_lastModule = CheckModule(id, dllPath);
@@ -926,22 +965,36 @@ namespace Verify
 				: WcharToUTF8(g_lastParent.exePath.wstring()).c_str(),
 			g_lastParent.steamOwned ? "; owned on Steam" : "");
 
+		// A waived gate is still a FAILED gate: the results keep their real verdicts, the log
+		// says loudly which switch let the module through, and the About panel repeats it. The
+		// only thing the switch changes is the refusal.
 		if (g_lastModule.Blocks())
 		{
-			const std::wstring message = FormatModuleFailure(dllPath, g_lastModule);
-			MessageBoxW(nullptr, message.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
-			return false;
+			if (!ChecksumBypassed())
+			{
+				const std::wstring message = FormatModuleFailure(dllPath, g_lastModule);
+				MessageBoxW(nullptr, message.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
+				return false;
+			}
+			DebugLog("[verify] *** checksum gate BYPASSED on the command line (-nochecksum): loading a "
+				"module this build does not know how to patch. Every host resolves symbols by byte "
+				"pattern and by hardcoded RVA, so expect mis-patching, not a clean failure. ***\n");
 		}
 
 		if (g_lastParent.Blocks())
 		{
-			const ParentEntry* entry = FindParentEntry(id);
-			if (entry != nullptr)
+			if (!OwnershipBypassed())
 			{
-				const std::wstring message = FormatParentFailure(*entry);
-				MessageBoxW(nullptr, message.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
+				const ParentEntry* entry = FindParentEntry(id);
+				if (entry != nullptr)
+				{
+					const std::wstring message = FormatParentFailure(*entry);
+					MessageBoxW(nullptr, message.c_str(), L"Yakuza Arcade Machines Player", MB_ICONERROR | MB_OK);
+				}
+				return false;
 			}
-			return false;
+			DebugLog("[verify] *** ownership gate BYPASSED on the command line (-noownership): the parent "
+				"title was neither found on disk nor vouched for by Steam. ***\n");
 		}
 
 		return true;

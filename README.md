@@ -232,6 +232,21 @@ because the module is what compatibility actually depends on. `-nosteam` skips t
 entirely. The design, the app ids and what was verified are in
 [`docs/steam-ownership.md`](docs/steam-ownership.md).
 
+Both gates can be waived, but only from the command line — there is no setting and no checkbox,
+so a bypass is always something the person running YAMP chose for that run:
+
+| Switch | Effect |
+| --- | --- |
+| `-nochecksum` | loads a module DLL whose SHA-256 is not one YAMP knows |
+| `-noownership` | loads without proving the parent title is owned, and never loads `steam_api64.dll` |
+| `-noverify` | both of the above |
+
+A waived check is still a failed check: the log, the About panel and the launcher all keep saying
+the module is unrecognised or the title unproven, and say which switch let it through. The
+launcher honours a bypass it was started with and passes it on to the game it boots.
+`-nochecksum` is the loaded gun of the two — every host patches its module by byte pattern and by
+hardcoded RVA, so an unknown build does not fail cleanly, it mis-patches.
+
 ### Research and debugging tools
 
 Behind an acknowledgement on the Debug page, and locked out entirely during netplay:
