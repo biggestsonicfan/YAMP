@@ -17,6 +17,7 @@
 #include <memory>
 
 #include "DebugLog.h"
+#include "GameVerify.h"   // Verify::OwnershipBypassed - the one place the switch names live
 #include "StringUtil.h"
 #include "wil/resource.h"
 
@@ -128,6 +129,17 @@ namespace Steamworks
 		if (FlagOnCommandLine(L"-nosteam"))
 		{
 			Fail("disabled with -nosteam");
+			return g_report;
+		}
+
+		// The ownership bypass implies this one. Asking the client is how ownership gets proven,
+		// and a run that is not gated on ownership has nothing to do with the answer - so loading
+		// steam_api64.dll and opening a session (which shows the account as "playing Spacewar"
+		// for as long as it is up) would be pure cost. The switch names are GameVerify's; this
+		// reads the decision rather than re-spelling them.
+		if (Verify::OwnershipBypassed())
+		{
+			Fail("not asked - ownership was bypassed on the command line");
 			return g_report;
 		}
 

@@ -48,7 +48,11 @@ block, exactly as before.
 The answers are cached for the process; the launcher's **Rescan** calls
 `Verify::RefreshSteamOwnership()` so someone who signed in after opening YAMP gets a fresh answer.
 `-nosteam` on the command line skips the client entirely, which is how the executable-only path
-is exercised on a machine that has Steam.
+is exercised on a machine that has Steam. `-noownership` (and `-noverify`, which implies it) skips
+it as well, and for a stronger reason: the only thing YAMP ever asks the client is the ownership
+question those switches waive, so the session would open, name the account, and be thrown away.
+The failure line then reads `not asked - ownership was bypassed on the command line`, and
+`steam_api64.dll` is never loaded into the process at all.
 
 The Steamworks SDK comes in as a git submodule, `external/SteamworksSDK`
 (https://github.com/rlabrecque/SteamworksSDK, v1.65 at the time of writing). Only its headers are
@@ -108,6 +112,22 @@ They live in `source/GameVerify.cpp` next to the executable identities, one `ste
   was disabled — the pre-existing behaviour, intact.
 * From the build folder, where the executables do sit next to `YAMP.exe`: `Verified — Lost
   Judgment 1.0.0.12 (Steam) (…; owned on Steam)`, i.e. the executable still wins the label.
+
+## Verified on 2026-09-11 (the command-line bypasses)
+
+* `-stf -frames 100 -noownership`, module folder only: `parent game: Not found`, then
+  `*** ownership gate BYPASSED on the command line (-noownership) ***`, and the game runs to
+  `module_stop -> 0x0`. `steam_api64.dll` does not appear in the debugger's module list, where an
+  unswitched run of the same folder loads it and reports `Owned on Steam`.
+* A copy of the StF module with **one byte appended** (SHA-256
+  `E41C1239…`, 2086897 bytes) under `-noverify`: `module … Unrecognised build`, both bypass lines,
+  and `module_start` runs. The same scratch folder crashes identically with the *pristine*,
+  fully-verified DLL, so the fault is the incomplete folder, not the bypass.
+* Unswitched `-stf -frames 300` before and after the change: identical — `Verified — Lost Judgment
+  (2022-11-21)`, `Owned on Steam`, `module_stop -> 0x0`, exit 0, the same six first-chance AVs.
+* The launcher started as `YAMP.exe -noverify`: no `steam_api64.dll`, ownership falls back to the
+  on-disk search (Like a Dragon Gaiden `Verified`, Lost Judgment `Not found`), and the rows the
+  missing proof would have blocked stay playable.
 
 ## Trap found on the way
 

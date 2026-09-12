@@ -24,6 +24,12 @@
 //
 // Games with no table entry yet report NotChecked and are not gated — their hashes get added as
 // those paths are revisited.
+//
+// Both gates can be waived, but only by someone who typed a switch on the command line — there is
+// no setting, no ini key and no checkbox, so a bypass is always something the person running YAMP
+// chose for this run. That is what makes a hand-built module DLL testable without adding its hash
+// to the table first, and what lets the checks be worked around when they are the thing that is
+// wrong. See ChecksumBypassed()/OwnershipBypassed() below.
 
 #include <cstdint>
 #include <filesystem>
@@ -94,8 +100,35 @@ namespace Verify
 
 	// The gate every host runs before LoadLibrary: checks the module, then the parent game,
 	// stores both as the "last" results for the About panel, and shows an explanatory message
-	// box for whichever one blocks. Returns false when the DLL must not be loaded.
+	// box for whichever one blocks. Returns false when the DLL must not be loaded. A blocking
+	// verdict that the matching command-line bypass waives is logged and stepped over instead.
 	bool CheckBeforeLoad(YAMPGeneral::GameId id, const std::filesystem::path& dllPath);
+
+	// ---- Command-line bypasses ----------------------------------------------------------
+	//
+	//   -nochecksum    load a module DLL whose SHA-256 is not one YAMP knows
+	//   -noownership   load without proving the parent title is owned
+	//   -noverify      both of the above
+	//
+	// Each answers only "stop refusing to load", never "call this verified": the results keep
+	// their real verdicts, so the launcher, the About panel and the log all still say the file
+	// is unrecognised. Read once, on first use, from this process's own command line.
+	//
+	// -noownership (so also -noverify) additionally stops steam_api64.dll from being loaded at
+	// all: the ONLY reason YAMP ever opens a Steam session is to answer the ownership question
+	// this switch waives, so the answer would be thrown away (SteamOwnership.cpp).
+	//
+	// -nochecksum is the loaded gun of the two. Every host patches the module by byte pattern
+	// and by hardcoded RVA, so an unknown build does not fail cleanly — it mis-patches a DLL
+	// that is running in this process.
+	bool ChecksumBypassed();
+	bool OwnershipBypassed();
+	bool AnyBypass();
+
+	// The bypass switches on this process's command line, as arguments to pass on (empty when
+	// there are none, otherwise leading with a space). The launcher hands its own bypass down
+	// to the game it boots, which is a separate process with a command line of its own.
+	const wchar_t* BypassArgs();
 
 	// What CheckBeforeLoad last found — read by the About panel (YAMPUserInterface.cpp).
 	const ModuleResult& LastModuleResult();

@@ -50,8 +50,9 @@ void YAMPUserInterface::DrawAbout()
 	}
 
 	// Integrity + ownership verdicts from the pre-load check (source/GameVerify.cpp). The
-	// process only gets this far when neither of them blocked, so this is a record of what
-	// was verified rather than a warning.
+	// process normally only gets this far when neither of them blocked, so this is a record of
+	// what was verified rather than a warning - unless a check FAILED and was waived by a
+	// command-line bypass, which is the one case this has to say out loud.
 	{
 		const Verify::ModuleResult& module = Verify::LastModuleResult();
 		if (module.status == Verify::ModuleStatus::Verified)
@@ -62,6 +63,17 @@ void YAMPUserInterface::DrawAbout()
 		else if (module.status == Verify::ModuleStatus::NotChecked)
 		{
 			ImGui::TextUnformatted("DLL checksum: no reference for this game yet");
+		}
+		else
+		{
+			// Reached only with -nochecksum: an unrecognised DLL is running in this process,
+			// patched by pattern and RVA as if it were a build YAMP knows.
+			ImGui::TextColored(WARNING_COLOUR, "DLL checksum: %s - loaded anyway, bypassed with "
+				"-nochecksum.", Verify::Describe(module.status));
+			if (!module.sha256.empty())
+			{
+				ImGui::TextDisabled("SHA-256: %s", module.sha256.c_str());
+			}
 		}
 
 		const Verify::ParentResult& parent = Verify::LastParentResult();
@@ -80,6 +92,12 @@ void YAMPUserInterface::DrawAbout()
 		{
 			ImGui::TextColored(WARNING_COLOUR, "Base game: %s found, but its version is not one "
 				"YAMP recognises.", parent.exeName);
+		}
+		else if (parent.status == Verify::ParentStatus::NotFound)
+		{
+			// Reached only with -noownership.
+			ImGui::TextColored(WARNING_COLOUR, "Base game: ownership was not proven - bypassed with "
+				"-noownership.");
 		}
 	}
 

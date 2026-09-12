@@ -181,7 +181,15 @@ namespace Launcher
 			Verify::ModuleResult module;
 			Verify::ParentResult parent;
 
-			bool CanPlay() const { return found && !module.Blocks() && !parent.Blocks(); }
+			// A verdict that blocks is still shown in full in the details below; the command-line
+			// bypass only stops it being a refusal, exactly as it does at the real gate before
+			// LoadLibrary. Nothing waives "the module file is not there".
+			bool CanPlay() const
+			{
+				return found
+					&& (!module.Blocks() || Verify::ChecksumBypassed())
+					&& (!parent.Blocks() || Verify::OwnershipBypassed());
+			}
 		};
 
 		// One parent title and the games it supplies - the tree's top level. Ownership is a
@@ -428,6 +436,9 @@ namespace Launcher
 			cmdLine += exePath;
 			cmdLine += L"\" ";
 			cmdLine += game.info->bootArg;
+			// The game is a separate process that runs the same gate again on its own command
+			// line, so a bypass that got the row this far has to travel with it.
+			cmdLine += Verify::BypassArgs();
 
 			STARTUPINFOW si { sizeof(si) };
 			PROCESS_INFORMATION pi {};
@@ -602,7 +613,7 @@ namespace Launcher
 					"put its " + folder + " folder next to YAMP.exe, then Rescan.";
 			}
 			if (game.module.Blocks()) return "";
-			if (game.parent.Blocks())
+			if (game.parent.Blocks() && !Verify::OwnershipBypassed())
 			{
 				if (steam.available)
 				{
@@ -646,6 +657,12 @@ namespace Launcher
 				ImGui::TextDisabled("Each title shows whether you own it. The games under it show whether "
 					"their module was found: next to YAMP.exe, in a folder beside it, or in a Steam or "
 					"GOG install.");
+				if (Verify::AnyBypass())
+				{
+					ImGui::TextColored(WARN, "Verification bypassed on the command line (%s) - a game that "
+						"fails the checks below can still be started, and the switches are passed on to it.",
+						WcharToUTF8(std::wstring(Verify::BypassArgs())).c_str());
+				}
 				ImGui::Separator();
 
 				// Footer: the details block (name, module path, source, module verdict, ownership
@@ -798,7 +815,15 @@ namespace Launcher
 					}
 					else if (game.CanPlay())
 					{
-						ImGui::TextColored(GOOD, "Ready to play.");
+						if (game.module.Blocks() || game.parent.Blocks())
+						{
+							ImGui::TextColored(WARN, "Ready to play - the check above did not pass; it was "
+								"bypassed on the command line.");
+						}
+						else
+						{
+							ImGui::TextColored(GOOD, "Ready to play.");
+						}
 					}
 				}
 
