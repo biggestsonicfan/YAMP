@@ -198,6 +198,36 @@ namespace net
     // game running at all - the launcher has no round to poll from. Inert when nothing is in
     // flight, so calling it every frame the page is open costs nothing.
     void PumpAccount();
+
+    // ---- Twitch sign-in ---------------------------------------------------------------------
+    //
+    // The other road to an account, and the one that needs no account made at all: the server
+    // runs an OAuth device code flow against Twitch on the player's behalf and hands back an
+    // npid and a login token that stands in for the password from then on. No Twitch credential
+    // ever reaches YAMP - only a short code to show and a page to open.
+    //
+    // Driven by the same PumpAccount(), but it waits on a PERSON rather than on a server:
+    // TwitchState() sits at WAITING for as long as it takes them to finish in a browser, or
+    // until the code expires. That is the flow working, not hanging.
+    bool TwitchLogin(const char* server, const char* fingerprint);
+    // Abandons a sign-in in progress, and is also what clears a finished one back to IDLE.
+    void TwitchCancel();
+    yampnet_twitch_state TwitchState();
+    const char* TwitchError();
+
+    // Flattened out of the plugin's yampnet_twitch_info, whose pointers are only valid until
+    // the next poll - and PumpAccount() polls. Copying is what lets the page hold a code across
+    // a frame at all. The field sizes match the settings buffers these end up in.
+    struct TwitchInfo
+    {
+        char user_code[32] = {};
+        char verification_uri[256] = {};
+        unsigned int seconds_remaining = 0;
+        char npid[24] = {};
+        char online_name[24] = {};
+        char login_token[64] = {};
+    };
+    bool TwitchGetInfo(TwitchInfo* out);
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage. `src2` is the linked-cabinet equivalent:
     // the host's live GAME ASSIGNMENTS, published so the browser can list what the race IS.

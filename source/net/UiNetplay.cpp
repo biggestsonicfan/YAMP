@@ -3,9 +3,39 @@
 // in YAMPUserInterface.h - this file only defines the panel methods.
 
 #include <cstdio>
+#include <cstring>
 
 #include "../YAMPUserInterface.h"
 #include "../ui/UiInternal.h"
+
+// UiInternal.h brings in <Windows.h> under WIN32_LEAN_AND_MEAN, which leaves this one out.
+#include <shellapi.h>
+
+namespace
+{
+	// Opens the Twitch verification page. Converted to wide characters rather than calling the
+	// -A entry point, matching how the rest of YAMP reaches the shell (see DrawAbout).
+	//
+	// A failure is deliberately silent: the page always shows the code and the URL as well, so a
+	// browser that would not launch costs the player a copy and paste rather than the sign-in,
+	// and an error box about it would be the more confusing of the two.
+	void OpenInBrowser(const char* url)
+	{
+		if (url == nullptr || *url == '\0')
+		{
+			return;
+		}
+
+		wchar_t wide[512] = {};
+		const int chars = static_cast<int>(sizeof(wide) / sizeof(wide[0]));
+		if (MultiByteToWideChar(CP_UTF8, 0, url, -1, wide, chars) == 0)
+		{
+			return;
+		}
+
+		ShellExecuteW(nullptr, L"open", wide, nullptr, nullptr, SW_SHOWNORMAL);
+	}
+}
 
 // that can sit pending until the user remembers to press Apply.
 void YAMPUserInterface::DrawNetplay()
@@ -250,6 +280,169 @@ void YAMPUserInterface::DrawNetplay()
 			"\n"
 			"Do not pin a real certificate: it is reissued every renewal and the pin would then\n"
 			"start rejecting the server.");
+	}
+
+	// ---- Sign in with Twitch ------------------------------------------------------------------
+	//
+	// The other way to have an account here, and the one that asks nothing of a player who has
+	// never heard of RPCN: the server runs an OAuth device code flow against Twitch and answers
+	// with an npid and a login token. YAMP never sees a Twitch password - only a short code to
+	// put on screen and a page to open.
+	//
+	// It sits BELOW the credential boxes because what it does is fill them in, and ABOVE the
+	// sign-up because it is the shorter road for most people: the two are alternatives, and the
+	// one that needs no e-mail address should be read first.
+	if (!accountLocked)
+	{
+		const yampnet_twitch_state twitchState = net::TwitchState();
+		net::TwitchInfo twitch;
+		net::TwitchGetInfo(&twitch);
+
+		const bool twitchBusy = twitchState == YAMPNET_TWITCH_STARTING
+			|| twitchState == YAMPNET_TWITCH_WAITING;
+		// Forced open while a flow is live. The code on screen is the only way to finish one, and
+		// a collapsed header would hide it behind a click nothing tells the player to make.
+		if (twitchBusy)
+		{
+			ImGui::SetNextItemOpen(true);
+		}
+
+		if (ImGui::CollapsingHeader("Sign in with Twitch instead"))
+		{
+			ImGui::PushTextWrapPos();
+			ImGui::TextUnformatted("Uses a Twitch account, so there is no account here to make or "
+				"remember. The server does the talking to Twitch - YAMP never sees a Twitch password - "
+				"and answers with an account name and a login token, which fill in the two boxes above.");
+			ImGui::PopTextWrapPos();
+
+			switch (twitchState)
+			{
+			case YAMPNET_TWITCH_STARTING:
+				ImGui::TextDisabled("Asking the server for a code...");
+				break;
+
+			case YAMPNET_TWITCH_WAITING:
+			{
+				// Opened once, when the code first exists. The URL already carries the code, so this
+				// is the whole of what the player has to do - but the code is shown regardless,
+				// because a browser that did not launch leaves nothing else to go on, and because the
+				// page should be checked to be asking about THIS code rather than an abandoned one.
+				if (!m_netTwitchOpened)
+				{
+					m_netTwitchOpened = true;
+					OpenInBrowser(twitch.verification_uri);
+				}
+
+				ImGui::TextUnformatted("Enter this code on the Twitch page:");
+				ImGui::TextColored(WARNING_COLOUR, "%s", twitch.user_code);
+				ImGui::TextDisabled("%s", twitch.verification_uri);
+
+				if (ImGui::Button("Open the page again"))
+				{
+					OpenInBrowser(twitch.verification_uri);
+				}
+				ImGui::SameLine();
+				// NOT plain "Cancel": the settings window has one of those, and two buttons with the
+				// same label in one window are the same button as far as ImGui is concerned.
+				if (ImGui::Button("Cancel the sign-in"))
+				{
+					net::TwitchCancel();
+				}
+
+				ImGui::Text("The code expires in %u:%02u.", twitch.seconds_remaining / 60u,
+					twitch.seconds_remaining % 60u);
+				ImGui::PushTextWrapPos();
+				// Worth saying because it is not guessable: the sign-in is driven from this page, so
+				// a player who closes the settings window while authorising comes back to a flow the
+				// server has since dropped.
+				ImGui::TextUnformatted("Leave this page open while you do it - the sign-in only "
+					"advances while it is on screen.");
+				ImGui::PopTextWrapPos();
+				break;
+			}
+
+			case YAMPNET_TWITCH_DONE:
+			{
+				// Copied ONCE. The plugin holds DONE until the sign-in is cancelled, so doing this
+				// every frame would keep overwriting boxes the player had since corrected.
+				if (!m_netTwitchCaptured)
+				{
+					m_netTwitchCaptured = true;
+					strncpy_s(m_netNpid, sizeof(m_netNpid), twitch.npid, _TRUNCATE);
+					// The login token goes where the PASSWORD goes - that is what the server will
+					// accept from now on. The verification token is cleared because it plays no part
+					// in a Twitch login: a value left over from another account would only be a puzzle
+					// the next time a login is refused.
+					strncpy_s(m_netPassword, sizeof(m_netPassword), twitch.login_token, _TRUNCATE);
+					m_netToken[0] = '\0';
+					m_pageModified = true;
+				}
+
+				ImGui::PushTextWrapPos();
+				ImGui::Text("Signed in as %s. The account is %s, and the password box now holds a "
+					"login token rather than a password.", twitch.online_name, twitch.npid);
+				// The warning is not decoration. A finished sign-in REPLACES the account's previous
+				// token, so one that is thrown away by Cancel cannot be recovered - it has to be
+				// done again, and whatever was in the password box before is dead either way.
+				ImGui::TextColored(WARNING_COLOUR, "Press Apply to save it. Signing in again issues a "
+					"fresh token and stops this one working, so an unsaved one has to be done over.");
+				ImGui::PopTextWrapPos();
+
+				// Without this the section is a dead end: the plugin holds DONE until something
+				// clears it, so a player who signed in as the wrong Twitch account had no way back
+				// to the button short of restarting YAMP. Cancelling a FINISHED flow only drops the
+				// plugin's copy of it - the credentials are already in the boxes above.
+				if (ImGui::Button("Sign in as someone else"))
+				{
+					net::TwitchCancel();
+				}
+				break;
+			}
+
+			default:
+			{
+				// IDLE, FAILED and UNSUPPORTED all end up here: in each the only thing to offer is
+				// the button, and the difference between them is what is written under it.
+				const bool ready = m_netServer[0] != '\0';
+				const char* label = (twitchState == YAMPNET_TWITCH_IDLE) ? "Sign in with Twitch"
+					: "Try Twitch sign-in again";
+				if (ImGuiCustom::ButtonToggleable(label, ready))
+				{
+					m_netTwitchCaptured = false;
+					m_netTwitchOpened = false;
+					net::TwitchLogin(m_netServer, m_netFingerprint);
+				}
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip(ready
+						? "A Twitch page opens in the web browser with the code already filled in.\n"
+						  "Nothing is typed unless the browser fails to open."
+						: "Fill in the server first.");
+				}
+
+				if (twitchState == YAMPNET_TWITCH_UNSUPPORTED)
+				{
+					ImGui::PushTextWrapPos();
+					// Deliberately NOT the warning colour. Nobody did anything wrong and nothing on
+					// this page needs correcting - this server simply does not offer it.
+					ImGui::Text("%s.", net::TwitchError());
+					// The button above is still worth having, but only for the one thing that can
+					// change the answer, so the text says what that is rather than leaving a "try
+					// again" that would fail the same way every time.
+					ImGui::TextUnformatted("Use an account and password instead - the section below "
+						"can register one - or point Server at one that does offer it and try again.");
+					ImGui::PopTextWrapPos();
+				}
+				else if (twitchState == YAMPNET_TWITCH_FAILED)
+				{
+					ImGui::PushTextWrapPos();
+					ImGui::TextColored(WARNING_COLOUR, "%s", net::TwitchError());
+					ImGui::PopTextWrapPos();
+				}
+				break;
+			}
+			}
+		}
 	}
 
 	// ---- Create an account --------------------------------------------------------------------
