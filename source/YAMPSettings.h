@@ -170,6 +170,14 @@ public:
 	// server that has e-mail validation switched on (off by default, and off on most), and empty
 	// everywhere else. A server that wants one and gets none refuses the login saying so.
 	//
+	// m_netPassword IS NOT ALWAYS A PASSWORD. A Twitch sign-in writes the login token RPCN
+	// issues into this field, because that is what the server accepts in a password's place from
+	// then on, and leaves m_netToken empty - a login arriving on a Twitch token is never checked
+	// against a verification one. Nothing downstream has to tell the two apart, since it is sent
+	// as the password either way. What differs is the cost of losing it: every completed sign-in
+	// invalidates the token before it, so one that was never saved cannot be retyped from memory,
+	// only replaced by signing in again.
+	//
 	// The ini keys do not match the member names, and cannot be made to: "Token" was written by
 	// every build up to now holding the PASSWORD, so the password reads "Password" with "Token" as
 	// its fallback (Load migrates and Save clears the old key), and the real token lives under

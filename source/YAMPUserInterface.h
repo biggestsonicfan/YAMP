@@ -157,6 +157,15 @@ private:
 	bool m_netPre3VsStart = false;
 	// Lobby-only state: never persisted, never part of the Apply flow.
 	bool m_netShowPassword = false;
+	// Twitch sign-in, per FLOW rather than per session, and both reset when one starts.
+	//
+	// The plugin holds DONE until the sign-in is cancelled, so without m_netTwitchCaptured
+	// the account and password boxes would be rewritten every frame - including over a
+	// correction the player had since made to them. m_netTwitchOpened is the same problem
+	// one state earlier: WAITING lasts for as long as someone is in a browser, and a
+	// browser relaunched sixty times a second is not a sign-in, it is a fork bomb.
+	bool m_netTwitchCaptured = false;
+	bool m_netTwitchOpened = false;
 	char m_netJoinRoomId[24] = {};
 	// RPCN passwords are a fixed 8 bytes (SceNpMatching2SessionPassword); anything longer is
 	// truncated on the wire, so the field says so rather than silently losing characters.

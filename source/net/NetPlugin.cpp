@@ -695,6 +695,65 @@ namespace net
         return true;
     }
 
+    bool TwitchLogin(const char* server, const char* fingerprint)
+    {
+        if (!IsAvailable())
+            return false;
+
+        yampnet_twitch_config tc = {};
+        tc.server = server;
+        tc.port = 0;                     // plugin default (31313)
+        tc.cert_fingerprint = (fingerprint != nullptr && *fingerprint != '\0') ? fingerprint
+                                                                              : nullptr;
+        // Nothing else is read: the whole point is that there is no account to name yet.
+        if (s_api->twitch_login(s_session, &tc) != YAMPNET_OK)
+        {
+            NetLog("ui: twitch sign-in not started: %hs", TwitchError());
+            return false;
+        }
+        NetLog("ui: starting a twitch sign-in on %hs", server != nullptr ? server : "?");
+        return true;
+    }
+
+    void TwitchCancel()
+    {
+        if (IsAvailable())
+            s_api->twitch_login_cancel(s_session);
+    }
+
+    yampnet_twitch_state TwitchState()
+    {
+        return IsAvailable() ? s_api->get_twitch_state(s_session) : YAMPNET_TWITCH_IDLE;
+    }
+
+    const char* TwitchError()
+    {
+        return IsAvailable() ? s_api->get_twitch_error(s_session) : "";
+    }
+
+    bool TwitchGetInfo(TwitchInfo* out)
+    {
+        if (out == nullptr)
+            return false;
+        // Cleared first so a caller that ignores the result still reads empty strings rather
+        // than whatever the last sign-in left behind.
+        *out = TwitchInfo{};
+        if (!IsAvailable())
+            return false;
+
+        yampnet_twitch_info info = {};
+        if (s_api->get_twitch_info(s_session, &info) == 0)
+            return false;
+
+        CopyArg(out->user_code, sizeof(out->user_code), info.user_code);
+        CopyArg(out->verification_uri, sizeof(out->verification_uri), info.verification_uri);
+        out->seconds_remaining = info.seconds_remaining;
+        CopyArg(out->npid, sizeof(out->npid), info.npid);
+        CopyArg(out->online_name, sizeof(out->online_name), info.online_name);
+        CopyArg(out->login_token, sizeof(out->login_token), info.login_token);
+        return true;
+    }
+
     yampnet_account_state AccountState()
     {
         return IsAvailable() ? s_api->get_account_state(s_session) : YAMPNET_ACCOUNT_IDLE;
@@ -710,7 +769,19 @@ namespace net
         // Only while something is in flight. poll() also drives a live session, and pumping that
         // from the settings page - on top of the game loop that already owns it - is not this
         // function's business.
-        if (IsAvailable() && s_api->get_account_state(s_session) == YAMPNET_ACCOUNT_WORKING)
+        if (!IsAvailable())
+            return;
+
+        // A Twitch sign-in is the same kind of work and wants the same pump, but it is in
+        // flight for far longer: STARTING is a round trip, WAITING is however long the player
+        // spends in their browser. Nothing else calls poll() while the session is IDLE, so
+        // leaving it out would stop the flow at the first TwitchAuthPending - and then lose it,
+        // because those polls are also what keeps an unauthentified connection alive.
+        const yampnet_twitch_state twitch = s_api->get_twitch_state(s_session);
+        const bool busy = s_api->get_account_state(s_session) == YAMPNET_ACCOUNT_WORKING
+                       || twitch == YAMPNET_TWITCH_STARTING
+                       || twitch == YAMPNET_TWITCH_WAITING;
+        if (busy)
             s_api->poll(s_session);
     }
 

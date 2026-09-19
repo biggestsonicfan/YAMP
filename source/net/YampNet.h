@@ -76,7 +76,17 @@ extern "C" {
 // the same code would otherwise keep compiling and send the password as the token.
 // It also adds resend_token, which asks the server to mail that token again for a player who
 // never received it, and YAMPNET_ACCOUNT_TOKEN_SENT so its success reads as what it is.
-#define YAMPNET_ABI_VERSION 12u
+// ABI 13 adds TWITCH SIGN-IN - twitch_login / twitch_login_cancel / get_twitch_state /
+// get_twitch_info / get_twitch_error at the end of the table. RPCN gained an OAuth device
+// code flow: the player enters a short code on twitch.tv and the server hands back an npid
+// and a login token to use in place of the password from then on. ABI 11 made an account
+// reachable without leaving YAMP; this makes one unnecessary for anyone who already has a
+// Twitch login, which for an arcade emulator is most of them.
+//
+// NOTHING about logging in changes: the token goes in yampnet_rpcn_config::password and the
+// existing connect() path sends it. That is the point of the design - the browser trip
+// happens once, and every session afterwards is an ordinary login.
+#define YAMPNET_ABI_VERSION 13u
 
 // Looked up next to YAMP.exe. Absent = netplay disabled, which is the normal state of a release
 // build until the netcode is ready.
@@ -243,6 +253,70 @@ typedef enum yampnet_account_state
     // in - and one state for both would leave the UI guessing which had just happened.
     YAMPNET_ACCOUNT_TOKEN_SENT,
 } yampnet_account_state;
+
+// ---------------------------------------------------------------------------------------------
+// Twitch sign-in
+// ---------------------------------------------------------------------------------------------
+//
+// RPCN's OAuth DEVICE CODE flow, which reaches an account without one being made here at all.
+// The exchange is: ask the server for a code, show the player that code and the twitch.tv page
+// to enter it on, and then wait - for a human being finding a browser, so for minutes rather
+// than milliseconds. When they are done the server answers with an npid and a LOGIN TOKEN.
+//
+// THE TOKEN IS THE PASSWORD from then on. Save it into yampnet_rpcn_config::password and leave
+// ::token empty; connect() needs no other change, because a login that arrives on a Twitch
+// token is not checked against an e-mail verification token. The browser trip happens ONCE.
+//
+// The device code never leaves the server, and neither does any Twitch credential: the server
+// does all the talking to Twitch, and YAMP only ever holds an opaque code to display.
+//
+// Like account creation this runs on its OWN connection, needs no login, and leaves get_state()
+// alone - a session that is IDLE stays IDLE while someone signs in.
+typedef struct yampnet_twitch_config
+{
+    const char* server;              // RPCN host; the same one the account will log in to
+    uint16_t port;                   // 0 = the plugin's default (31313)
+    const char* cert_fingerprint;    // as in yampnet_rpcn_config; empty for a real certificate
+} yampnet_twitch_config;
+
+typedef enum yampnet_twitch_state
+{
+    YAMPNET_TWITCH_IDLE = 0,         // nothing has been asked for
+    YAMPNET_TWITCH_STARTING,         // connected; the device code has been asked for
+    // Show user_code and open verification_uri. The player is off in a browser and this state
+    // can legitimately last until the code expires - get_twitch_info says how long that is.
+    YAMPNET_TWITCH_WAITING,
+    YAMPNET_TWITCH_DONE,             // npid and login_token are ready to be saved
+    YAMPNET_TWITCH_FAILED,           // see get_twitch_error
+    // This server has no Twitch sign-in: either it is not configured for one, or it predates
+    // the commands and answered by hanging up. Distinct from FAILED because the right response
+    // is to hide the button and offer the password boxes, not to show an error - nobody did
+    // anything wrong, and no amount of retrying will change the answer.
+    YAMPNET_TWITCH_UNSUPPORTED,
+} yampnet_twitch_state;
+
+// Filled by get_twitch_info. Every pointer is owned by the plugin and valid until the next
+// call into it, like get_error - copy anything that has to outlive the frame. Never NULL: a
+// field that does not apply to the current state is an empty string.
+typedef struct yampnet_twitch_info
+{
+    // WAITING. The URI already carries the code in its query string, so opening it is enough
+    // on its own - but show user_code as well, both as the fallback for a browser that would
+    // not launch and so the player can check the page is asking about this code rather than
+    // one from an attempt they abandoned.
+    const char* user_code;
+    const char* verification_uri;
+    uint32_t seconds_remaining;      // until the code dies; 0 when not WAITING
+
+    // DONE. npid is the account name to save; login_token goes where the PASSWORD goes.
+    const char* npid;
+    // The server's online name for the account, which follows the Twitch display name. Worth
+    // showing beside the npid, because the npid may have been truncated to 16 characters or
+    // given a numeric suffix to make it free - and then it is not the name the player knows
+    // themselves by, and looks like the wrong account.
+    const char* online_name;
+    const char* login_token;
+} yampnet_twitch_info;
 
 // ---------------------------------------------------------------------------------------------
 // Room game flags
@@ -540,6 +614,28 @@ typedef struct yampnet_api
     // token), and refuses a second request inside 24 hours. Both arrive as FAILED with a message
     // that says which, so neither needs a state of its own.
     yampnet_result (*resend_token)(yampnet_session* s, const yampnet_account_config* cfg);
+
+    // --- ABI 13: Twitch sign-in ---
+    //
+    // Starts the device flow: connects, asks for a code, and moves to WAITING. Asynchronous
+    // and independent of the session, exactly like create_account - poll() every frame and
+    // watch get_twitch_state(). A second call while one is in flight replaces it.
+    //
+    // It carries its own timeouts, so STARTING always resolves. WAITING does not: it lasts
+    // until the player finishes, refuses, or the code expires - which is the flow working
+    // rather than hanging, and is why this is the one state with nothing to wait on.
+    yampnet_result (*twitch_login)(yampnet_session* s, const yampnet_twitch_config* cfg);
+    // Gives up on a sign-in in progress and returns to IDLE. The server's copy of the flow is
+    // left to expire on its own; there is no command to withdraw one.
+    yampnet_result (*twitch_login_cancel)(yampnet_session* s);
+    yampnet_twitch_state (*get_twitch_state)(yampnet_session* s);
+    // Fills out with whatever the current state has to show. Returns 0, and touches nothing,
+    // only on a null argument.
+    int32_t (*get_twitch_info)(yampnet_session* s, yampnet_twitch_info* out);
+    // Why the sign-in failed, or what this server said instead of offering one. Empty
+    // otherwise, never NULL. Separate from get_error() for the same reason get_account_error()
+    // is: a refused sign-in is not a failed netplay session and must not read as one.
+    const char* (*get_twitch_error)(yampnet_session* s);
 } yampnet_api;
 
 // The single exported symbol. Returns NULL if the plugin cannot satisfy `requested_abi`.
