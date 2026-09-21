@@ -284,6 +284,11 @@ so in the UI rather than pretending to apply.
 * **Netplay is experimental.** It needs an RPCN account — the Netplay page will register one for
   you on the default server (**Create a new account**), so no other client is needed — and that
   account's password is stored in plain text in `settings.ini`. Two players / two machines only.
+  A **Twitch sign-in** is shared with m2-hle2 on the same machine, through its per-user file
+  `%APPDATA%\m2hle2\netplay.cfg`. The server keeps one Twitch login token per account, and signing
+  in anywhere retires the one before, so two clients that each kept their own copy took turns
+  signing each other out. YAMP writes a fresh token there and offers that file's token first,
+  falling back to its own saved password when the server refuses it.
 * **Virtua Fighter 2 from Kiwami 2 and Motor Raid from Like a Dragon Gaiden have no netplay.** The
   Gaiden Motor Raid build is recognised and explicitly refused by the link layer rather than being
   allowed to half-work.
