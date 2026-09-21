@@ -55,6 +55,41 @@ void YAMPUserInterface::DrawControlsStF()
 	}
 	ImGui::TextDisabled("In the game's own menus, Punch confirms, Kick cancels and Back resets/shows controls.");
 
+	ImGui::NewLine();
+	// A Release build logs nothing, so this is the only place a missing controller can be
+	// explained from the player's own screen - a screenshot of it says what YAMP sees.
+	if (ImGui::CollapsingHeader("Controller diagnostics"))
+	{
+		const Input::Diagnostics diag = Input::Diagnose();
+		ImGui::Text("Controllers found: %d XInput, %d DirectInput", diag.xinputPads, diag.directInputPads);
+
+		ImGui::PushTextWrapPos();
+		if (diag.steamOverlayLoaded)
+		{
+			ImGui::TextColored(WARNING_COLOUR, "Steam's overlay is loaded into YAMP%s. When Steam Input is on for a "
+				"controller, Steam can hide that controller from YAMP. If yours is missing, turn Steam Input off "
+				"for it (Steam > Settings > Controller), or start YAMP outside Steam.",
+				diag.startedFromSteam ? " (YAMP was started from Steam)" : "");
+		}
+		else
+		{
+			ImGui::TextDisabled("Steam's overlay is not loaded: YAMP reads controllers directly.");
+		}
+		ImGui::PopTextWrapPos();
+
+		for (const Input::HookedFunction& fn : diag.functions)
+		{
+			if (fn.detoured)
+			{
+				ImGui::TextColored(WARNING_COLOUR, "%s  hooked by %s", fn.function, fn.target.c_str());
+			}
+			else
+			{
+				ImGui::TextDisabled("%s  untouched", fn.function);
+			}
+		}
+	}
+
 	DrawStfBindingCapture();
 }
 

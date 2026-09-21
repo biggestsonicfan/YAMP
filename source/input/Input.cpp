@@ -7,8 +7,10 @@
 #include <Xinput.h>
 
 #include "../YAMPGeneral.h"
+#include "../DebugLog.h"
 
 #include <atomic>
+#include <cstring>
 
 namespace Input
 {
@@ -259,6 +261,152 @@ namespace Input
 
 		s_devices = std::move(devices);
 		s_states = std::move(states);
+
+#if YAMP_DEBUG_LOGGING
+		// Every rebuild, so a pad that vanishes has a line saying so. The hook report rides along:
+		// "the pad is not listed" and "Steam's overlay has the pad APIs" belong next to each other.
+		const Diagnostics diag = Diagnose();
+		DebugLog("[input] %zu controller(s): %d XInput, %d DirectInput%s\n", s_devices.size(),
+			diag.xinputPads, diag.directInputPads,
+			diag.steamOverlayLoaded ? " - Steam's overlay IS loaded in this process" : "");
+		for (const PadDevice& dev : s_devices)
+		{
+			DebugLog("[input]   %s  %s\n", dev.id.c_str(), dev.name.c_str());
+		}
+		for (const HookedFunction& fn : diag.functions)
+		{
+			if (fn.detoured)
+			{
+				DebugLog("[input]   %s!%s is detoured into %s\n", fn.module, fn.function, fn.target.c_str());
+			}
+		}
+#endif
+	}
+
+	namespace
+	{
+		// The module that owns an address, by file name; empty when no module does (a trampoline
+		// allocated beside the hooked DLL, for one).
+		std::string ModuleAt(uintptr_t address)
+		{
+			HMODULE owner = nullptr;
+			if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(address), &owner))
+			{
+				return {};
+			}
+			wchar_t path[MAX_PATH];
+			if (GetModuleFileNameW(owner, path, MAX_PATH) == 0) return {};
+			const wchar_t* name = wcsrchr(path, L'\\');
+			return WcharToUTF8(name != nullptr ? name + 1 : path);
+		}
+
+		// Where the jump at `address` goes, or 0 when the code there is not one. Covers the
+		// shapes x64 detour libraries write: jmp rel32, jmp rel8, jmp [rip+disp32], and
+		// mov rax, imm64 / jmp rax. ReadProcessMemory on ourselves rather than a raw read, so a
+		// page that is not readable is a failed call instead of a crash.
+		uintptr_t JumpTarget(uintptr_t address)
+		{
+			uint8_t code[12] {};
+			SIZE_T got = 0;
+			if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), code, sizeof(code), &got)
+				|| got != sizeof(code))
+			{
+				return 0;
+			}
+			if (code[0] == 0xE9)
+			{
+				int32_t rel;
+				memcpy(&rel, code + 1, sizeof(rel));
+				return address + 5 + rel;
+			}
+			if (code[0] == 0xEB)
+			{
+				return address + 2 + static_cast<int8_t>(code[1]);
+			}
+			if (code[0] == 0xFF && code[1] == 0x25)
+			{
+				int32_t disp;
+				memcpy(&disp, code + 2, sizeof(disp));
+				uintptr_t target = 0;
+				if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address + 6 + disp),
+					&target, sizeof(target), &got) || got != sizeof(target))
+				{
+					return 0;
+				}
+				return target;
+			}
+			if (code[0] == 0x48 && code[1] == 0xB8 && code[10] == 0xFF && code[11] == 0xE0)
+			{
+				uintptr_t target;
+				memcpy(&target, code + 2, sizeof(target));
+				return target;
+			}
+			return 0;
+		}
+	}
+
+	Diagnostics Diagnose()
+	{
+		Diagnostics diag;
+		diag.steamOverlayLoaded = GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr;
+		diag.startedFromSteam = GetEnvironmentVariableW(L"SteamGameId", nullptr, 0) > 0;
+
+		// Every entry point one of the three backends reads a pad through: XInput (this file),
+		// DirectInput (DirectInputPad.cpp) and the Bliss-Box HID layer (BlissBox.cpp).
+		static constexpr struct { const wchar_t* dll; const char* module; const char* function; } CHECKED[] = {
+			{ L"xinput1_4.dll", "xinput1_4.dll", "XInputGetState" },
+			{ L"xinput1_4.dll", "xinput1_4.dll", "XInputGetCapabilities" },
+			{ L"xinput1_3.dll", "xinput1_3.dll", "XInputGetState" },
+			{ L"dinput8.dll", "dinput8.dll", "DirectInput8Create" },
+			{ L"hid.dll", "hid.dll", "HidD_GetAttributes" },
+			{ L"setupapi.dll", "setupapi.dll", "SetupDiGetClassDevsW" },
+			{ L"setupapi.dll", "setupapi.dll", "SetupDiEnumDeviceInterfaces" },
+		};
+		for (const auto& entry : CHECKED)
+		{
+			// GetModuleHandle, never LoadLibrary: a DLL YAMP has not loaded cannot be in its way.
+			const HMODULE dll = GetModuleHandleW(entry.dll);
+			if (dll == nullptr) continue;
+			const auto address = reinterpret_cast<uintptr_t>(GetProcAddress(dll, entry.function));
+			if (address == 0) continue;
+
+			HookedFunction fn;
+			fn.function = entry.function;
+			fn.module = entry.module;
+			// Follow the chain for a few hops: a detour usually lands on a trampoline next to the
+			// hooked DLL first, and only the jump after that reaches the hooking module.
+			uintptr_t target = JumpTarget(address);
+			fn.detoured = target != 0;
+			for (int hop = 0; target != 0 && hop < 4; hop++)
+			{
+				const std::string owner = ModuleAt(target);
+				if (!owner.empty())
+				{
+					fn.target = owner;
+					break;
+				}
+				target = JumpTarget(target);
+			}
+			if (fn.detoured && fn.target.empty())
+			{
+				fn.target = "unknown code";
+			}
+			// A jump that stays inside the function's own DLL is the DLL's code, not a hook.
+			if (fn.detoured && _stricmp(fn.target.c_str(), entry.module) == 0)
+			{
+				fn.detoured = false;
+				fn.target.clear();
+			}
+			diag.functions.push_back(std::move(fn));
+		}
+
+		for (const PadDevice& dev : s_devices)
+		{
+			if (dev.id.compare(0, 7, "xinput:") == 0) diag.xinputPads++;
+			else diag.directInputPads++;
+		}
+		return diag;
 	}
 
 	const std::vector<PadDevice>& Devices()

@@ -27,23 +27,60 @@ block, exactly as before.
 
 ## How it works
 
-`source/SteamOwnership.{h,cpp}` (namespace `Steamworks`):
+`source/SteamOwnership.{h,cpp}` (namespace `Steamworks`). All of the steps below run in a
+**helper process**, never in the YAMP that asked: `Steamworks::Query` starts this same `YAMP.exe`
+as `YAMP.exe -steamquery <app ids>`, reads the report back from the helper's stdout, and the
+helper exits. See [Why a helper process](#why-a-helper-process) below.
 
 1. `steam_api64.dll` is loaded **by hand** from the folder `YAMP.exe` is in, by absolute path.
    It is never linked: a missing DLL costs nothing but this feature, so a GOG-only user never needs
    Steam, and `YAMP.exe` starts without it.
-2. `SteamAppId` and `SteamGameId` are set to **480** for the duration of the query and restored
-   afterwards. 480 is Spacewar, Valve's test app that every account may use; it is the documented
-   way for something that is not itself a Steam product to talk to the client. (The account shows
-   as "playing Spacewar" for the milliseconds the session is open.)
+2. `SteamAppId` and `SteamGameId` are set to **480** in the helper's environment. 480 is Spacewar,
+   Valve's test app that every account may use; it is the documented way for something that is
+   not itself a Steam product to talk to the client. (The account shows as "playing Spacewar"
+   while the helper is connected, well under a second.) The YAMP that started the helper never has
+   its own environment touched.
 3. `SteamAPI_InitFlat` connects — the export meant for callers that loaded the DLL themselves, and
    the one that explains a failure ("Steam is not running", "the Steam client is out of date").
 4. `ISteamApps` (`SteamInternal_FindOrCreateUserInterface` with the header's interface version
    string) answers `BIsSubscribedApp`, `BIsAppInstalled` and `GetAppInstallDir` for every app id
    the parent tables name — one connection for all of them. `ISteamFriends::GetPersonaName` and
    `ISteamUser::GetSteamID` are read for the UI and the log.
-5. `SteamAPI_Shutdown`. The whole thing happens before any window or D3D device exists, so the
-   Steam overlay has nothing to attach to.
+5. `SteamAPI_Shutdown`, then the helper writes its report (a `YAMP-STEAM 1` header, one line per
+   field, `end`) and exits. The parent skips anything before the header, because `steam_api`
+   prints lines of its own ("Setting breakpad minidump AppID = 480") to the same stdout. A helper
+   that does not answer within 30 seconds is killed and the check reads as unavailable.
+
+### Why a helper process
+
+The first version ran the session inside YAMP, on the theory that closing it before any window
+existed left the Steam overlay nothing to attach to. **That theory was wrong**, and it broke
+controllers. `SteamAPI_InitFlat` loads the client's `gameoverlayrenderer64.dll` into the calling
+process straight away. That DLL detours every entry point YAMP's three pad backends use, and
+`SteamAPI_Shutdown` does not unload it. Measured on 2026-09-21 with a Release build and cdb:
+
+| entry point | in-process session | `-nosteam` |
+|-------------|--------------------|------------|
+| `xinput1_4!XInputGetState`, `XInputGetCapabilities` | `jmp` into `gameoverlayrenderer64.dll` | original code |
+| `dinput8!DirectInput8Create` | `jmp` into `gameoverlayrenderer64.dll` | original code |
+| `hid!HidD_GetAttributes` | `jmp` into `gameoverlayrenderer64.dll` | original code |
+| `setupapi!SetupDiGetClassDevsW`, `SetupDiEnumDeviceInterfaces` | `jmp` into `gameoverlayrenderer64.dll` | original code |
+
+Those detours are how Steam Input hides a physical controller it is managing from a game. Here
+the "game" was Spacewar, and its session had already closed. So a pad under Steam Input simply
+disappeared from YAMP. This was reported with an Xbox One controller and reproduced with a
+DualSense (Steam Input is on by default for PlayStation pads). After an in-process session,
+DirectInput listed only a generic USB pad; without the session it listed that pad **and** the
+DualSense. No virtual XInput pad replaced it.
+
+The helper carries the overlay and its hooks away when it exits. A launcher that has run the
+check and a booted game both keep untouched input functions, and the game lists the DualSense.
+
+The Controls page has a **Controller diagnostics** section (`Input::Diagnose()`). It shows how many
+pads each backend sees, whether Steam's overlay is loaded, and which of those functions are
+detoured and into which module. That still matters when YAMP is started from Steam as a non-Steam
+shortcut, because Steam then injects the overlay at launch. Debug builds also log the device list
+and any detours on every device rescan (`[input]` lines).
 
 The answers are cached for the process; the launcher's **Rescan** calls
 `Verify::RefreshSteamOwnership()` so someone who signed in after opening YAMP gets a fresh answer.
@@ -51,8 +88,8 @@ The answers are cached for the process; the launcher's **Rescan** calls
 is exercised on a machine that has Steam. `-noownership` (and `-noverify`, which implies it) skips
 it as well, and for a stronger reason: the only thing YAMP ever asks the client is the ownership
 question those switches waive, so the session would open, name the account, and be thrown away.
-The failure line then reads `not asked - ownership was bypassed on the command line`, and
-`steam_api64.dll` is never loaded into the process at all.
+The failure line then reads `not asked - ownership was bypassed on the command line`, and no
+helper is started at all.
 
 The Steamworks SDK comes in as a git submodule, `external/SteamworksSDK`
 (https://github.com/rlabrecque/SteamworksSDK, v1.65 at the time of writing). Only its headers are

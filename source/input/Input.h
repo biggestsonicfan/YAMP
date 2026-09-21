@@ -214,6 +214,29 @@ namespace Input
 
 	void ShutdownPads();
 
+	// What sits between YAMP and the controllers, for the Controls page and the log. Steam's
+	// overlay (gameoverlayrenderer64.dll) detours the pad APIs of any process it is loaded into,
+	// and when Steam Input is managing a pad those detours are how the physical device vanishes
+	// from the process. YAMP's own Steam check no longer loads it (see SteamOwnership.h), but
+	// Steam still injects it when YAMP is started from Steam as a non-Steam shortcut.
+	struct HookedFunction
+	{
+		const char* function;   // "XInputGetState"
+		const char* module;     // "xinput1_4.dll"
+		bool detoured = false;  // its first instruction jumps somewhere else
+		std::string target;     // the module that jump ends up in ("gameoverlayrenderer64.dll"),
+		                        // or "unknown code" when it leads nowhere a module owns
+	};
+	struct Diagnostics
+	{
+		bool steamOverlayLoaded = false;
+		bool startedFromSteam = false;   // SteamGameId in the environment: Steam launched YAMP
+		std::vector<HookedFunction> functions;   // only those whose DLL is loaded
+		int xinputPads = 0;
+		int directInputPads = 0;
+	};
+	Diagnostics Diagnose();
+
 	// True while any input bound to the action (on the player's controller per the current
 	// settings, or the keyboard) is held.
 	bool ActionDown(unsigned int player, uint32_t action);

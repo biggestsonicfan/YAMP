@@ -18,6 +18,16 @@
 // BIsSubscribedApp answers for ANY app id, which is precisely what the SDK header says it is for
 // ("check ownership of another game related to yours"). The answers are cached until Refresh().
 //
+// Where: in a HELPER PROCESS, never in the YAMP that asked. Query() runs this same YAMP.exe as
+// "YAMP.exe -steamquery <app ids>", which connects, asks, writes the report to its stdout and
+// exits. The reason is controllers: SteamAPI_InitFlat pulls the client's
+// gameoverlayrenderer64.dll into the calling process, and that DLL detours XInput, DirectInput,
+// HidD_* and the SetupDi device enumeration - every entry point YAMP's pad backends read - and
+// SteamAPI_Shutdown does not take it back out. With Steam Input managing an Xbox pad, that is how
+// the pad disappeared from YAMP once the in-process check shipped. The helper takes the hooks
+// with it when it exits. Input::Diagnose() reports whether they are present anyway (YAMP
+// started from Steam as a non-Steam shortcut gets the overlay injected at launch).
+//
 // Steam absent, not signed in, or the DLL missing = "not available", never a failure: the
 // executable search in GameVerify still stands, exactly as before.
 
@@ -46,10 +56,10 @@ namespace Steamworks
 		std::vector<AppOwnership> apps;
 	};
 
-	// Connect, ask about every app id, disconnect. Cached: a second call returns the same report
-	// until Refresh() — the connection is not free and the answers do not change while YAMP
-	// runs. "-nosteam" on the command line skips the client entirely, which is how the
-	// executable-only path gets exercised on a machine that has Steam.
+	// Ask the helper process about every app id (it connects, asks and disconnects). Cached: a
+	// second call returns the same report until Refresh() — the connection is not free and the
+	// answers do not change while YAMP runs. "-nosteam" on the command line skips the client
+	// entirely, which is how the executable-only path gets exercised on a machine that has Steam.
 	const Report& Query(const uint32_t* appIds, size_t count);
 
 	// The last report, or a default (attempted == false) one before any Query.
@@ -61,4 +71,10 @@ namespace Steamworks
 
 	// The cached answer for one app id; null when no available report covers it.
 	const AppOwnership* Find(uint32_t appId);
+
+	// The helper side, for wWinMain: true when this process IS the helper ("-steamquery" on the
+	// command line). RunHelper then does the Steamworks session here, writes the report to stdout
+	// and returns the process exit code - before any window, device or input exists.
+	bool IsHelperInvocation(const wchar_t* cmdLine);
+	int RunHelper(const wchar_t* cmdLine);
 }
