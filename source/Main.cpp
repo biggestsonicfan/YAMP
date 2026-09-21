@@ -12,6 +12,7 @@
 #include "pre3/Gaiden/Pre3Host.h"
 #include "imgui/imgui.h"
 #include "net/NetPlugin.h"
+#include "SteamOwnership.h"
 
 #ifdef _DEBUG
 #include <crtdbg.h>
@@ -51,6 +52,15 @@ static void SuppressDebugCrtAsserts()
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
 {
+    // The Steam ownership helper (see SteamOwnership.h): ask the client, print the answer, leave.
+    // First thing, so it never gets as far as COM, ImGui, a window or the input backends - and
+    // terminated rather than returned from, like the normal path below, so the Steam overlay it
+    // just loaded does not get a DLL_PROCESS_DETACH to trip over. The pipe keeps what was written.
+    if (Steamworks::IsHelperInvocation(GetCommandLineW()))
+    {
+        ::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(Steamworks::RunHelper(GetCommandLineW())));
+    }
+
 #ifdef _DEBUG
     SuppressDebugCrtAsserts();
 #endif
