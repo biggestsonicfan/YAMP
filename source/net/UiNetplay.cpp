@@ -7,6 +7,7 @@
 
 #include "../YAMPUserInterface.h"
 #include "../ui/UiInternal.h"
+#include "SharedLogin.h"
 
 // UiInternal.h brings in <Windows.h> under WIN32_LEAN_AND_MEAN, which leaves this one out.
 #include <shellapi.h>
@@ -376,6 +377,12 @@ void YAMPUserInterface::DrawNetplay()
 					strncpy_s(m_netPassword, sizeof(m_netPassword), twitch.login_token, _TRUNCATE);
 					m_netToken[0] = '\0';
 					m_pageModified = true;
+					// And into the file m2-hle2 signs in from (SharedLogin.h), straight away and not
+					// on Apply: this token has just retired the one in that file, so leaving it
+					// there would sign m2-hle2 out.
+					if (!net::StoreSharedTwitchToken(m_netServer, twitch.npid, twitch.login_token))
+						net::Logf("could not share the Twitch login with m2-hle2 (%ls)\n",
+							net::SharedLoginPath().c_str());
 				}
 
 				ImGui::PushTextWrapPos();

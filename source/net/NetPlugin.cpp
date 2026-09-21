@@ -12,6 +12,7 @@
 #include "../YAMPGeneral.h"
 #include "../m2ftg/m2ftg.h"
 #include "../pre3/pre3.h"
+#include "SharedLogin.h"
 
 namespace net
 {
@@ -242,6 +243,63 @@ namespace net
         // the player has deliberately ended it. Declared here because DriveSession is below.
         bool s_sessionEnded = false;
 
+        // THE TWITCH LOGIN IS SHARED WITH m2-hle2 (SharedLogin.h). RPCN keeps one token per
+        // account, so whichever client signed in with Twitch last holds the only one that works,
+        // and it is in the shared file. A login therefore offers that token first when there is
+        // one for this server and account, and keeps this machine's own password to fall back on:
+        // the shared token can be dead too (a browser or another machine signed in since), and
+        // the password box may hold a real password, which never stops working. At most two
+        // refusals, then it stops - retrying a refused credential is how an account gets locked.
+        char s_ownPassword[sizeof(SessionConfig::password)] = {};
+
+        void PreferSharedToken()
+        {
+            s_ownPassword[0] = '\0';
+            const std::string shared = SharedTwitchToken(s_cfg.server, s_cfg.npid);
+            if (shared.empty() || shared == s_cfg.password)
+                return;
+            strncpy_s(s_ownPassword, s_cfg.password, _TRUNCATE);
+            strncpy_s(s_cfg.password, shared.c_str(), _TRUNCATE);
+            NetLog("using the Twitch login shared with m2-hle2 (%ls)\n", SharedLoginPath().c_str());
+        }
+
+        yampnet_result StartLogin()
+        {
+            yampnet_rpcn_config rc = {};
+            rc.server = s_cfg.server;
+            rc.port = 0;                     // plugin default (31313)
+            rc.npid = s_cfg.npid;
+            rc.password = s_cfg.password;
+            // Empty is the normal case, and what a server without e-mail validation wants.
+            rc.token = s_cfg.token;
+            // Empty is the normal case: the game names itself and the plugin derives the id.
+            rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
+            rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
+            return s_api->connect(s_session, &rc);
+        }
+
+        // Called every frame from both session paths. Acts once, on the frame a login that
+        // offered the shared token comes back refused as a wrong password.
+        void RetryOwnPassword()
+        {
+            if (s_ownPassword[0] == '\0' || s_api->get_state(s_session) != YAMPNET_STATE_FAILED)
+                return;
+            char own[sizeof(s_ownPassword)];
+            strncpy_s(own, s_ownPassword, _TRUNCATE);
+            s_ownPassword[0] = '\0';
+
+            // ErrorType 8 is LoginInvalidPassword. Anything else (no such account, the server
+            // down) would fail the same way with the other credential.
+            const char* why = s_api->get_error(s_session);
+            if (strstr(why, "(ErrorType=8)") == nullptr)
+                return;
+            NetLog("the shared Twitch login was refused; trying this machine's own password\n");
+            strncpy_s(s_cfg.password, own, _TRUNCATE);
+            s_api->disconnect(s_session);
+            if (StartLogin() != YAMPNET_OK)
+                NetLog("connect failed: %s\n", s_api->get_error(s_session));
+        }
+
         // Copies the whitespace-delimited token following `flag` out of the command line.
         //
         // THE MATCH MUST END AT A SPACE. No pair of the flags below collides today, but the moment
@@ -360,6 +418,7 @@ namespace net
         if (!IsAvailable() || !s_cfg.enabled || s_sessionEnded)
             return false;
 
+        RetryOwnPassword();
         const yampnet_state st = s_api->get_state(s_session);
         if (st == YAMPNET_STATE_FAILED)
             return false;
@@ -367,18 +426,8 @@ namespace net
         // 1. Log in (which also runs server/world discovery inside the plugin).
         if (!s_connectSent && st == YAMPNET_STATE_IDLE)
         {
-            yampnet_rpcn_config rc = {};
-            rc.server = s_cfg.server;
-            rc.port = 0;                     // plugin default (31313)
-            rc.npid = s_cfg.npid;
-            rc.password = s_cfg.password;
-            // Empty is the normal case, and what a server without e-mail validation wants.
-            rc.token = s_cfg.token;
-            // Empty is the normal case: the game names itself and the plugin derives the id.
-            rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
-            rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
-
-            if (s_api->connect(s_session, &rc) != YAMPNET_OK)
+            PreferSharedToken();
+            if (StartLogin() != YAMPNET_OK)
             {
                 NetLog("connect failed: %s\n", s_api->get_error(s_session));
                 return false;
@@ -534,6 +583,7 @@ namespace net
             return st;
         }
 
+        RetryOwnPassword();
         st.state = s_api->get_state(s_session);
         st.room_id = s_api->get_room_id(s_session);
         st.local_player = s_api->get_local_player(s_session);
@@ -622,16 +672,8 @@ namespace net
         // it was connected with standing.
         CopyArg(s_cfg.com_id, sizeof(s_cfg.com_id), comId);
 
-        yampnet_rpcn_config rc = {};
-        rc.server = s_cfg.server;
-        rc.port = 0;                     // plugin default (31313)
-        rc.npid = s_cfg.npid;
-        rc.password = s_cfg.password;
-        rc.token = s_cfg.token;
-        rc.communication_id = s_cfg.com_id[0] ? s_cfg.com_id : AutoComIdKey();
-        rc.cert_fingerprint = s_cfg.fingerprint[0] ? s_cfg.fingerprint : nullptr;
-
-        if (s_api->connect(s_session, &rc) != YAMPNET_OK)
+        PreferSharedToken();
+        if (StartLogin() != YAMPNET_OK)
         {
             SetActionError("%s", s_api->get_error(s_session));
             return false;
