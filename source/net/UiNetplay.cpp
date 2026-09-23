@@ -210,9 +210,59 @@ void YAMPUserInterface::DrawNetplay()
 	if (ImGui::InputText("Server", m_netServer, sizeof(m_netServer), lockFlag)) m_pageModified = true;
 	if (ImGui::IsItemHovered())
 	{
-		ImGui::SetTooltip("Host name or address of the RPCN server, e.g. np.rpcs3.net.\n"
-			"Both players must use the same one.");
+		ImGui::SetTooltip("Host name or address of the RPCN server. Both players must use the same one.\n"
+			"The list below fills in either of the two public ones.");
 	}
+
+	// The two public servers, as m2-hle2's sign-in screen offers them. A preset rather than a
+	// replacement for the box: a private or local server is still typed in. Picking one also
+	// empties the certificate pin, because neither needs one (ours has a real certificate, and a
+	// current plugin carries the official one's pin) and a pin left over from the other server
+	// would only make the connection fail.
+	{
+		struct Preset { const char* host; const char* label; };
+		static const Preset presets[] = {
+			{ YAMPSettings::kDefaultRpcnServer, "rpcn.sonicthefighte.rs (YAMP's server)" },
+			{ YAMPSettings::kOfficialRpcnServer, "np.rpcs3.net (the official RPCN server)" },
+		};
+		const char* preview = "Other (typed above)";
+		for (const Preset& preset : presets)
+		{
+			if (_stricmp(m_netServer, preset.host) == 0)
+			{
+				preview = preset.label;
+			}
+		}
+		if (!accountLocked && ImGui::BeginCombo("Public servers", preview))
+		{
+			for (const Preset& preset : presets)
+			{
+				const bool isSelected = _stricmp(m_netServer, preset.host) == 0;
+				if (ImGui::Selectable(preset.label, isSelected) && !isSelected)
+				{
+					strncpy_s(m_netServer, sizeof(m_netServer), preset.host, _TRUNCATE);
+					m_netFingerprint[0] = '\0';
+					m_pageModified = true;
+				}
+				if (isSelected)
+				{
+					ImGui::SetItemDefaultFocus();
+				}
+			}
+			ImGui::EndCombo();
+		}
+		else if (accountLocked)
+		{
+			ImGui::LabelText("Public servers", "%s", preview);
+		}
+	}
+	ImGui::PushTextWrapPos();
+	// Said up front because nothing else on the page would: the boxes below look like they
+	// describe "the player", and switching Server does not bring the account along.
+	ImGui::TextDisabled("Accounts belong to one server. An account made on YAMP's server does "
+		"not exist on np.rpcs3.net, and the other way round - \"Create account\" below makes it "
+		"on whichever server is selected. np.rpcs3.net has no Twitch sign-in.");
+	ImGui::PopTextWrapPos();
 
 	if (ImGui::InputText("Account (NPID)", m_netNpid, sizeof(m_netNpid), lockFlag)) m_pageModified = true;
 
@@ -222,11 +272,39 @@ void YAMPUserInterface::DrawNetplay()
 	if (ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("Stored in plain text in the settings file, like every other setting.\n"
-			"Use an account you do not mind being readable there.");
+			"Use an account you do not mind being readable there.\n"
+			"\n"
+			"Can stay empty while a Twitch sign-in for this server and account is saved.");
 	}
 	ImGui::PopItemWidth();
 	ImGui::SameLine();
 	ImGui::Checkbox("Show", &m_netShowPassword);
+
+	// The saved Twitch sign-in, which is kept beside the password rather than in it and goes
+	// only to the server that issued it (YAMPSettings). Said on the page because it decides what
+	// Connect sends, and because "why is my Twitch login not working on np.rpcs3.net" has exactly
+	// one answer.
+	if (m_netTwitchToken[0] != '\0')
+	{
+		ImGui::PushTextWrapPos();
+		if (net::TwitchTokenIsFor(m_netTwitchServer, m_netTwitchNpid, m_netServer, m_netNpid))
+		{
+			ImGui::TextDisabled("Signed in with Twitch as %s on %s, so the password can stay "
+				"empty.", m_netTwitchNpid, m_netTwitchServer);
+		}
+		else
+		{
+			ImGui::TextDisabled("A Twitch sign-in is saved for %s on %s. It is only ever sent "
+				"there, so it is not used for this server and account.", m_netTwitchNpid,
+				m_netTwitchServer);
+		}
+		ImGui::PopTextWrapPos();
+		if (!accountLocked && ImGui::Button("Forget the Twitch sign-in"))
+		{
+			m_netTwitchToken[0] = m_netTwitchNpid[0] = m_netTwitchServer[0] = '\0';
+			m_pageModified = true;
+		}
+	}
 
 	// The verification token. A SEPARATE thing from the password above, and empty for almost
 	// everyone: only a server that validates accounts by e-mail ever checks it. It gets a box
@@ -279,6 +357,9 @@ void YAMPUserInterface::DrawNetplay()
 			"Connecting to one unpinned fails with its fingerprint in the message (and in\n"
 			"yampnet.log) - that is the value to paste here.\n"
 			"\n"
+			"np.rpcs3.net is self-signed too, but a current netplay plugin has its pin built in,\n"
+			"so it needs nothing here either.\n"
+			"\n"
 			"Do not pin a real certificate: it is reissued every renewal and the pin would then\n"
 			"start rejecting the server.");
 	}
@@ -313,7 +394,8 @@ void YAMPUserInterface::DrawNetplay()
 			ImGui::PushTextWrapPos();
 			ImGui::TextUnformatted("Uses a Twitch account, so there is no account here to make or "
 				"remember. The server does the talking to Twitch - YAMP never sees a Twitch password - "
-				"and answers with an account name and a login token, which fill in the two boxes above.");
+				"and answers with an account name and a login token. The token is saved with the "
+				"server that issued it and is only ever sent there.");
 			ImGui::PopTextWrapPos();
 
 			switch (twitchState)
@@ -369,25 +451,45 @@ void YAMPUserInterface::DrawNetplay()
 				if (!m_netTwitchCaptured)
 				{
 					m_netTwitchCaptured = true;
+					// Only the button above starts a flow and it always records the server; this
+					// is for a DONE that outlived the page's state, never the normal road.
+					if (m_netTwitchFlowServer[0] == '\0')
+					{
+						strncpy_s(m_netTwitchFlowServer, sizeof(m_netTwitchFlowServer), m_netServer,
+							_TRUNCATE);
+					}
+					// A password typed for another account means nothing to this one. One for the
+					// SAME account is kept: RPCN links Twitch to an account without retiring its
+					// password, so that still works as the fallback.
+					if (_stricmp(m_netNpid, twitch.npid) != 0)
+					{
+						m_netPassword[0] = '\0';
+					}
 					strncpy_s(m_netNpid, sizeof(m_netNpid), twitch.npid, _TRUNCATE);
-					// The login token goes where the PASSWORD goes - that is what the server will
-					// accept from now on. The verification token is cleared because it plays no part
-					// in a Twitch login: a value left over from another account would only be a puzzle
-					// the next time a login is refused.
-					strncpy_s(m_netPassword, sizeof(m_netPassword), twitch.login_token, _TRUNCATE);
+					// The login token is kept APART from the password, with the server that issued
+					// it: it is a password to that server and to no other (YAMPSettings). The server
+					// is the one the flow was started on, not whatever the Server box says now.
+					strncpy_s(m_netTwitchToken, sizeof(m_netTwitchToken), twitch.login_token, _TRUNCATE);
+					strncpy_s(m_netTwitchNpid, sizeof(m_netTwitchNpid), twitch.npid, _TRUNCATE);
+					strncpy_s(m_netTwitchServer, sizeof(m_netTwitchServer), m_netTwitchFlowServer,
+						_TRUNCATE);
+					// The verification token is cleared because it plays no part in a Twitch login:
+					// a value left over from another account would only be a puzzle the next time a
+					// login is refused.
 					m_netToken[0] = '\0';
 					m_pageModified = true;
 					// And into the file m2-hle2 signs in from (SharedLogin.h), straight away and not
 					// on Apply: this token has just retired the one in that file, so leaving it
 					// there would sign m2-hle2 out.
-					if (!net::StoreSharedTwitchToken(m_netServer, twitch.npid, twitch.login_token))
+					if (!net::StoreSharedTwitchToken(m_netTwitchFlowServer, twitch.npid,
+							twitch.login_token))
 						net::Logf("could not share the Twitch login with m2-hle2 (%ls)\n",
 							net::SharedLoginPath().c_str());
 				}
 
 				ImGui::PushTextWrapPos();
-				ImGui::Text("Signed in as %s. The account is %s, and the password box now holds a "
-					"login token rather than a password.", twitch.online_name, twitch.npid);
+				ImGui::Text("Signed in as %s. The account is %s on %s, and it needs no password "
+					"there.", twitch.online_name, twitch.npid, m_netTwitchFlowServer);
 				// The warning is not decoration. A finished sign-in REPLACES the account's previous
 				// token, so one that is thrown away by Cancel cannot be recovered - it has to be
 				// done again, and whatever was in the password box before is dead either way.
@@ -398,7 +500,7 @@ void YAMPUserInterface::DrawNetplay()
 				// Without this the section is a dead end: the plugin holds DONE until something
 				// clears it, so a player who signed in as the wrong Twitch account had no way back
 				// to the button short of restarting YAMP. Cancelling a FINISHED flow only drops the
-				// plugin's copy of it - the credentials are already in the boxes above.
+				// plugin's copy of it - the sign-in is already saved on the page.
 				if (ImGui::Button("Sign in as someone else"))
 				{
 					net::TwitchCancel();
@@ -411,20 +513,37 @@ void YAMPUserInterface::DrawNetplay()
 				// IDLE, FAILED and UNSUPPORTED all end up here: in each the only thing to offer is
 				// the button, and the difference between them is what is written under it.
 				const bool ready = m_netServer[0] != '\0';
+				// np.rpcs3.net has no Twitch sign-in, so the flow is run on ours instead, as
+				// m2-hle2's lobby does. Any other typed-in server is tried as it is: a private one
+				// may offer it, and the plugin says plainly when one does not.
+				const bool onOfficial = _stricmp(m_netServer, YAMPSettings::kOfficialRpcnServer) == 0;
 				const char* label = (twitchState == YAMPNET_TWITCH_IDLE) ? "Sign in with Twitch"
 					: "Try Twitch sign-in again";
 				if (ImGuiCustom::ButtonToggleable(label, ready))
 				{
+					if (onOfficial)
+					{
+						strncpy_s(m_netServer, sizeof(m_netServer), YAMPSettings::kDefaultRpcnServer,
+							_TRUNCATE);
+						m_netFingerprint[0] = '\0';   // the official server's pin is not ours
+						m_pageModified = true;
+					}
 					m_netTwitchCaptured = false;
 					m_netTwitchOpened = false;
+					strncpy_s(m_netTwitchFlowServer, sizeof(m_netTwitchFlowServer), m_netServer,
+						_TRUNCATE);
 					net::TwitchLogin(m_netServer, m_netFingerprint);
 				}
 				if (ImGui::IsItemHovered())
 				{
-					ImGui::SetTooltip(ready
-						? "A Twitch page opens in the web browser with the code already filled in.\n"
-						  "Nothing is typed unless the browser fails to open."
-						: "Fill in the server first.");
+					ImGui::SetTooltip(!ready
+						? "Fill in the server first."
+						: onOfficial
+						? "np.rpcs3.net has no Twitch sign-in, so this switches Server to\n"
+						  "rpcn.sonicthefighte.rs first. A Twitch page then opens in the web\n"
+						  "browser with the code already filled in."
+						: "A Twitch page opens in the web browser with the code already filled in.\n"
+						  "Nothing is typed unless the browser fails to open.");
 				}
 
 				if (twitchState == YAMPNET_TWITCH_UNSUPPORTED)
@@ -466,6 +585,8 @@ void YAMPUserInterface::DrawNetplay()
 	{
 		ImGui::PushTextWrapPos();
 		ImGui::TextUnformatted("Registers the account name and password above on the server above. The e-mail address is stored by the server and is not saved in your settings.");
+		ImGui::Text("The account exists only on %s. Switching Server later means an account there as well.",
+			m_netServer[0] != '\0' ? m_netServer : "the selected server");
 		ImGui::TextUnformatted("Some servers then e-mail a verification token that the account cannot log in without. If one never arrives, ask for another below - that needs no e-mail address, only the account and password above.");
 		ImGui::PopTextWrapPos();
 
@@ -636,19 +757,26 @@ void YAMPUserInterface::DrawNetplay()
 	{
 		// The token is NOT part of this test: empty is its normal value, and a server that wants
 		// one says so when it refuses the login.
+		// A saved Twitch sign-in stands in for the password, but only on its own server.
+		const bool twitchHere = m_netTwitchToken[0] != '\0'
+			&& net::TwitchTokenIsFor(m_netTwitchServer, m_netTwitchNpid, m_netServer, m_netNpid);
 		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
-			&& m_netPassword[0] != '\0';
+			&& (m_netPassword[0] != '\0' || twitchHere);
 		if (ImGuiCustom::ButtonToggleable("Connect", ready))
 		{
 			// Deliberately the page's live buffers rather than the saved settings: connecting is
 			// how you find out a credential is wrong, and having to Apply first would make fixing
 			// it a two-step dance.
+			const net::SavedTwitch twitch = { m_netTwitchToken, m_netTwitchNpid, m_netTwitchServer };
 			net::Connect(m_netServer, m_netNpid, m_netPassword, m_netToken, m_netFingerprint,
-				m_netComId);
+				m_netComId, &twitch);
 		}
 		if (!ready && ImGui::IsItemHovered())
 		{
-			ImGui::SetTooltip("Fill in the server, account and password first.");
+			ImGui::SetTooltip(m_netTwitchToken[0] != '\0'
+				? "Fill in the server, account and password first.\n"
+				  "The saved Twitch sign-in is only sent to the server that issued it."
+				: "Fill in the server, account and password first.");
 		}
 		break;
 	}

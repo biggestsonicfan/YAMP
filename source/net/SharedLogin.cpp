@@ -56,32 +56,52 @@ namespace net
         return std::wstring(appData) + L"\\m2hle2\\netplay.cfg";
     }
 
+    bool TwitchTokenIsFor(const char* issuer, const char* owner, const char* server,
+                          const char* npid)
+    {
+        // Both ends connect on RPCN's default port (see kDefaultPort), so the host name is the
+        // whole of the server's identity here.
+        return issuer != nullptr && *issuer != '\0' && owner != nullptr && *owner != '\0'
+            && server != nullptr && *server != '\0'
+            && SameName(issuer, server) && SameName(owner, npid);
+    }
+
     std::string SharedTwitchToken(const char* server, const char* npid)
     {
         if (server == nullptr || *server == '\0' || npid == nullptr || *npid == '\0'
             || SharedLoginPath().empty())
             return {};
 
-        std::string fileServer, fileNpid, token, owner;
-        unsigned port = 0;
+        std::string fileServer, fileNpid, token, owner, issuer;
+        unsigned port = 0, issuerPort = 0;
+        bool haveIssuer = false;
         for (const std::string& line : ReadLines())
         {
             const char* v = nullptr;
-            if ((v = ValueOf(line, "server")) != nullptr)            fileServer = v;
-            else if ((v = ValueOf(line, "port")) != nullptr)         port = unsigned(strtoul(v, nullptr, 10));
-            else if ((v = ValueOf(line, "npid")) != nullptr)         fileNpid = v;
-            else if ((v = ValueOf(line, "twitch_token")) != nullptr) token = v;
-            else if ((v = ValueOf(line, "twitch_npid")) != nullptr)  owner = v;
+            if ((v = ValueOf(line, "server")) != nullptr)             fileServer = v;
+            else if ((v = ValueOf(line, "port")) != nullptr)          port = unsigned(strtoul(v, nullptr, 10));
+            else if ((v = ValueOf(line, "npid")) != nullptr)          fileNpid = v;
+            else if ((v = ValueOf(line, "twitch_token")) != nullptr)  token = v;
+            else if ((v = ValueOf(line, "twitch_npid")) != nullptr)   owner = v;
+            else if ((v = ValueOf(line, "twitch_server")) != nullptr) { issuer = v; haveIssuer = true; }
+            else if ((v = ValueOf(line, "twitch_port")) != nullptr)   issuerPort = unsigned(strtoul(v, nullptr, 10));
         }
-        // A file written before tokens had owners: the token was whoever was stored beside it.
-        // m2-hle2 reads it the same way.
+        // A file written before tokens had owners, or issuers: the token was whoever, and
+        // wherever, was stored beside it. m2-hle2 reads it the same way.
         if (owner.empty())
             owner = fileNpid;
+        if (!haveIssuer || issuer.empty())
+        {
+            issuer = fileServer;
+            issuerPort = port;
+        }
 
-        // A token is only good on the server that issued it, and only as its own account.
-        if (token.empty() || !SameName(fileServer, server) || !SameName(owner, npid))
+        // A token is only good on the server that issued it, and only as its own account. NOT
+        // `server`: that is the one m2-hle2's player picked, which can be np.rpcs3.net while the
+        // token in the file is still good on ours.
+        if (token.empty() || !SameName(issuer, server) || !SameName(owner, npid))
             return {};
-        if (port != 0 && port != kDefaultPort)
+        if (issuerPort != 0 && issuerPort != kDefaultPort)
             return {};
         return token;
     }
@@ -95,36 +115,35 @@ namespace net
 
         CreateDirectoryW(path.substr(0, path.rfind(L'\\')).c_str(), nullptr);   // may exist
 
-        // Every line YAMP does not own is kept as it was. The server moves only when it has to:
-        // it is also m2-hle2's default server, and a token belongs with the server it came from.
+        // Every line YAMP does not own is kept as it was - `server` and `port` included. Those are
+        // the server m2-hle2's player PICKED, which is theirs to choose and may well be
+        // np.rpcs3.net; where the token came from is said by twitch_server / twitch_port instead.
         std::vector<std::string> lines = ReadLines();
-        std::string fileServer;
         bool haveNpid = false;
         for (const std::string& line : lines)
         {
-            if (const char* v = ValueOf(line, "server")) fileServer = v;
-            if (const char* v = ValueOf(line, "npid"))   haveNpid = *v != '\0';
+            if (const char* v = ValueOf(line, "npid"))
+                haveNpid = *v != '\0';
         }
-        const bool moveServer = !SameName(fileServer, server);
 
         std::ostringstream out;
         if (lines.empty())
             out << "# m2-hle2 netplay settings. Delete this file to forget them.\n";
         for (const std::string& line : lines)
         {
-            if (ValueOf(line, "twitch_token") || ValueOf(line, "twitch_npid"))
-                continue;
-            if (moveServer && (ValueOf(line, "server") || ValueOf(line, "port")))
+            if (ValueOf(line, "twitch_token") || ValueOf(line, "twitch_npid")
+                || ValueOf(line, "twitch_server") || ValueOf(line, "twitch_port"))
                 continue;
             if (!haveNpid && ValueOf(line, "npid"))
                 continue;
             out << line << "\n";
         }
-        if (moveServer)
-            out << "server=" << server << "\nport=" << kDefaultPort << "\n";
         if (!haveNpid)
             out << "npid=" << npid << "\n";
-        out << "twitch_token=" << token << "\ntwitch_npid=" << npid << "\n";
+        // Never one without the others, as m2-hle2 writes them: a token whose server was
+        // forgotten would be offered to whichever server the file names next.
+        out << "twitch_token=" << token << "\ntwitch_npid=" << npid
+            << "\ntwitch_server=" << server << "\ntwitch_port=" << kDefaultPort << "\n";
 
         // Written whole and renamed into place, as m2-hle2 does: a stream and its training runs
         // read this file too, and none of them may see half of it.

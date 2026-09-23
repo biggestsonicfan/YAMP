@@ -170,13 +170,20 @@ public:
 	// server that has e-mail validation switched on (off by default, and off on most), and empty
 	// everywhere else. A server that wants one and gets none refuses the login saying so.
 	//
-	// m_netPassword IS NOT ALWAYS A PASSWORD. A Twitch sign-in writes the login token RPCN
-	// issues into this field, because that is what the server accepts in a password's place from
-	// then on, and leaves m_netToken empty - a login arriving on a Twitch token is never checked
-	// against a verification one. Nothing downstream has to tell the two apart, since it is sent
-	// as the password either way. What differs is the cost of losing it: every completed sign-in
-	// invalidates the token before it, so one that was never saved cannot be retyped from memory,
-	// only replaced by signing in again.
+	// A TWITCH SIGN-IN IS KEPT APART FROM THE PASSWORD, in m_netTwitch*. RPCN accepts the login
+	// token it issues in a password's place, and it used to be written into m_netPassword - which
+	// knew nothing of where it came from. Once the server could be np.rpcs3.net as well as ours,
+	// the next Connect after changing Server sent our server's token to the official one as a
+	// password. A token is a password and only ever goes to the server that issued it:
+	// m_netTwitchServer records that server, and a login offers the token only when the Server it
+	// is connecting to is that one and the account is m_netTwitchNpid (net::UsableTwitchToken).
+	// Anywhere else the token simply is not there, and m_netPassword is used as typed. This is the
+	// model m2-hle2 uses (twitch_token / twitch_npid / twitch_server beside its password), and the
+	// same keys are shared with it through SharedLogin.h.
+	//
+	// What losing one costs is different from a password: every completed sign-in invalidates
+	// the token before it, so one that was never saved cannot be retyped from memory, only
+	// replaced by signing in again.
 	//
 	// The ini keys do not match the member names, and cannot be made to: "Token" was written by
 	// every build up to now holding the PASSWORD, so the password reads "Password" with "Token" as
@@ -195,13 +202,22 @@ public:
 	//
 	// The default is the community server YAMP's netplay is actually played on, and where the
 	// Netplay page's "Create a new account" registers one. It has a real certificate on a real
-	// domain, so nothing needs pinning.
+	// domain, so nothing needs pinning. The official RPCN server is the other preset: its
+	// certificate is self-signed, but a current yampnet.dll has that pin built in and uses it
+	// whenever no fingerprint is given, so it needs nothing pasted either. It has no Twitch
+	// sign-in. Accounts belong to one server - an account on ours does not exist on the other.
 	static constexpr const char* kDefaultRpcnServer = "rpcn.sonicthefighte.rs";
+	static constexpr const char* kOfficialRpcnServer = "np.rpcs3.net";
 	std::string m_netServer = kDefaultRpcnServer;
 	std::string m_netNpid;
 	std::string m_netPassword;
 	std::string m_netToken;
 	std::string m_netCertFingerprint;
+	// The saved Twitch sign-in (see above): the login token, the account it logs in as and the
+	// server that issued it. All three or none.
+	std::string m_netTwitchToken;
+	std::string m_netTwitchNpid;
+	std::string m_netTwitchServer;
 	// Which lobby space the rooms live in. EMPTY IS THE NORMAL VALUE and means "this game's own":
 	// the plugin turns the running game's name into a per-game communication id (yampnet's
 	// ComId.h). Filling it in overrides that with a literal comm id or a game key, which is only

@@ -146,6 +146,11 @@ private:
 	// longer one if RPCN ever changes it.
 	char m_netToken[40] = {};
 	char m_netFingerprint[72] = {};
+	// The saved Twitch sign-in and the server that issued it - never shown, never typed, and
+	// only ever offered to that server (see YAMPSettings).
+	char m_netTwitchToken[64] = {};
+	char m_netTwitchNpid[24] = {};
+	char m_netTwitchServer[64] = {};
 	// Wider than a comm id because it also takes a GAME KEY, which is normally a game's name.
 	char m_netComId[64] = {};
 	// Sign-up only, and deliberately NOT persisted or part of the Apply flow: the server keeps
@@ -166,6 +171,9 @@ private:
 	// browser relaunched sixty times a second is not a sign-in, it is a fork bomb.
 	bool m_netTwitchCaptured = false;
 	bool m_netTwitchOpened = false;
+	// The server the flow in progress was started on, which is the one that issues its token.
+	// Not the Server box: that stays editable while the player is off in a browser.
+	char m_netTwitchFlowServer[64] = {};
 	char m_netJoinRoomId[24] = {};
 	// RPCN passwords are a fixed 8 bytes (SceNpMatching2SessionPassword); anything longer is
 	// truncated on the wire, so the field says so rather than silently losing characters.

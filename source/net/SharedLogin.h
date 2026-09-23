@@ -15,8 +15,15 @@
 // the file's other settings belong to m2-hle2, and YAMP rewrites them exactly as it found them.
 //
 // Format, as m2-hle2 writes it: one key=value per line, '#' starts a comment. The keys used here
-// are `server`, `port`, `npid`, `twitch_token` and `twitch_npid` (the account the token logs in
-// as). Account names compare without case, as RPCN's do.
+// are `npid`, `twitch_token`, `twitch_npid` (the account the token logs in as) and
+// `twitch_server` / `twitch_port` (the server that issued it). Account names compare without
+// case, as RPCN's do.
+//
+// TWO SERVERS. m2-hle2 signs in to the official RPCN (np.rpcs3.net) or ours, and `server` /
+// `port` are the one its player picked - which says nothing about where the token came from. A
+// token is a password and only ever goes to its issuer, so it is matched against twitch_server,
+// and YAMP never touches `server`. A file from before twitch_server existed (m2-hle2 before
+// 6b8bb30) meant `server`, and is read that way.
 
 #include <string>
 
@@ -30,4 +37,10 @@ namespace net
 
     // Where the file is, for log lines.
     std::wstring SharedLoginPath();
+
+    // May a Twitch token issued by `issuer` for `owner` be offered to `server` as `npid`? The one
+    // test every use of a token goes through - YAMP's own saved one as well as the shared one -
+    // so a token never reaches a server that did not issue it (m2-hle2's netplay_twitch_here).
+    bool TwitchTokenIsFor(const char* issuer, const char* owner, const char* server,
+                          const char* npid);
 }

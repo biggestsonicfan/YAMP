@@ -310,6 +310,9 @@ void YAMPUserInterface::GetDefaultsFromSettings()
 	copyToBuffer(m_netPassword, sizeof(m_netPassword), settings->m_netPassword);
 	copyToBuffer(m_netToken, sizeof(m_netToken), settings->m_netToken);
 	copyToBuffer(m_netFingerprint, sizeof(m_netFingerprint), settings->m_netCertFingerprint);
+	copyToBuffer(m_netTwitchToken, sizeof(m_netTwitchToken), settings->m_netTwitchToken);
+	copyToBuffer(m_netTwitchNpid, sizeof(m_netTwitchNpid), settings->m_netTwitchNpid);
+	copyToBuffer(m_netTwitchServer, sizeof(m_netTwitchServer), settings->m_netTwitchServer);
 	copyToBuffer(m_netComId, sizeof(m_netComId), settings->m_netComId);
 	m_netFrameDelay = settings->m_netFrameDelay;
 	m_netPre3VsStart = settings->m_netPre3VsStart;
@@ -625,6 +628,9 @@ void YAMPUserInterface::ApplySettings()
 	settings->m_netPassword = m_netPassword;
 	settings->m_netToken = m_netToken;
 	settings->m_netCertFingerprint = m_netFingerprint;
+	settings->m_netTwitchToken = m_netTwitchToken;
+	settings->m_netTwitchNpid = m_netTwitchNpid;
+	settings->m_netTwitchServer = m_netTwitchServer;
 	settings->m_netComId = m_netComId;
 	settings->m_netFrameDelay = m_netFrameDelay;
 	settings->m_netPre3VsStart = m_netPre3VsStart;

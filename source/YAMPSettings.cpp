@@ -232,6 +232,37 @@ void YAMPSettings::LoadSettings(const std::filesystem::path& dirPath)
 		// the normal value: only a server that verifies accounts by e-mail ever asks for one.
 		m_netToken = GetPrivateProfileStdStringA("Netplay", "EmailToken", "", iniPath);
 		m_netCertFingerprint = GetPrivateProfileStdStringA("Netplay", "CertFingerprint", "", iniPath);
+		m_netTwitchToken = GetPrivateProfileStdStringA("Netplay", "TwitchToken", "", iniPath);
+		m_netTwitchNpid = GetPrivateProfileStdStringA("Netplay", "TwitchNpid", "", iniPath);
+		m_netTwitchServer = GetPrivateProfileStdStringA("Netplay", "TwitchServer", "", iniPath);
+		// All three or none: a token whose server is not known is never offered anywhere.
+		if (m_netTwitchToken.empty() || m_netTwitchServer.empty())
+		{
+			m_netTwitchToken.clear();
+			m_netTwitchNpid.clear();
+			m_netTwitchServer.clear();
+		}
+		else if (m_netTwitchNpid.empty())
+		{
+			m_netTwitchNpid = m_netNpid;
+		}
+		// Every build before TwitchServer wrote a Twitch sign-in into "Password", with nothing to
+		// say where it came from. It came from the Server stored beside it - the only server
+		// there was, since np.rpcs3.net has no Twitch - so that is where it is filed, the same
+		// reading m2-hle2 gives a file from before its twitch_server. A login token has one exact
+		// shape (RPCN's set_twitch_login: two 8-byte generate_token()s, 32 upper-case hex), which
+		// is how it is told from a password. Getting it wrong errs safe: the value still goes to
+		// the Server it was saved with, and simply stops going anywhere else.
+		if (m_netTwitchToken.empty() && m_netPassword.size() == 32
+			&& std::all_of(m_netPassword.begin(), m_netPassword.end(),
+				[](char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); })
+			&& !m_netServer.empty() && _stricmp(m_netServer.c_str(), kOfficialRpcnServer) != 0)
+		{
+			m_netTwitchToken = m_netPassword;
+			m_netTwitchNpid = m_netNpid;
+			m_netTwitchServer = m_netServer;
+			m_netPassword.clear();
+		}
 		m_netComId = GetPrivateProfileStdStringA("Netplay", "CommunicationId", "", iniPath);
 		// Every ini written before per-game lobby spaces carries the old default, and nobody chose
 		// it - it was simply what the field started as. Left alone it would pin that install to the
@@ -481,6 +512,20 @@ void YAMPSettings::SaveSettings(const std::filesystem::path& dirPath)
 		// have no way to tell which of the two was the live one.
 		WritePrivateProfileStringW(L"Netplay", L"Token", nullptr, iniPath.c_str());
 		WritePrivateProfileStdStringA("Netplay", "CertFingerprint", m_netCertFingerprint, iniPath);
+		// Written together or deleted together (a null value deletes a key), so the file never
+		// holds a token without the server it belongs to.
+		if (!m_netTwitchToken.empty() && !m_netTwitchServer.empty())
+		{
+			WritePrivateProfileStdStringA("Netplay", "TwitchToken", m_netTwitchToken, iniPath);
+			WritePrivateProfileStdStringA("Netplay", "TwitchNpid", m_netTwitchNpid, iniPath);
+			WritePrivateProfileStdStringA("Netplay", "TwitchServer", m_netTwitchServer, iniPath);
+		}
+		else
+		{
+			WritePrivateProfileStringW(L"Netplay", L"TwitchToken", nullptr, iniPath.c_str());
+			WritePrivateProfileStringW(L"Netplay", L"TwitchNpid", nullptr, iniPath.c_str());
+			WritePrivateProfileStringW(L"Netplay", L"TwitchServer", nullptr, iniPath.c_str());
+		}
 		WritePrivateProfileStdStringA("Netplay", "CommunicationId", m_netComId, iniPath);
 		WritePrivateProfileIntW(L"Netplay", L"FrameDelay", m_netFrameDelay, iniPath.c_str());
 		WritePrivateProfileIntW(L"Netplay", L"Pre3VsStart", m_netPre3VsStart, iniPath.c_str());

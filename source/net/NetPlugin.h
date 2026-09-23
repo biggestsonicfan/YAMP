@@ -54,6 +54,11 @@ namespace net
         // yampnet_rpcn_config::token: it is NOT a second password.
         char token[32] = {};
         char fingerprint[72] = {};
+        // The saved Twitch sign-in (YAMPSettings::m_netTwitch*): offered in the password's place
+        // only when `server` is the one that issued it and `npid` is its account.
+        char twitch_token[64] = {};
+        char twitch_npid[24] = {};
+        char twitch_server[64] = {};
         // Empty means AUTOMATIC - AutoComIdKey() supplies the running game's own lobby space.
         // Wide enough for a game name, because that is what a key normally is.
         char com_id[64] = {};
@@ -167,8 +172,17 @@ namespace net
 
     // Each returns false and fills LastActionError() if the plugin rejected the call. Progress is
     // asynchronous: watch GetStatus().state, exactly as DriveSession does.
+    //
+    // `twitch` is the saved Twitch sign-in, or null. It is offered only if it was issued by
+    // `server` for `npid` (TwitchTokenIsFor); `password` may be empty when it is.
+    struct SavedTwitch
+    {
+        const char* token = nullptr;
+        const char* npid = nullptr;
+        const char* server = nullptr;
+    };
     bool Connect(const char* server, const char* npid, const char* password, const char* token,
-                 const char* fingerprint, const char* comId);
+                 const char* fingerprint, const char* comId, const SavedTwitch* twitch = nullptr);
     void Disconnect();
 
     // ---- Account creation -------------------------------------------------------------------

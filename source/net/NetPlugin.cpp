@@ -250,17 +250,47 @@ namespace net
         // the shared token can be dead too (a browser or another machine signed in since), and
         // the password box may hold a real password, which never stops working. At most two
         // refusals, then it stops - retrying a refused credential is how an account gets locked.
+        //
+        // This machine's own saved Twitch login (s_cfg.twitch_*) is the second choice, and the
+        // same rule holds for both: A TOKEN ONLY GOES TO THE SERVER THAT ISSUED IT, as the
+        // account it was issued for (TwitchTokenIsFor). On any other server - np.rpcs3.net, say,
+        // after a sign-in on ours - neither is offered and the password is sent as typed.
         char s_ownPassword[sizeof(SessionConfig::password)] = {};
 
-        void PreferSharedToken()
+        // The token a login should offer in the password's place, or "" for none.
+        std::string TwitchTokenForLogin()
+        {
+            std::string token = SharedTwitchToken(s_cfg.server, s_cfg.npid);
+            if (!token.empty())
+                return token;
+            if (s_cfg.twitch_token[0] != '\0' && TwitchTokenIsFor(s_cfg.twitch_server,
+                    s_cfg.twitch_npid, s_cfg.server, s_cfg.npid))
+                return s_cfg.twitch_token;
+            return {};
+        }
+
+        void PreferTwitchToken()
         {
             s_ownPassword[0] = '\0';
-            const std::string shared = SharedTwitchToken(s_cfg.server, s_cfg.npid);
-            if (shared.empty() || shared == s_cfg.password)
+            const std::string token = TwitchTokenForLogin();
+            if (token.empty() || token == s_cfg.password)
                 return;
+            // May be empty, which is a Twitch-only account: there is then nothing to fall back to
+            // and RetryOwnPassword stays out of it.
             strncpy_s(s_ownPassword, s_cfg.password, _TRUNCATE);
-            strncpy_s(s_cfg.password, shared.c_str(), _TRUNCATE);
-            NetLog("using the Twitch login shared with m2-hle2 (%ls)\n", SharedLoginPath().c_str());
+            strncpy_s(s_cfg.password, token.c_str(), _TRUNCATE);
+            NetLog("using the Twitch login for %hs on %hs\n", s_cfg.npid, s_cfg.server);
+        }
+
+        void CopySavedTwitch(const SavedTwitch* twitch)
+        {
+            s_cfg.twitch_token[0] = s_cfg.twitch_npid[0] = s_cfg.twitch_server[0] = '\0';
+            if (twitch == nullptr || twitch->token == nullptr || twitch->npid == nullptr
+                || twitch->server == nullptr)
+                return;
+            strncpy_s(s_cfg.twitch_token, twitch->token, _TRUNCATE);
+            strncpy_s(s_cfg.twitch_npid, twitch->npid, _TRUNCATE);
+            strncpy_s(s_cfg.twitch_server, twitch->server, _TRUNCATE);
         }
 
         yampnet_result StartLogin()
@@ -293,7 +323,7 @@ namespace net
             const char* why = s_api->get_error(s_session);
             if (strstr(why, "(ErrorType=8)") == nullptr)
                 return;
-            NetLog("the shared Twitch login was refused; trying this machine's own password\n");
+            NetLog("the Twitch login was refused; trying this machine's own password\n");
             strncpy_s(s_cfg.password, own, _TRUNCATE);
             s_api->disconnect(s_session);
             if (StartLogin() != YAMPNET_OK)
@@ -352,6 +382,9 @@ namespace net
             strncpy_s(s_cfg.password, s->m_netPassword.c_str(), _TRUNCATE);
             strncpy_s(s_cfg.token, s->m_netToken.c_str(), _TRUNCATE);
             strncpy_s(s_cfg.fingerprint, s->m_netCertFingerprint.c_str(), _TRUNCATE);
+            const SavedTwitch twitch = { s->m_netTwitchToken.c_str(), s->m_netTwitchNpid.c_str(),
+                                         s->m_netTwitchServer.c_str() };
+            CopySavedTwitch(&twitch);
             if (!s->m_netComId.empty())
                 strncpy_s(s_cfg.com_id, s->m_netComId.c_str(), _TRUNCATE);
         }
@@ -370,7 +403,10 @@ namespace net
 
         // An ACTION is what arms the command-line path. Settings alone must NOT arm it, or every
         // configured machine would auto-host on boot and the lobby would never get a turn.
-        s_cfg.enabled = s_cfg.server[0] && s_cfg.npid[0] && s_cfg.password[0]
+        // A Twitch login counts as the password only on the server that issued it, so a
+        // -net-server naming another one still needs a password of its own.
+        s_cfg.enabled = s_cfg.server[0] && s_cfg.npid[0]
+                     && (s_cfg.password[0] || !TwitchTokenForLogin().empty())
                      && (s_cfg.host || s_cfg.room_id);
         NetLog("cfg server=%hs user=%hs comid=%hs %hs%llu enabled=%d\n",
                  s_cfg.server, s_cfg.npid, s_cfg.com_id,
@@ -426,7 +462,7 @@ namespace net
         // 1. Log in (which also runs server/world discovery inside the plugin).
         if (!s_connectSent && st == YAMPNET_STATE_IDLE)
         {
-            PreferSharedToken();
+            PreferTwitchToken();
             if (StartLogin() != YAMPNET_OK)
             {
                 NetLog("connect failed: %s\n", s_api->get_error(s_session));
@@ -646,14 +682,13 @@ namespace net
     }
 
     bool Connect(const char* server, const char* npid, const char* password, const char* token,
-                 const char* fingerprint, const char* comId)
+                 const char* fingerprint, const char* comId, const SavedTwitch* twitch)
     {
         if (!UiMayAct())
             return false;
-        if (server == nullptr || *server == '\0' || npid == nullptr || *npid == '\0'
-            || password == nullptr || *password == '\0')
+        if (server == nullptr || *server == '\0' || npid == nullptr || *npid == '\0')
         {
-            SetActionError("server, account and password are all required");
+            SetActionError("server and account are both required");
             return false;
         }
         // The TOKEN is not in that test on purpose: empty is its normal value, and only a server
@@ -671,8 +706,22 @@ namespace net
         // lobby space - so clearing the field has to clear the config, not leave the last value
         // it was connected with standing.
         CopyArg(s_cfg.com_id, sizeof(s_cfg.com_id), comId);
+        CopySavedTwitch(twitch);
 
-        PreferSharedToken();
+        // Checked only now, with the config filled in, because a Twitch login stands in for the
+        // password - but only one this server issued.
+        if (s_cfg.password[0] == '\0' && TwitchTokenForLogin().empty())
+        {
+            if (s_cfg.twitch_token[0] != '\0')
+                SetActionError("a password is required - the saved Twitch sign-in is for %s "
+                               "on %s, and is only ever sent there", s_cfg.twitch_npid,
+                               s_cfg.twitch_server);
+            else
+                SetActionError("server, account and password are all required");
+            return false;
+        }
+
+        PreferTwitchToken();
         if (StartLogin() != YAMPNET_OK)
         {
             SetActionError("%s", s_api->get_error(s_session));
