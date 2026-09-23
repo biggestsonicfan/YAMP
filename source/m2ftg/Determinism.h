@@ -167,4 +167,13 @@ namespace m2ftg
 		// genuine divergence and then treats it as expected. See
 		// yampnet_match_config::state_check_exact.
 		bool StateCheckIsHash();
+
+		// A hash of ALL of emulated work RAM (guest 0x500000, 1 MB), for the A/B bench (Bench.h):
+		// two builds fed the same inputs for the same number of frames must agree on it. Wider
+		// than the netplay canary on purpose - this compares two runs on ONE machine from a cold
+		// boot, so there is no stale-chunk problem to narrow around. 0 if no game is running.
+		uint32_t WorkRamHash();
+		// The host buffer WorkRamHash covers (WORK_RAM_SIZE bytes), or nullptr.
+		const uint8_t* WorkRam();
+		constexpr size_t WORK_RAM_SIZE = 0x100000;
 }

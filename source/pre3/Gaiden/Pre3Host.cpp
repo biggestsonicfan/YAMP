@@ -51,10 +51,15 @@ unsigned int ModuleDrawLimitNow();
 #include "../../YAMPGeneral.h"
 #include "../../GameVerify.h"
 #include "../../DebugLog.h"
+#include "../../Bench.h"
+#include "../../FrameLimiter.h"
 #include "../../Utils/ScopedUnprotect.hpp"
 
 namespace pre3
 {
+	// The emulator's frame marker as it stood before the latest update stage - the bench's end
+	// sample waits on it (see Run).
+	static unsigned long long g_benchMarker = 0;
 	using namespace pxd;
 
 	// ct::initialize_module (DLL 0x1800AC310) requires size_of_struct == 0x30, exactly as the
@@ -633,14 +638,10 @@ namespace pre3
 		// an unconditional 60 Hz while a link is live - the limiter half of the linked-cabinet
 		// pacer (CommBoard.h). A cabinet allowed to run its board at the monitor's 144 Hz lives
 		// that much further into the race than its peer, so a live link owns the frame cap, on
-		// the same rule as the LINK ID row. (The wait below spins on
-		// `delta * 1000 < ticks`, so the 60 Hz value is freq * 50/3 = freq/60 * 1000.)
-		int64_t linkedFrameTicks;
-		{
-			LARGE_INTEGER frequency;
-			QueryPerformanceFrequency(&frequency);
-			linkedFrameTicks = (frequency.QuadPart * 50) / 3;
-		}
+		// the same rule as the LINK ID row. FrameLimiter sleeps most of the wait instead of
+		// spinning it.
+		FrameLimiter limiter;
+		const int64_t linkedFrameTicks = limiter.Frequency() / 60;
 		const int64_t frameTimeTicks = settings->m_enableFpsCap ? linkedFrameTicks : 0;
 
 		m2ftg::ApplyAspectSetting(window, settings->m_m2Aspect);
@@ -654,12 +655,24 @@ namespace pre3
 
 		if (msRet == 0 && entries.update != nullptr)
 		{
-			LARGE_INTEGER lastTime;
-			QueryPerformanceCounter(&lastTime);
+			limiter.Wait(0); // the first period starts now, not at construction
 			const uint32_t frameLimit = gGeneral.GetFrameLimit();
 			uint32_t framesRun = 0;
+			bool benchAnchored = false;
 			while (!window.IsShuttingDown())
 			{
+				// A/B bench (Bench.h). This board needs no seeding: its only host-varying input is
+				// the RTC, pinned before module_start for Fighting Vipers 2 (ClockPinBootSafe), and
+				// its CPU budget per frame is fixed. What does vary is how long the images take to
+				// load, so -frames counts from the first frame the machine reports RUNNING - the
+				// pristine post-boot state, before any guest frame has stepped (see
+				// SaveResetSnapshot for why that point is the same in every process).
+				if (Bench::Enabled() && !benchAnchored && IsBoardBooted())
+				{
+					benchAnchored = true;
+					framesRun = 0;
+					Bench::Anchor();
+				}
 				if (!GameLoop(entries, window))
 				{
 					DebugLog("[%s::Run] GameLoop returned false\n", gGeneral.GetGameTag());
@@ -672,18 +685,23 @@ namespace pre3
 					break;
 				}
 
-				const int64_t waitTicks = CommBoard::LinkPacingActive()
-					? linkedFrameTicks : frameTimeTicks;
-				LARGE_INTEGER currentTime;
-				do
-				{
-					QueryPerformanceCounter(&currentTime);
-				} while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
-				lastTime = currentTime;
+				limiter.Wait(CommBoard::LinkPacingActive() ? linkedFrameTicks : frameTimeTicks);
 			}
 
 			// The link probe's collected samples, written out once now rather than per frame -
 			// see CommBoard::DumpTrace. No-op unless YAMP_PRE3_SYNCPROBE asked for them.
+			if (Bench::Enabled())
+			{
+				// The board is only coherent once the frame the last update stage released the
+				// "m3e_ctrl" worker into has completed (Determinism.h, WaitForEmulatedFrame), and the
+				// marker to wait on is the one read BEFORE that update stage - by now the worker has
+				// usually finished and restamped it, so reading it here waits for a frame that never
+				// comes (measured: every sample timed out). Waited for once, here, never per frame,
+				// which would change the very overlap being measured. 0 = could not sample.
+				const uint32_t hash = WaitForEmulatedFrame(g_benchMarker, 2000) ? StateCheckValue() : 0;
+				Bench::Finish(hash, framesRun);
+			}
+
 			CommBoard::DumpTrace();
 			LogTilemapAccess();
 			LogBootRender();
@@ -697,6 +715,7 @@ namespace pre3
 	{
 		static csl_pad s_pads[2];
 		static Cabinet::CoinStart s_coinStart;
+		Bench::Stamp(Bench::Mark::FrameStart);
 
 		// (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
 		// routing and the input suppression below all see the same answer for the whole frame.
@@ -1000,6 +1019,8 @@ namespace pre3
 			const unsigned int boardFramesDue = CommBoard::BoardFramesDue();
 
 			SetModuleRenderActiveNow(true);
+			if (Bench::Enabled()) g_benchMarker = BoardFrameMarker(); // a read, not a wait
+			Bench::Stamp(Bench::Mark::ModuleStart);
 			funcResult = entries.update(sizeof(execute_info), &execute_info);
 			for (unsigned int step = 1; funcResult == 0 && step < boardFramesDue; ++step)
 			{
@@ -1015,6 +1036,7 @@ namespace pre3
 			{
 				funcResult = entries.render_end(sizeof(execute_info), &execute_info);
 			}
+			Bench::Stamp(Bench::Mark::ModuleEnd);
 			SetModuleRenderActiveNow(false);
 
 			// The one place board state can be read coherently: the worker is parked and the frame
@@ -1101,6 +1123,7 @@ namespace pre3
 
 		if (funcResult != 0) return false;
 
+		Bench::Stamp(Bench::Mark::SubmitStart);
 		if (!s_pause.open) SubmitModuleFrameListNow();
 		if (ModuleExecDisabledNow())
 		{
@@ -1109,6 +1132,7 @@ namespace pre3
 			return false;
 		}
 		if (!s_pause.open) AdvanceFrameStampNow();
+		Bench::Stamp(Bench::Mark::SubmitEnd);
 
 		cgs_tex* display_tex = (execute_info.output_texid != 0)
 			? gs::handle_tex().get(execute_info.output_texid)
@@ -1188,7 +1212,9 @@ namespace pre3
 		window.EndFrame();
 
 		auto& swapChain = gs::sbgl_device().m_swap_chain;
+		Bench::Stamp(Bench::Mark::PresentStart);
 		HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
+		Bench::Stamp(Bench::Mark::PresentEnd);
 		if (FAILED(hr)) return false;
 
 		gs::sm_context->frame_counter++;

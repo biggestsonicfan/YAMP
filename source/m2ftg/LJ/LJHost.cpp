@@ -46,6 +46,8 @@ void AdvanceFrameStampNow();
 #include "../../imgui/imgui.h"
 
 #include "../../DebugLog.h"
+#include "../../Bench.h"
+#include "../../FrameLimiter.h"
 #include "../../net/NetPlugin.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/ScopedUnprotect.hpp"
@@ -102,7 +104,6 @@ namespace m2ftg
             Import(gs::vb_create, ImportSymbol::VB_CREATE);
             Import(gs::ib_create, ImportSymbol::IB_CREATE);
 			Import(sl::kernel_calloc_internal, ImportSymbol::SL_KERNEL_CALLOC);
-			//Import(sl::memset, ImportSymbol::MEMSET);
         }
 
         static void PrefillVariables(const Imports& symbols, const RenderWindow& window)
@@ -357,17 +358,11 @@ namespace m2ftg
             params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
             params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
 
-            // Set up a FPS limiter
-            // TODO: Do more gracefully
-            int64_t frameTimeTicks;
-            int64_t sixtyHzTicks;
-            {
-                LARGE_INTEGER frequency;
-                QueryPerformanceFrequency(&frequency);
-                sixtyHzTicks = (frequency.QuadPart * 50) / 3;
-                // We want to enforce 60 FPS, unless the cap is disabled in Debug
-                frameTimeTicks = settings->m_enableFpsCap ? sixtyHzTicks : 0;
-            }
+            // 60 Hz, unless the cap is disabled in Debug. FrameLimiter sleeps most of the wait
+            // instead of spinning it.
+            FrameLimiter limiter;
+            const int64_t sixtyHzTicks = limiter.Frequency() / 60;
+            const int64_t frameTimeTicks = settings->m_enableFpsCap ? sixtyHzTicks : 0;
 
             ApplyAspectSetting(window, settings->m_m2Aspect);
 
@@ -430,15 +425,38 @@ namespace m2ftg
             CharRamFix::Install();
             if (msRet == 0)
             {
-                LARGE_INTEGER lastTime;
-                QueryPerformanceCounter(&lastTime);
+                limiter.Wait(0); // the first period starts now, not at construction
                 // "-frames N" ends the run HERE rather than by killing the process, so smoke tests
                 // take the real teardown path (see YAMPGeneral::GetFrameLimit).
                 const uint32_t frameLimit = gGeneral.GetFrameLimit();
                 uint32_t framesRun = 0;
+                bool benchPinned = false;
+                bool benchAnchored = false;
                 while (!window.IsShuttingDown())
                 {
-                    DebugLog("[%s::Run] GameLoop iter\n", gGeneral.GetGameTag());
+                    // A/B bench (Bench.h): two runs must simulate the same thing, and a cold boot
+                    // does not by itself - the host RNG is seeded from the wall clock and the
+                    // texture unpack budget is a real-time deadline. Pin both the moment the board
+                    // is up, before the ROM gets going, then count -frames from the ROM's first
+                    // counted frame: how many host frames the ROM LOAD takes varies run to run,
+                    // but from there on the ROM's frame counter advances once per module_main.
+                    // (Not the netplay round start's seed + ResetBoard: after a reset this ROM
+                    // takes ~3500 frames of near-idle start-up before its counter moves again -
+                    // measured - which is neither quick nor a representative load.)
+                    if (Bench::Enabled() && !benchAnchored && IsBoardBooted())
+                    {
+                        if (!benchPinned)
+                        {
+                            benchPinned = SeedHostRng(0xB16B00B5u) && SetTextureBudgetDeterministic(true);
+                        }
+                        uint32_t romFrame = 0;
+                        if (benchPinned && ReadEmulatedRam32(RomFrameCounterAddress(), romFrame) && romFrame != 0)
+                        {
+                            benchAnchored = true;
+                            framesRun = 0;
+                            Bench::Anchor();
+                        }
+                    }
                     if (!GameLoop(module_main, window)) { DebugLog("[%s::Run] GameLoop returned false\n", gGeneral.GetGameTag()); break; }
                     if (frameLimit != 0 && ++framesRun >= frameLimit)
                     {
@@ -447,21 +465,20 @@ namespace m2ftg
                         break;
                     }
 
-                    // TODO: Waitable timer
-                    //
                     // GAME SPEED IS A COMPETITIVE ADVANTAGE for a linked pair, and the single-
                     // frame handshake states in Motor Raid's ring protocol are only safe between
                     // boards running at the same rate (the Virtual On stage-desync lesson). So a
                     // live cabinet link forces the 60 Hz cap even when the Debug setting turned
                     // it off; solo play keeps the configured policy.
-                    const int64_t waitTicks =
-                        (frameTimeTicks == 0 && MrLink::LinkActive()) ? sixtyHzTicks : frameTimeTicks;
-                    LARGE_INTEGER currentTime;
-                    do
-                    {
-                        QueryPerformanceCounter(&currentTime);
-                    } while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
-                    lastTime = currentTime;
+                    limiter.Wait((frameTimeTicks == 0 && MrLink::LinkActive()) ? sixtyHzTicks : frameTimeTicks);
+                }
+
+                // Before module_stop, while work RAM still holds the last frame's state.
+                if (Bench::Enabled())
+                {
+                    uint32_t romFrame = 0;
+                    ReadEmulatedRam32(RomFrameCounterAddress(), romFrame);
+                    Bench::Finish(WorkRamHash(), romFrame, WorkRam(), WORK_RAM_SIZE);
                 }
 
                 // Tell the module to shut down. Completes the start/main/stop protocol instead of
@@ -488,6 +505,7 @@ namespace m2ftg
             // Persistent input/arcade state (LJ keeps the coin/start machine in the scene
             // object across frames, scene+0x2B58..5A - here it is Cabinet::CoinStart).
             static csl_pad s_pads[2];
+            Bench::Stamp(Bench::Mark::FrameStart);
             // (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
             // routing, the coin protocol and the input suppression below all see the same answer
             // for the whole frame. See NetSession.h for the four-call-point contract.
@@ -641,7 +659,9 @@ namespace m2ftg
                 // StateBefore values (ping-pong RTs assume last-frame state; YAMP creates in
                 // COMMON -> id=527 desync).
                 SetModuleRenderActiveNow(true);
+                Bench::Stamp(Bench::Mark::ModuleStart);
                 funcResult = func(sizeof(execute_info), &execute_info);
+                Bench::Stamp(Bench::Mark::ModuleEnd);
                 SetModuleRenderActiveNow(false);
 
                 if (execute_info.output_texid != 0)
@@ -689,6 +709,7 @@ namespace m2ftg
             // re-sampling the LAST resolved frame, which receives no barriers). With status bit0 set the
             // module records nothing anyway, so skip the close/execute/reopen dance and the upload-stamp
             // advance — submit nothing, exactly like LJ.
+            Bench::Stamp(Bench::Mark::SubmitStart);
             if (!s_pause.open) SubmitModuleFrameListNow();
             if (ModuleExecDisabledNow())
             {
@@ -703,6 +724,7 @@ namespace m2ftg
             // above, so every recycled buffer is GPU-complete. This is the fix for the upload-pool
             // exhaustion crash (FUN_18009be60, ~frame 570). Must precede StF's next-frame func().
             if (!s_pause.open) AdvanceFrameStampNow();
+            Bench::Stamp(Bench::Mark::SubmitEnd);
 
             // Measured 2026-08-01 (netplay determinism survey): the ROM's own counters in work RAM
             // advance EXACTLY once per module_main call - frame_counter (0x500020) +1 per frame,
@@ -746,7 +768,9 @@ namespace m2ftg
             // Present using the swapchain the game already created (the same object the 11on12
             // backbuffers were wrapped from — gs::sm_context's sbgl_device holds YAMP's swapchain).
             auto& swapChain = gs::sbgl_device().m_swap_chain;
+            Bench::Stamp(Bench::Mark::PresentStart);
             HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
+            Bench::Stamp(Bench::Mark::PresentEnd);
             if (FAILED(hr)) return false;
 
             gs::sm_context->frame_counter++;

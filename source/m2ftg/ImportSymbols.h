@@ -18,7 +18,6 @@ namespace m2ftg
 
 			// Needed for semaphore_create
 			SL_KERNEL_CALLOC,
-			//MEMSET,
 			
 			SL_FILE_CREATE,
 			SL_FILE_OPEN,
@@ -44,14 +43,11 @@ namespace m2ftg
 			// (incl. the real cd3d12_mem_allocator resource factory at +0x17b0).
 			CDEVICE_CTOR,
 
-			// M2FTGAppModule's per-frame render-system submit (FUN_18003b530 = FUN_18003a1e0 + tail-jmp
-			// FUN_18003a540). module_main only RECORDS; in handler mode (installed at init) its inline
-			// submit stage is a no-op, and THIS is the real submit — normally driven by the engine's
-			// render-system loop, which YAMP doesn't run, so the host must call it each frame.
-			STF_FRAME_SUBMIT,
-			// The "live execute_info" global (DAT_1801ee4a0). module_main sets it on entry and clears it
-			// to 0 on return; STF_FRAME_SUBMIT dereferences it, so the host restores it around the call.
-			STF_RENDER_EXECINFO,
+			// (STF_FRAME_SUBMIT / STF_RENDER_EXECINFO - M2FTGAppModule's per-frame submit
+			// FUN_18003b530 and the live-execute_info global DAT_1801ee4a0 - were scanned here but
+			// never read: calling that submit from the host ran the task pump twice per frame and
+			// the whole game at ~2x. The submit happens through the handler hook instead; see the
+			// end of m2ftg::GameLoop.)
 
 			// The i960 CPU core's fetch/decode dispatcher (FUN_1800255F0). Its instruction fetch is
 			// hard-wired to the program-ROM host buffer (ctx->codeBase + IP, no memory map), so code

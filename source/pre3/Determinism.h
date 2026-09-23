@@ -154,7 +154,7 @@ namespace pre3
 	// slot 0 and the module does the rest, exactly as its own boot path does.
 	//
 	// ASYNCHRONOUS BY ONE FRAME, and the caller must respect that: the restore happens inside the
-	// NEXT update stage, before that frame simulates. BoardResetPending() reports the wait, and the
+	// NEXT update stage, before that frame simulates. BoardRestorePending() reports the wait, and the
 	// frame that clears it must be run with NEUTRAL inputs on both peers or the two machines
 	// simulate one different frame from the identical state they just restored.
 	//

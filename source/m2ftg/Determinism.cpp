@@ -91,6 +91,7 @@ bool m2ftg::SetTextureBudgetDeterministic(bool enable)
 			++patched;
 		}
 	}
+	return patched != 0;
 }
 
 namespace
@@ -392,6 +393,31 @@ uint32_t m2ftg::StateCheckValue()
 
 
 
+
+const uint8_t* m2ftg::WorkRam()
+{
+	const DwGame* game = CurrentDw();
+	uint8_t* base = ModuleBase();
+	if (game == nullptr || base == nullptr)
+	{
+		return nullptr;
+	}
+	__try
+	{
+		const uint8_t* ram = *reinterpret_cast<uint8_t* const*>(base + game->rvaRamBasePtr);
+		return ram != nullptr ? ram + 0x500000 : nullptr;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return nullptr;
+	}
+}
+
+uint32_t m2ftg::WorkRamHash()
+{
+	const uint8_t* ram = WorkRam();
+	return ram != nullptr ? net::Fnv1aWords(ram, WORK_RAM_SIZE) : 0;
+}
 
 bool m2ftg::ReadI960Timers(I960Timers& out)
 {

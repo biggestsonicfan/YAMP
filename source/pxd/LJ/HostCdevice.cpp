@@ -113,90 +113,6 @@ namespace pxd
 			void* s_allocVtbl[4] = { reinterpret_cast<void*>(&AllocFn), reinterpret_cast<void*>(&FreeFn), nullptr, nullptr };
 			struct AllocObj { void* vtbl; } s_allocObj = { s_allocVtbl };
 
-			// ---- Resource factory (embedded at cdevice+0x17b0) --------------
-			// [cdevice+0x17b0] = pointer to this vtable; self = &cdevice[0x17b0].
-			// vf+8 creates a committed resource; *out must be an ID3D12Resource
-			// (the DLL immediately calls out->SetName, ID3D12Object vf+0x30).
-			uint64_t CreateResourceFn(void* /*self*/, void* desc, uint32_t fmt, void* p4,
-				uint32_t tag, int /*zero*/, const wchar_t* name, void** out)
-			{
-				// Log the raw desc so we can learn its real layout from live runs.
-				if (desc)
-				{
-					const uint64_t* d = reinterpret_cast<const uint64_t*>(desc);
-					// TEMPORARY (pre3 bring-up): DebugLogFile, not DebugLog. This line was
-					// OutputDebugString-only, so in a normal run it went nowhere and the factory
-					// looked like it was never called. pre3's texture upload asks this factory for
-					// an INTERMEDIATE TEXTURE (FUN_18007dda0 names the result
-					// "pbgl::intermidate_texture%lld"), and we hand back a generic 8 MiB ROW_MAJOR
-					// BUFFER regardless of the desc - which a CopyTextureRegion cannot read as a
-					// texture subresource. Dump the real descs so the desc layout can be parsed.
-					DebugLog(
-						"[cdevice] CreateResource fmt=0x%X tag=0x%X desc=[%016llX %016llX %016llX %016llX %016llX %016llX]\n",
-						fmt, tag,
-						(unsigned long long)d[0], (unsigned long long)d[1], (unsigned long long)d[2],
-						(unsigned long long)d[3], (unsigned long long)d[4], (unsigned long long)d[5]);
-				}
-
-				if (out) *out = nullptr;
-				if (!s_device || !out) return 0x80004005; // E_FAIL
-
-				// TEMP: create a generic upload buffer. Real size/type parsing of the
-				// pxd desc comes next once we capture live descs under the debugger.
-				const UINT64 kTempSize = 0x800000; // 8 MiB (matches pbgl::upload path)
-
-				D3D12_HEAP_PROPERTIES hp = {};
-				hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-				hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-				hp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
-				D3D12_RESOURCE_DESC rd = {};
-				rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-				rd.Alignment = 0;
-				rd.Width = kTempSize;
-				rd.Height = 1;
-				rd.DepthOrArraySize = 1;
-				rd.MipLevels = 1;
-				rd.Format = DXGI_FORMAT_UNKNOWN;
-				rd.SampleDesc.Count = 1;
-				rd.SampleDesc.Quality = 0;
-				rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-				rd.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-				ID3D12Resource* res = nullptr;
-				HRESULT hr = s_device->CreateCommittedResource(
-					&hp, D3D12_HEAP_FLAG_NONE, &rd,
-					D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-					IID_PPV_ARGS(&res));
-				if (FAILED(hr))
-				{
-					DebugLog("[%s cdevice] CreateCommittedResource failed hr=0x%08X\n", gGeneral.GetGameTag(), hr);
-					return static_cast<uint64_t>(hr);
-				}
-
-				// Zero the buffer. CreateCommittedResource returns UNINITIALIZED memory, and the
-				// upload data StF builds in these buffers has NaN in the 4th float of every
-				// 32-byte vertex record (verified via the [copy] source dumps) while xyz are
-				// valid and animating - i.e. the producer writes only the lanes it owns and
-				// inherits garbage in the rest. The real pxd host serves these from zeroed
-				// engine memory; NaN positions kill every triangle, so zero-fill on creation.
-				{
-					void* zp = nullptr; D3D12_RANGE zr{ 0, 0 };
-					if (SUCCEEDED(res->Map(0, &zr, &zp)) && zp != nullptr)
-					{
-						std::memset(zp, 0, static_cast<size_t>(rd.Width));
-						res->Unmap(0, nullptr);
-					}
-				}
-
-				*out = res;
-				(void)fmt; (void)p4; (void)tag; (void)name;
-				return 0;
-			}
-
-			// Enough slots to survive an unexpected slot read; slot 1 (+8) is the create.
-			void* s_factoryVtbl[16] = {};
-
 			void SeedFreelist()
 			{
 				for (uint32_t i = 0; i < kNodeCount; ++i)
@@ -657,7 +573,7 @@ namespace pxd
 					g_moduleFlaggedHasDraw[g_moduleFlaggedCount] = fromDraw;
 					g_moduleFlagged[g_moduleFlaggedCount++] = l;
 				}
-				static int m = 0; if (m < 8) { DebugLogFile("[mark] %s list %p type=%d (flagged=%d)\n", gGeneral.GetGameTag(), static_cast<void*>(l), l->GetType(), g_moduleFlaggedCount); } m++;
+				static int m = 0; if (m < 8) { ++m; DebugLogFile("[mark] %s list %p type=%d (flagged=%d)\n", gGeneral.GetGameTag(), static_cast<void*>(l), l->GetType(), g_moduleFlaggedCount); }
 			}
 			static void UnflagModuleList(ID3D12GraphicsCommandList* l) // on Reset the recording is gone; re-earn it
 			{
@@ -724,7 +640,7 @@ namespace pxd
 							const HRESULT hrc = g_origClose ? g_origClose(l) : l->Close(); // StF leaves them OPEN
 							if (FAILED(hrc))
 							{
-								static int e = 0; if (e++ < 8) { DebugLogFile("[pathb] Close failed 0x%08X list=%p (skip)\n", static_cast<unsigned>(hrc), static_cast<void*>(l)); }
+								static int e = 0; if (e < 8) { ++e; DebugLogFile("[pathb] Close failed 0x%08X list=%p (skip)\n", static_cast<unsigned>(hrc), static_cast<void*>(l)); }
 								continue;
 							}
 							gl[nn] = l; lists[nn] = l; ++nn;
@@ -737,7 +653,7 @@ namespace pxd
 					if (!g_execFence) { s_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_execFence)); g_execEv = CreateEventA(nullptr, FALSE, FALSE, nullptr); }
 					bool timedOut = false;
 					if (g_execFence) { g_yampQueue->Signal(g_execFence, ++g_execFv); if (g_execFence->GetCompletedValue() < g_execFv) { g_execFence->SetEventOnCompletion(g_execFv, g_execEv); timedOut = (WaitForSingleObject(g_execEv, 4000) == WAIT_TIMEOUT); } }
-					static int f = 0; if (f < 8) { DebugLogFile("[pathb] submitted %d %s list(s)%s\n", nn, gGeneral.GetGameTag(), timedOut ? " (FLUSH TIMEOUT - GPU HANG)" : ""); } f++;
+					static int f = 0; if (f < 8) { ++f; DebugLogFile("[pathb] submitted %d %s list(s)%s\n", nn, gGeneral.GetGameTag(), timedOut ? " (FLUSH TIMEOUT - GPU HANG)" : ""); }
 					// How many times an upload-only list turned up after a draw list was already
 					// flagged - i.e. how many frames the old order would have got wrong. A running
 					// total, reported sparsely, so one glance after a session says whether the
