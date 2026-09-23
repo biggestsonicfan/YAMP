@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A/B performance harness for YAMP running Sonic the Fighters.
+"""A/B performance harness for YAMP running Sonic the Fighters or Fighting Vipers 2.
 
 Builds two versions of YAMP (any git refs, or the working tree), runs each one several times
 against the same StF module with the "-bench" recorder (source/Bench.h), interleaved A,B,A,B so
@@ -14,9 +14,19 @@ script says so and names the 64 KB chunks of work RAM that differ.
   python tools/ab/ab.py --a origin/master --b WORKTREE
   python tools/ab/ab.py --a HEAD~3 --b HEAD --reps 7 --frames 2400
   python tools/ab/ab.py --a HEAD --b WORKTREE --fpscap 0      # uncapped: limiter out of the picture
+  python tools/ab/ab.py --game fv2 --a HEAD~1 --b HEAD         # Fighting Vipers 2 (the pre3 host)
 
-Requires: the module folder (the directory holding stf-pxd-w64-d3d12_retail.dll and rom/) as the
-run CWD - by default build/bin/Win64/Debug/m2ftg, override with --game-dir. Runs pass -noownership
+Per game, what "the same simulation" means (both are set up inside the hosts, bench mode only):
+  stf  LJ m2ftg host. Host RNG seeded with a constant and the texture budget pinned once the board
+       is up; frames counted from the ROM's first counted frame; state_hash = FNV of all 1 MB of
+       work RAM, dumped to run<n>.txt.ram for the chunk diff.
+  fv2  pre3 Model 3 host. Deterministic by construction once its RTC is pinned (always, at boot);
+       frames counted from the first RUNNING frame; state_hash = the netplay canary (PowerPC
+       registers + sampled main RAM), read after waiting out the emulator thread's in-flight frame.
+
+Requires: the module folder as the run CWD - for stf the directory holding
+stf-pxd-w64-d3d12_retail.dll and rom/ (default build/bin/Win64/Debug/m2ftg), for fv2 the one holding
+pre3-pxd-w64-d3d12_retail.dll and image/ (default build/bin/Win64/Debug/pre3); override with --game-dir. Runs pass -noownership
 (the ownership check starts a Steam helper process, which is noise here); the module checksum is
 still enforced, so both sides provably run the same DLL.
 
@@ -36,6 +46,12 @@ REPO = Path(__file__).resolve().parents[2]
 MSBUILD = Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe")
 PREMAKE = REPO / "premake5.exe"
 PROFILE = Path(__file__).resolve().parent / "settings.ini"
+
+# game -> (boot switch, module DLL, default run folder)
+GAMES = {
+    "stf": ("-stf", "stf-pxd-w64-d3d12_retail.dll", REPO / "build" / "bin" / "Win64" / "Debug" / "m2ftg"),
+    "fv2": ("-fv2", "pre3-pxd-w64-d3d12_retail.dll", REPO / "build" / "bin" / "Win64" / "Debug" / "pre3"),
+}
 
 # (key, label, lower_is_better). Only these are tabulated; the full report is kept per run.
 METRICS = [
@@ -133,21 +149,23 @@ def main():
     ap.add_argument("--warmup", type=int, default=120, help="frames after the ROM starts left out of the stats")
     ap.add_argument("--reps", type=int, default=5, help="runs per side")
     ap.add_argument("--fpscap", type=int, default=1, choices=[0, 1], help="YAMP's 60 Hz limiter (settings FPSCap)")
-    ap.add_argument("--game-dir", default=str(REPO / "build" / "bin" / "Win64" / "Debug" / "m2ftg"),
-                    help="the folder holding the StF module DLL and rom/ (used as the run CWD)")
+    ap.add_argument("--game", default="stf", choices=sorted(GAMES))
+    ap.add_argument("--game-dir", default=None,
+                    help="the folder holding the module DLL and its data (the run CWD; default per --game)")
     ap.add_argument("--out", default=None, help="results folder (default: %%TEMP%%/yamp-ab/results/<a>_vs_<b>)")
     ap.add_argument("--cache", default=os.path.join(os.environ.get("TEMP", "."), "yamp-ab", "trees"),
                     help="where git refs are checked out and built")
     ap.add_argument("--timeout", type=int, default=0, help="per-run timeout in seconds (default: from --frames)")
     args = ap.parse_args()
 
-    game_dir = Path(args.game_dir)
-    if not (game_dir / "stf-pxd-w64-d3d12_retail.dll").exists():
-        sys.exit(f"no stf-pxd-w64-d3d12_retail.dll in {game_dir} (pass --game-dir)")
+    switch, dll, default_dir = GAMES[args.game]
+    game_dir = Path(args.game_dir) if args.game_dir else default_dir
+    if not (game_dir / dll).exists():
+        sys.exit(f"no {dll} in {game_dir} (pass --game-dir)")
 
     def slug(ref):
         return "".join(c if c.isalnum() else "-" for c in ref)
-    out = Path(args.out) if args.out else Path(os.environ.get("TEMP", ".")) / "yamp-ab" / "results" / f"{slug(args.a)}_vs_{slug(args.b)}"
+    out = Path(args.out) if args.out else Path(os.environ.get("TEMP", ".")) / "yamp-ab" / "results" / f"{args.game}_{slug(args.a)}_vs_{slug(args.b)}"
     out.mkdir(parents=True, exist_ok=True)
 
     # Build both first (B last when it is the working tree, so A's build cannot clobber it), then
@@ -170,7 +188,7 @@ def main():
             report = d / f"run{rep}.txt"
             for stale in d.glob(f"run{rep}.txt*"):
                 stale.unlink()
-            cmd = [str(d / "YAMP.exe"), "-stf", "-noownership", "-frames", str(args.frames),
+            cmd = [str(d / "YAMP.exe"), switch, "-noownership", "-frames", str(args.frames),
                    "-bench", str(report), "-bench-warmup", str(args.warmup)]
             print(f"[run] {label} rep {rep + 1}/{args.reps}", flush=True)
             try:
@@ -184,7 +202,7 @@ def main():
 
     # ---- report ---------------------------------------------------------------------------
     print()
-    print(f"A = {args.a}   B = {args.b}   ({args.config}, {args.frames} frames, warmup {args.warmup}, "
+    print(f"{args.game}: A = {args.a}   B = {args.b}   ({args.config}, {args.frames} frames, warmup {args.warmup}, "
           f"FPSCap={args.fpscap}, {len(results['A'])}+{len(results['B'])} runs)")
     print()
     print(f"{'metric':<22}{'A median':>12}{'A range':>20}{'B median':>12}{'B range':>20}{'delta':>9}")
@@ -213,8 +231,10 @@ def main():
     hashes = {label: sorted({r.get("state_hash") for _, r in results[label]}) for label in results}
     frames = {label: sorted({r.get("rom_frame") for _, r in results[label]}) for label in results}
     print(f"state_hash  A: {hashes['A']}  B: {hashes['B']}")
-    print(f"rom_frame   A: {frames['A']}  B: {frames['B']}")
+    print(f"{'rom_frame' if args.game == 'stf' else 'frames'}   A: {frames['A']}  B: {frames['B']}")
     all_runs = results["A"] + results["B"]
+    if any(r.get("state_hash") == "0x00000000" for _, r in all_runs):
+        print("WARNING: a run reported state_hash 0 - the board could not be sampled, so it proves nothing.")
     if len({r.get("state_hash") for _, r in all_runs}) == 1 and all_runs:
         print("SIMULATION IDENTICAL across every run of both builds.")
         return 0
