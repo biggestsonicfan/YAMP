@@ -46,6 +46,7 @@ void AdvanceFrameStampNow();
 #include "../../imgui/imgui.h"
 
 #include "../../DebugLog.h"
+#include "../../Bench.h"
 #include "../../net/NetPlugin.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/ScopedUnprotect.hpp"
@@ -436,8 +437,33 @@ namespace m2ftg
                 // take the real teardown path (see YAMPGeneral::GetFrameLimit).
                 const uint32_t frameLimit = gGeneral.GetFrameLimit();
                 uint32_t framesRun = 0;
+                bool benchPinned = false;
+                bool benchAnchored = false;
                 while (!window.IsShuttingDown())
                 {
+                    // A/B bench (Bench.h): two runs must simulate the same thing, and a cold boot
+                    // does not by itself - the host RNG is seeded from the wall clock and the
+                    // texture unpack budget is a real-time deadline. Pin both the moment the board
+                    // is up, before the ROM gets going, then count -frames from the ROM's first
+                    // counted frame: how many host frames the ROM LOAD takes varies run to run,
+                    // but from there on the ROM's frame counter advances once per module_main.
+                    // (Not the netplay round start's seed + ResetBoard: after a reset this ROM
+                    // takes ~3500 frames of near-idle start-up before its counter moves again -
+                    // measured - which is neither quick nor a representative load.)
+                    if (Bench::Enabled() && !benchAnchored && IsBoardBooted())
+                    {
+                        if (!benchPinned)
+                        {
+                            benchPinned = SeedHostRng(0xB16B00B5u) && SetTextureBudgetDeterministic(true);
+                        }
+                        uint32_t romFrame = 0;
+                        if (benchPinned && ReadEmulatedRam32(RomFrameCounterAddress(), romFrame) && romFrame != 0)
+                        {
+                            benchAnchored = true;
+                            framesRun = 0;
+                            Bench::Anchor();
+                        }
+                    }
                     DebugLog("[%s::Run] GameLoop iter\n", gGeneral.GetGameTag());
                     if (!GameLoop(module_main, window)) { DebugLog("[%s::Run] GameLoop returned false\n", gGeneral.GetGameTag()); break; }
                     if (frameLimit != 0 && ++framesRun >= frameLimit)
@@ -464,6 +490,14 @@ namespace m2ftg
                     lastTime = currentTime;
                 }
 
+                // Before module_stop, while work RAM still holds the last frame's state.
+                if (Bench::Enabled())
+                {
+                    uint32_t romFrame = 0;
+                    ReadEmulatedRam32(RomFrameCounterAddress(), romFrame);
+                    Bench::Finish(WorkRamHash(), romFrame, WorkRam(), WORK_RAM_SIZE);
+                }
+
                 // Tell the module to shut down. Completes the start/main/stop protocol instead of
                 // relying on process exit, and gives the module a chance to release what it
                 // allocated. VF5FS-LJ returns 0 here; the m2ftg modules are logged the same way.
@@ -488,6 +522,7 @@ namespace m2ftg
             // Persistent input/arcade state (LJ keeps the coin/start machine in the scene
             // object across frames, scene+0x2B58..5A - here it is Cabinet::CoinStart).
             static csl_pad s_pads[2];
+            Bench::Stamp(Bench::Mark::FrameStart);
             // (1) Read the session state ONCE, at the top, before Drive() can advance it - so pad
             // routing, the coin protocol and the input suppression below all see the same answer
             // for the whole frame. See NetSession.h for the four-call-point contract.
@@ -641,7 +676,9 @@ namespace m2ftg
                 // StateBefore values (ping-pong RTs assume last-frame state; YAMP creates in
                 // COMMON -> id=527 desync).
                 SetModuleRenderActiveNow(true);
+                Bench::Stamp(Bench::Mark::ModuleStart);
                 funcResult = func(sizeof(execute_info), &execute_info);
+                Bench::Stamp(Bench::Mark::ModuleEnd);
                 SetModuleRenderActiveNow(false);
 
                 if (execute_info.output_texid != 0)
@@ -689,6 +726,7 @@ namespace m2ftg
             // re-sampling the LAST resolved frame, which receives no barriers). With status bit0 set the
             // module records nothing anyway, so skip the close/execute/reopen dance and the upload-stamp
             // advance — submit nothing, exactly like LJ.
+            Bench::Stamp(Bench::Mark::SubmitStart);
             if (!s_pause.open) SubmitModuleFrameListNow();
             if (ModuleExecDisabledNow())
             {
@@ -703,6 +741,7 @@ namespace m2ftg
             // above, so every recycled buffer is GPU-complete. This is the fix for the upload-pool
             // exhaustion crash (FUN_18009be60, ~frame 570). Must precede StF's next-frame func().
             if (!s_pause.open) AdvanceFrameStampNow();
+            Bench::Stamp(Bench::Mark::SubmitEnd);
 
             // Measured 2026-08-01 (netplay determinism survey): the ROM's own counters in work RAM
             // advance EXACTLY once per module_main call - frame_counter (0x500020) +1 per frame,
@@ -746,7 +785,9 @@ namespace m2ftg
             // Present using the swapchain the game already created (the same object the 11on12
             // backbuffers were wrapped from — gs::sm_context's sbgl_device holds YAMP's swapchain).
             auto& swapChain = gs::sbgl_device().m_swap_chain;
+            Bench::Stamp(Bench::Mark::PresentStart);
             HRESULT hr = swapChain.m_pDXGISwapChain->Present(1, 0);
+            Bench::Stamp(Bench::Mark::PresentEnd);
             if (FAILED(hr)) return false;
 
             gs::sm_context->frame_counter++;

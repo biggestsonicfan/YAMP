@@ -13,6 +13,7 @@
 #include "imgui/imgui.h"
 #include "net/NetPlugin.h"
 #include "SteamOwnership.h"
+#include "Bench.h"
 
 #ifdef _DEBUG
 #include <crtdbg.h>
@@ -118,6 +119,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     {
         gGeneral.SetFrameLimit(static_cast<uint32_t>(_wtoi(framesArg + 8)));
     }
+
+    // "-bench <file>": frame-timing report for A/B runs (Bench.h, tools/ab/ab.py).
+    Bench::Configure(cmdLine);
 
     if (bootId == YAMPGeneral::GameId::Launcher) {
         Launcher::Run(hInstance, nShowCmd);
