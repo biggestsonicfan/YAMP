@@ -52,6 +52,7 @@ unsigned int ModuleDrawLimitNow();
 #include "../../GameVerify.h"
 #include "../../DebugLog.h"
 #include "../../Bench.h"
+#include "../../FrameLimiter.h"
 #include "../../Utils/ScopedUnprotect.hpp"
 
 namespace pre3
@@ -637,14 +638,10 @@ namespace pre3
 		// an unconditional 60 Hz while a link is live - the limiter half of the linked-cabinet
 		// pacer (CommBoard.h). A cabinet allowed to run its board at the monitor's 144 Hz lives
 		// that much further into the race than its peer, so a live link owns the frame cap, on
-		// the same rule as the LINK ID row. (The wait below spins on
-		// `delta * 1000 < ticks`, so the 60 Hz value is freq * 50/3 = freq/60 * 1000.)
-		int64_t linkedFrameTicks;
-		{
-			LARGE_INTEGER frequency;
-			QueryPerformanceFrequency(&frequency);
-			linkedFrameTicks = (frequency.QuadPart * 50) / 3;
-		}
+		// the same rule as the LINK ID row. FrameLimiter sleeps most of the wait instead of
+		// spinning it.
+		FrameLimiter limiter;
+		const int64_t linkedFrameTicks = limiter.Frequency() / 60;
 		const int64_t frameTimeTicks = settings->m_enableFpsCap ? linkedFrameTicks : 0;
 
 		m2ftg::ApplyAspectSetting(window, settings->m_m2Aspect);
@@ -658,8 +655,7 @@ namespace pre3
 
 		if (msRet == 0 && entries.update != nullptr)
 		{
-			LARGE_INTEGER lastTime;
-			QueryPerformanceCounter(&lastTime);
+			limiter.Wait(0); // the first period starts now, not at construction
 			const uint32_t frameLimit = gGeneral.GetFrameLimit();
 			uint32_t framesRun = 0;
 			bool benchAnchored = false;
@@ -689,14 +685,7 @@ namespace pre3
 					break;
 				}
 
-				const int64_t waitTicks = CommBoard::LinkPacingActive()
-					? linkedFrameTicks : frameTimeTicks;
-				LARGE_INTEGER currentTime;
-				do
-				{
-					QueryPerformanceCounter(&currentTime);
-				} while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
-				lastTime = currentTime;
+				limiter.Wait(CommBoard::LinkPacingActive() ? linkedFrameTicks : frameTimeTicks);
 			}
 
 			// The link probe's collected samples, written out once now rather than per frame -
