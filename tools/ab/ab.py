@@ -24,6 +24,7 @@ Both refs must contain the -bench recorder, i.e. be at or after the commit that 
 """
 
 import argparse
+import math
 import os
 import shutil
 import statistics
@@ -200,6 +201,13 @@ def main():
         tag = ("  better" if better else "  WORSE") if separated else ""
         print(f"{name:<22}{ma:>12.3f}{f'[{min(va):.3f}..{max(va):.3f}]':>20}{mb:>12.3f}"
               f"{f'[{min(vb):.3f}..{max(vb):.3f}]':>20}{delta:>+8.1f}%{tag}")
+
+    na, nb = len(results["A"]), len(results["B"])
+    if na and nb:
+        # Non-overlapping ranges is the most extreme Mann-Whitney outcome; this is its p-value.
+        p = 2 / math.comb(na + nb, na)
+        print(f"\n'better'/'WORSE' = every run of one side beat every run of the other "
+              f"(two-sided p = {p:.3f} at {na}+{nb} runs; an A/A run at 3+3 flagged sub-ms metrics by ~10%).")
 
     print()
     hashes = {label: sorted({r.get("state_hash") for _, r in results[label]}) for label in results}
