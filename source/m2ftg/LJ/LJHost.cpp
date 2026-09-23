@@ -47,6 +47,7 @@ void AdvanceFrameStampNow();
 
 #include "../../DebugLog.h"
 #include "../../Bench.h"
+#include "../../FrameLimiter.h"
 #include "../../net/NetPlugin.h"
 #include "../../Utils/MemoryMgr.h"
 #include "../../Utils/ScopedUnprotect.hpp"
@@ -358,17 +359,11 @@ namespace m2ftg
             params.config.is_freeplay = settings->m_m2Freeplay ? 1 : 0;
             params.config.is_vs_mode = settings->m_m2VersusMode ? 1 : 0;
 
-            // Set up a FPS limiter
-            // TODO: Do more gracefully
-            int64_t frameTimeTicks;
-            int64_t sixtyHzTicks;
-            {
-                LARGE_INTEGER frequency;
-                QueryPerformanceFrequency(&frequency);
-                sixtyHzTicks = (frequency.QuadPart * 50) / 3;
-                // We want to enforce 60 FPS, unless the cap is disabled in Debug
-                frameTimeTicks = settings->m_enableFpsCap ? sixtyHzTicks : 0;
-            }
+            // 60 Hz, unless the cap is disabled in Debug. FrameLimiter sleeps most of the wait
+            // instead of spinning it.
+            FrameLimiter limiter;
+            const int64_t sixtyHzTicks = limiter.Frequency() / 60;
+            const int64_t frameTimeTicks = settings->m_enableFpsCap ? sixtyHzTicks : 0;
 
             ApplyAspectSetting(window, settings->m_m2Aspect);
 
@@ -431,8 +426,7 @@ namespace m2ftg
             CharRamFix::Install();
             if (msRet == 0)
             {
-                LARGE_INTEGER lastTime;
-                QueryPerformanceCounter(&lastTime);
+                limiter.Wait(0); // the first period starts now, not at construction
                 // "-frames N" ends the run HERE rather than by killing the process, so smoke tests
                 // take the real teardown path (see YAMPGeneral::GetFrameLimit).
                 const uint32_t frameLimit = gGeneral.GetFrameLimit();
@@ -473,21 +467,12 @@ namespace m2ftg
                         break;
                     }
 
-                    // TODO: Waitable timer
-                    //
                     // GAME SPEED IS A COMPETITIVE ADVANTAGE for a linked pair, and the single-
                     // frame handshake states in Motor Raid's ring protocol are only safe between
                     // boards running at the same rate (the Virtual On stage-desync lesson). So a
                     // live cabinet link forces the 60 Hz cap even when the Debug setting turned
                     // it off; solo play keeps the configured policy.
-                    const int64_t waitTicks =
-                        (frameTimeTicks == 0 && MrLink::LinkActive()) ? sixtyHzTicks : frameTimeTicks;
-                    LARGE_INTEGER currentTime;
-                    do
-                    {
-                        QueryPerformanceCounter(&currentTime);
-                    } while (((currentTime.QuadPart - lastTime.QuadPart) * 1000) < waitTicks);
-                    lastTime = currentTime;
+                    limiter.Wait((frameTimeTicks == 0 && MrLink::LinkActive()) ? sixtyHzTicks : frameTimeTicks);
                 }
 
                 // Before module_stop, while work RAM still holds the last frame's state.
