@@ -45,6 +45,40 @@ namespace net
                 return nullptr;
             return line.c_str() + n + 1;
         }
+
+        // Written whole and renamed into place, as m2-hle2 does: a stream and its training runs
+        // read this file too, and none of them may see half of it.
+        bool WriteWhole(const std::wstring& path, const std::string& text)
+        {
+            const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+            {
+                std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                if (!f)
+                    return false;
+                f.write(text.data(), std::streamsize(text.size()));
+                if (!f)
+                {
+                    f.close();
+                    DeleteFileW(tmp.c_str());
+                    return false;
+                }
+            }
+            // Windows will not replace a file another process has open, and every copy of m2-hle2
+            // reads this one. A read is over in a moment.
+            bool moved = false;
+            for (int tries = 0; !moved && tries < 20; ++tries)
+            {
+                moved = MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+                if (!moved)
+                    Sleep(10);
+            }
+            if (!moved)
+            {
+                DeleteFileW(tmp.c_str());
+                return false;
+            }
+            return true;
+        }
     }
 
     std::wstring SharedLoginPath()
@@ -144,37 +178,25 @@ namespace net
         // forgotten would be offered to whichever server the file names next.
         out << "twitch_token=" << token << "\ntwitch_npid=" << npid
             << "\ntwitch_server=" << server << "\ntwitch_port=" << kDefaultPort << "\n";
+        return WriteWhole(path, out.str());
+    }
 
-        // Written whole and renamed into place, as m2-hle2 does: a stream and its training runs
-        // read this file too, and none of them may see half of it.
-        const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    bool ForgetSharedTwitchToken(const char* server, const char* npid)
+    {
+        const std::wstring path = SharedLoginPath();
+        // Only a token this server and account would have been offered - the same test a login
+        // makes. A token for some other server or account is somebody else's business.
+        if (path.empty() || SharedTwitchToken(server, npid).empty())
+            return true;
+
+        std::ostringstream out;
+        for (const std::string& line : ReadLines())
         {
-            std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-            if (!f)
-                return false;
-            const std::string text = out.str();
-            f.write(text.data(), std::streamsize(text.size()));
-            if (!f)
-            {
-                f.close();
-                DeleteFileW(tmp.c_str());
-                return false;
-            }
+            if (ValueOf(line, "twitch_token") || ValueOf(line, "twitch_npid")
+                || ValueOf(line, "twitch_server") || ValueOf(line, "twitch_port"))
+                continue;
+            out << line << "\n";
         }
-        // Windows will not replace a file another process has open, and every copy of m2-hle2
-        // reads this one. A read is over in a moment.
-        bool moved = false;
-        for (int tries = 0; !moved && tries < 20; ++tries)
-        {
-            moved = MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-            if (!moved)
-                Sleep(10);
-        }
-        if (!moved)
-        {
-            DeleteFileW(tmp.c_str());
-            return false;
-        }
-        return true;
+        return WriteWhole(path, out.str());
     }
 }

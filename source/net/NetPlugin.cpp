@@ -255,31 +255,73 @@ namespace net
         // same rule holds for both: A TOKEN ONLY GOES TO THE SERVER THAT ISSUED IT, as the
         // account it was issued for (TwitchTokenIsFor). On any other server - np.rpcs3.net, say,
         // after a sign-in on ours - neither is offered and the password is sent as typed.
-        char s_ownPassword[sizeof(SessionConfig::password)] = {};
+        //
+        // The ONE place that decides, used by the login and by the Netplay page alike
+        // (TwitchLoginFor), so the page never says one thing while Connect does another.
+        //
+        // The second credential is normally the password, but not when this machine's own saved
+        // token is a DIFFERENT one that is also good here. That happens when a sign-in here could
+        // not be written into the shared file (StoreSharedTwitchToken only logs a failure), which
+        // leaves YAMP's copy the newer and the file's copy dead - so the retry offers it.
+        char s_fallback[sizeof(SessionConfig::password)] = {};
+        const char* s_fallbackName = "";
 
-        // The token a login should offer in the password's place, or "" for none.
-        std::string TwitchTokenForLogin()
+        struct TwitchChoice
         {
-            std::string token = SharedTwitchToken(s_cfg.server, s_cfg.npid);
-            if (!token.empty())
-                return token;
-            if (s_cfg.twitch_token[0] != '\0' && TwitchTokenIsFor(s_cfg.twitch_server,
-                    s_cfg.twitch_npid, s_cfg.server, s_cfg.npid))
-                return s_cfg.twitch_token;
-            return {};
+            TwitchSource source = TwitchSource::None;
+            std::string token;      // what a login offers first
+            std::string saved;      // YAMP's own, when it too is good here
+        };
+
+        TwitchChoice ChooseTwitch(const char* server, const char* npid, const std::string& shared,
+                                  const char* savedToken, const char* savedNpid,
+                                  const char* savedServer)
+        {
+            TwitchChoice c;
+            if (savedToken != nullptr && *savedToken != '\0'
+                && TwitchTokenIsFor(savedServer, savedNpid, server, npid))
+                c.saved = savedToken;
+            if (!shared.empty())
+            {
+                c.source = TwitchSource::Shared;
+                c.token = shared;
+            }
+            else if (!c.saved.empty())
+            {
+                c.source = TwitchSource::Saved;
+                c.token = c.saved;
+            }
+            return c;
+        }
+
+        TwitchChoice ChooseForLogin()
+        {
+            return ChooseTwitch(s_cfg.server, s_cfg.npid,
+                                SharedTwitchToken(s_cfg.server, s_cfg.npid), s_cfg.twitch_token,
+                                s_cfg.twitch_npid, s_cfg.twitch_server);
         }
 
         void PreferTwitchToken()
         {
-            s_ownPassword[0] = '\0';
-            const std::string token = TwitchTokenForLogin();
-            if (token.empty() || token == s_cfg.password)
+            s_fallback[0] = '\0';
+            const TwitchChoice c = ChooseForLogin();
+            if (c.token.empty() || c.token == s_cfg.password)
                 return;
-            // May be empty, which is a Twitch-only account: there is then nothing to fall back to
-            // and RetryOwnPassword stays out of it.
-            strncpy_s(s_ownPassword, s_cfg.password, _TRUNCATE);
-            strncpy_s(s_cfg.password, token.c_str(), _TRUNCATE);
-            NetLog("using the Twitch login for %hs on %hs\n", s_cfg.npid, s_cfg.server);
+            if (!c.saved.empty() && c.saved != c.token)
+            {
+                strncpy_s(s_fallback, c.saved.c_str(), _TRUNCATE);
+                s_fallbackName = "this machine's own Twitch login";
+            }
+            else
+            {
+                // May be empty, which is a Twitch-only account: there is then nothing to fall
+                // back to and RetryOwnPassword stays out of it.
+                strncpy_s(s_fallback, s_cfg.password, _TRUNCATE);
+                s_fallbackName = "this machine's own password";
+            }
+            strncpy_s(s_cfg.password, c.token.c_str(), _TRUNCATE);
+            NetLog("using the %hs Twitch login for %hs on %hs\n",
+                   c.source == TwitchSource::Shared ? "shared" : "saved", s_cfg.npid, s_cfg.server);
         }
 
         void CopySavedTwitch(const SavedTwitch* twitch)
@@ -309,21 +351,21 @@ namespace net
         }
 
         // Called every frame from both session paths. Acts once, on the frame a login that
-        // offered the shared token comes back refused as a wrong password.
+        // offered a Twitch token comes back refused as a wrong password.
         void RetryOwnPassword()
         {
-            if (s_ownPassword[0] == '\0' || s_api->get_state(s_session) != YAMPNET_STATE_FAILED)
+            if (s_fallback[0] == '\0' || s_api->get_state(s_session) != YAMPNET_STATE_FAILED)
                 return;
-            char own[sizeof(s_ownPassword)];
-            strncpy_s(own, s_ownPassword, _TRUNCATE);
-            s_ownPassword[0] = '\0';
+            char own[sizeof(s_fallback)];
+            strncpy_s(own, s_fallback, _TRUNCATE);
+            s_fallback[0] = '\0';
 
             // ErrorType 8 is LoginInvalidPassword. Anything else (no such account, the server
             // down) would fail the same way with the other credential.
             const char* why = s_api->get_error(s_session);
             if (strstr(why, "(ErrorType=8)") == nullptr)
                 return;
-            NetLog("the Twitch login was refused; trying this machine's own password\n");
+            NetLog("the Twitch login was refused; trying %hs\n", s_fallbackName);
             strncpy_s(s_cfg.password, own, _TRUNCATE);
             s_api->disconnect(s_session);
             if (StartLogin() != YAMPNET_OK)
@@ -406,7 +448,7 @@ namespace net
         // A Twitch login counts as the password only on the server that issued it, so a
         // -net-server naming another one still needs a password of its own.
         s_cfg.enabled = s_cfg.server[0] && s_cfg.npid[0]
-                     && (s_cfg.password[0] || !TwitchTokenForLogin().empty())
+                     && (s_cfg.password[0] || !ChooseForLogin().token.empty())
                      && (s_cfg.host || s_cfg.room_id);
         NetLog("cfg server=%hs user=%hs comid=%hs %hs%llu enabled=%d\n",
                  s_cfg.server, s_cfg.npid, s_cfg.com_id,
@@ -710,7 +752,7 @@ namespace net
 
         // Checked only now, with the config filled in, because a Twitch login stands in for the
         // password - but only one this server issued.
-        if (s_cfg.password[0] == '\0' && TwitchTokenForLogin().empty())
+        if (s_cfg.password[0] == '\0' && ChooseForLogin().token.empty())
         {
             if (s_cfg.twitch_token[0] != '\0')
                 SetActionError("a password is required - the saved Twitch sign-in is for %s "
@@ -874,6 +916,54 @@ namespace net
                        || twitch == YAMPNET_TWITCH_WAITING;
         if (busy)
             s_api->poll(s_session);
+    }
+
+    namespace
+    {
+        // The page asks every frame; the file is read at most every half second, and at once when
+        // the server or account it is asked about changes. Another process can sign in at any
+        // moment, so this is a short-lived copy rather than one kept for the session.
+        struct SharedCache
+        {
+            std::string server, npid, token;
+            ULONGLONG readAt = 0;
+            bool valid = false;
+        } s_sharedCache;
+
+        const std::string& SharedTokenCached(const char* server, const char* npid)
+        {
+            const ULONGLONG now = GetTickCount64();
+            SharedCache& c = s_sharedCache;
+            if (!c.valid || now - c.readAt >= 500 || c.server != server || c.npid != npid)
+            {
+                c.server = server;
+                c.npid = npid;
+                c.token = SharedTwitchToken(server, npid);
+                c.readAt = now;
+                c.valid = true;
+            }
+            return c.token;
+        }
+    }
+
+    TwitchSource TwitchLoginFor(const char* server, const char* npid, const SavedTwitch* saved)
+    {
+        if (server == nullptr || *server == '\0' || npid == nullptr || *npid == '\0')
+            return TwitchSource::None;
+        return ChooseTwitch(server, npid, SharedTokenCached(server, npid),
+                            saved != nullptr ? saved->token : nullptr,
+                            saved != nullptr ? saved->npid : nullptr,
+                            saved != nullptr ? saved->server : nullptr).source;
+    }
+
+    bool ForgetSharedTwitchLogin(const char* server, const char* npid)
+    {
+        s_sharedCache.valid = false;
+        const bool ok = ForgetSharedTwitchToken(server, npid);
+        NetLog(ok ? "forgot the shared Twitch login for %hs on %hs\n"
+                  : "could not remove the shared Twitch login for %hs on %hs\n",
+               npid != nullptr ? npid : "?", server != nullptr ? server : "?");
+        return ok;
     }
 
     void Disconnect()

@@ -284,10 +284,21 @@ void YAMPUserInterface::DrawNetplay()
 	// only to the server that issued it (YAMPSettings). Said on the page because it decides what
 	// Connect sends, and because "why is my Twitch login not working on np.rpcs3.net" has exactly
 	// one answer.
-	if (m_netTwitchToken[0] != '\0')
+	//
+	// Asked through net::TwitchLoginFor, the same decision Connect makes, which includes the
+	// login m2-hle2 shares: a page that looked only at YAMP's own copy said "no Twitch sign-in"
+	// and then Connect offered the shared one anyway.
+	const net::SavedTwitch savedTwitch = { m_netTwitchToken, m_netTwitchNpid, m_netTwitchServer };
+	const net::TwitchSource twitchSource = net::TwitchLoginFor(m_netServer, m_netNpid, &savedTwitch);
+	if (twitchSource != net::TwitchSource::None || m_netTwitchToken[0] != '\0')
 	{
 		ImGui::PushTextWrapPos();
-		if (net::TwitchTokenIsFor(m_netTwitchServer, m_netTwitchNpid, m_netServer, m_netNpid))
+		if (twitchSource == net::TwitchSource::Shared)
+		{
+			ImGui::TextDisabled("Signed in with Twitch as %s on %s, with the login shared with "
+				"m2-hle2 on this machine, so the password can stay empty.", m_netNpid, m_netServer);
+		}
+		else if (twitchSource == net::TwitchSource::Saved)
 		{
 			ImGui::TextDisabled("Signed in with Twitch as %s on %s, so the password can stay "
 				"empty.", m_netTwitchNpid, m_netTwitchServer);
@@ -299,10 +310,25 @@ void YAMPUserInterface::DrawNetplay()
 				m_netTwitchServer);
 		}
 		ImGui::PopTextWrapPos();
-		if (!accountLocked && ImGui::Button("Forget the Twitch sign-in"))
+		if (!accountLocked)
 		{
-			m_netTwitchToken[0] = m_netTwitchNpid[0] = m_netTwitchServer[0] = '\0';
-			m_pageModified = true;
+			if (ImGui::Button("Forget the Twitch sign-in"))
+			{
+				// Both copies, or Forget would not stop the login it names: the shared one is
+				// offered first. Only the shared token for THIS server and account is touched.
+				if (twitchSource != net::TwitchSource::None)
+				{
+					net::ForgetSharedTwitchLogin(m_netServer, m_netNpid);
+				}
+				m_netTwitchToken[0] = m_netTwitchNpid[0] = m_netTwitchServer[0] = '\0';
+				m_pageModified = true;
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Also removes it from the login m2-hle2 shares on this machine, so\n"
+					"m2-hle2 has to sign in with Twitch again as well. The saved settings\n"
+					"change when you press Apply; the shared login goes at once.");
+			}
 		}
 	}
 
@@ -358,7 +384,8 @@ void YAMPUserInterface::DrawNetplay()
 			"yampnet.log) - that is the value to paste here.\n"
 			"\n"
 			"np.rpcs3.net is self-signed too, but a current netplay plugin has its pin built in,\n"
-			"so it needs nothing here either.\n"
+			"so it needs nothing here either. An older plugin needs it pasted:\n"
+			"7028AD2117139EEA9E1FE14713D0CB4FCD8815B2F39AB4E10FF6725A38AFD155\n"
 			"\n"
 			"Do not pin a real certificate: it is reissued every renewal and the pin would then\n"
 			"start rejecting the server.");
@@ -757,9 +784,9 @@ void YAMPUserInterface::DrawNetplay()
 	{
 		// The token is NOT part of this test: empty is its normal value, and a server that wants
 		// one says so when it refuses the login.
-		// A saved Twitch sign-in stands in for the password, but only on its own server.
-		const bool twitchHere = m_netTwitchToken[0] != '\0'
-			&& net::TwitchTokenIsFor(m_netTwitchServer, m_netTwitchNpid, m_netServer, m_netNpid);
+		// A Twitch sign-in stands in for the password, but only on its own server - asked the same
+		// way Connect decides, shared login included.
+		const bool twitchHere = twitchSource != net::TwitchSource::None;
 		const bool ready = m_netServer[0] != '\0' && m_netNpid[0] != '\0'
 			&& (m_netPassword[0] != '\0' || twitchHere);
 		if (ImGuiCustom::ButtonToggleable("Connect", ready))
@@ -767,9 +794,8 @@ void YAMPUserInterface::DrawNetplay()
 			// Deliberately the page's live buffers rather than the saved settings: connecting is
 			// how you find out a credential is wrong, and having to Apply first would make fixing
 			// it a two-step dance.
-			const net::SavedTwitch twitch = { m_netTwitchToken, m_netTwitchNpid, m_netTwitchServer };
 			net::Connect(m_netServer, m_netNpid, m_netPassword, m_netToken, m_netFingerprint,
-				m_netComId, &twitch);
+				m_netComId, &savedTwitch);
 		}
 		if (!ready && ImGui::IsItemHovered())
 		{

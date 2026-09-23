@@ -183,6 +183,16 @@ namespace net
     };
     bool Connect(const char* server, const char* npid, const char* password, const char* token,
                  const char* fingerprint, const char* comId, const SavedTwitch* twitch = nullptr);
+
+    // Which Twitch login a Connect to `server` as `npid` would offer: the one m2-hle2 shares
+    // (SharedLogin.h), which is preferred because it is normally the only live one, then YAMP's
+    // own saved one. Decided by the same code Connect uses, so the page cannot disagree with it.
+    // Cheap enough to call every frame (the shared file is re-read at most twice a second).
+    enum class TwitchSource { None, Shared, Saved };
+    TwitchSource TwitchLoginFor(const char* server, const char* npid, const SavedTwitch* saved);
+    // Removes the shared file's token for `server` and `npid`, which signs m2-hle2 on this
+    // machine out too. False if the file could not be rewritten.
+    bool ForgetSharedTwitchLogin(const char* server, const char* npid);
     void Disconnect();
 
     // ---- Account creation -------------------------------------------------------------------

@@ -35,6 +35,11 @@ namespace net
     // Records a token the Twitch flow just issued. Returns false if the file could not be written.
     bool StoreSharedTwitchToken(const char* server, const char* npid, const char* token);
 
+    // Removes the file's token if it is the one `server` would be offered for `npid`, leaving
+    // every other line alone. m2-hle2 on this machine then has to sign in again. Returns false
+    // only if the file could not be rewritten.
+    bool ForgetSharedTwitchToken(const char* server, const char* npid);
+
     // Where the file is, for log lines.
     std::wstring SharedLoginPath();
 
