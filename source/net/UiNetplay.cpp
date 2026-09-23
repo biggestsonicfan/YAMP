@@ -320,12 +320,23 @@ void YAMPUserInterface::DrawNetplay()
 				{
 					net::ForgetSharedTwitchLogin(m_netServer, m_netNpid);
 				}
-				m_netTwitchToken[0] = m_netTwitchNpid[0] = m_netTwitchServer[0] = '\0';
-				m_pageModified = true;
+				// YAMP's own copy goes when it is the one the line above describes: the login for
+				// this server and account, or - with none here - the saved one on another server.
+				// A saved token for another server stays while the line is about the shared one.
+				const bool ownIsHere = net::TwitchTokenIsFor(m_netTwitchServer, m_netTwitchNpid,
+					m_netServer, m_netNpid);
+				if (ownIsHere || twitchSource == net::TwitchSource::None)
+				{
+					m_netTwitchToken[0] = m_netTwitchNpid[0] = m_netTwitchServer[0] = '\0';
+					m_pageModified = true;
+				}
 			}
 			if (ImGui::IsItemHovered())
 			{
-				ImGui::SetTooltip("Also removes it from the login m2-hle2 shares on this machine, so\n"
+				ImGui::SetTooltip("Forgets it ON THIS MACHINE only. The server keeps accepting the\n"
+					"token until the next Twitch sign-in, anywhere, replaces it.\n"
+					"\n"
+					"Also removes it from the login m2-hle2 shares on this machine, so\n"
 					"m2-hle2 has to sign in with Twitch again as well. The saved settings\n"
 					"change when you press Apply; the shared login goes at once.");
 			}
