@@ -91,6 +91,7 @@ bool m2ftg::SetTextureBudgetDeterministic(bool enable)
 			++patched;
 		}
 	}
+	return patched != 0;
 }
 
 namespace
