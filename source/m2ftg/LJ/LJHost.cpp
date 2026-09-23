@@ -104,7 +104,6 @@ namespace m2ftg
             Import(gs::vb_create, ImportSymbol::VB_CREATE);
             Import(gs::ib_create, ImportSymbol::IB_CREATE);
 			Import(sl::kernel_calloc_internal, ImportSymbol::SL_KERNEL_CALLOC);
-			//Import(sl::memset, ImportSymbol::MEMSET);
         }
 
         static void PrefillVariables(const Imports& symbols, const RenderWindow& window)
@@ -458,7 +457,6 @@ namespace m2ftg
                             Bench::Anchor();
                         }
                     }
-                    DebugLog("[%s::Run] GameLoop iter\n", gGeneral.GetGameTag());
                     if (!GameLoop(module_main, window)) { DebugLog("[%s::Run] GameLoop returned false\n", gGeneral.GetGameTag()); break; }
                     if (frameLimit != 0 && ++framesRun >= frameLimit)
                     {

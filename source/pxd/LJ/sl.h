@@ -372,8 +372,6 @@ namespace pxd
 				HANDLE   h;     // OS event handle (at +8)
 			};
 
-			void heap_free(void* p);
-
 		};
 
 		// Host-side sl-context setup: handle/file-handle pools, file + archive access objects and

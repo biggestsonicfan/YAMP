@@ -262,17 +262,13 @@ namespace m2ftg
 		//
 		// The hook INDICES below are per-game - the two tables happen to agree on 1-7 but not
 		// on `rand`, which is hook 33 in StF and 43 in FV - so the site list lives in the
-		// GameHooks descriptor and is reached through Convention().
+		// GameHooks descriptor (GameHooks::convention), which ApplyRetarget reads.
 		struct ConventionSite
 		{
 			const char* symbol;
 			uint8_t hook;
 			uint8_t byteOffset;
 		};
-		// The running game's convention sites. Returns null and sets count to 0 when the game
-		// has no hook table.
-		const ConventionSite* Convention(size_t& count);
-
 		// Rewrites the installer's table. Must be called with the game DLL loaded and BEFORE
 		// module_start, which is what runs the installer. No-op unless the game is StF.
 		// Returns the number of records changed.

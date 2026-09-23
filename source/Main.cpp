@@ -101,7 +101,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
     const bool runMR = bootId == YAMPGeneral::GameId::MR;
     const bool runVF5FS_LJ = bootId == YAMPGeneral::GameId::VF5FS_LJ;
     const bool runVF5FS_YLAD = bootId == YAMPGeneral::GameId::VF5FS_YLAD;
-    const bool runVF5FS = bootId == YAMPGeneral::GameId::VF5FS;
     const bool runStF = bootId == YAMPGeneral::GameId::StF;
     const bool runStF_GAIDEN = bootId == YAMPGeneral::GameId::StF_GAIDEN;
     // The five games the Lost Judgment m2ftg host runs, INCLUDING the two Like a Dragon Gaiden
@@ -199,8 +198,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
 
         gGeneral.SetDLLName(gGeneral.GetArcadeGameName());
         gGeneral.SetDLLTimestamp(0);
-        gGeneral.SetDataPath();
-        gGeneral.LoadSettings();
+        pre3::PreInitialize();
 
         if (!dll) {
             // LoadDLL already told the user what is missing; nothing to run without it.
@@ -274,8 +272,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nShowCmd)
         // Always seed settings so UI has something to read
         gGeneral.SetDLLName(gGeneral.GetArcadeGameName());
         gGeneral.SetDLLTimestamp(0);
-        gGeneral.SetDataPath();
-        gGeneral.LoadSettings();
+        m2ftg::PreInitialize();
 
         if (!stfDll) {
             // LoadDLL already told the user what is missing; nothing to run without it.

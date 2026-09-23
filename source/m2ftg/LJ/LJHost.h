@@ -149,7 +149,7 @@ namespace m2ftg
 
     // ---- Host entry points (DLL-based path, DirectX 12 game) ------------------------------
     HMODULE LoadDLL();
-    void PreInitialize();                 // sets DataPath/loads settings (kept for parity)
+    void PreInitialize();                 // sets DataPath/loads settings
     void Run(RenderWindow& window);       // run via the StF/FV game DLL
     bool GameLoop(module_func_t func, RenderWindow& window);
 
