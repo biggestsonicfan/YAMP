@@ -98,6 +98,11 @@ workspace "*"
 	-- offsets. Muting it keeps the warning list small enough that a real warning is visible.
 	disablewarnings { "4324" }
 
+	-- C4715 "not all control paths return a value" is always a bug, and it has already shipped
+	-- once unnoticed in the noise of a full build: SetTextureBudgetDeterministic fell off its end
+	-- for weeks and netplay's round start gated on the garbage it returned. Make it stop the build.
+	fatalwarnings { "4715" }
+
 	-- Automated defines for resources
 	defines { "rsc_Extension=\"%{prj.targetextension}\"",
 			"rsc_Name=\"%{prj.name}\"" }

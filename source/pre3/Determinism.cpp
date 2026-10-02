@@ -409,13 +409,6 @@ namespace pre3
 		return true;
 	}
 
-	bool BoardResetPending()
-	{
-		uint8_t* machine = Machine::Object();
-		return machine != nullptr
-			&& (*(machine + Machine::REQUEST) & Machine::REQ_RESTORE_PRELOAD) != 0;
-	}
-
 	bool SaveResetSnapshot()
 	{
 		uint8_t* machine = Machine::Running();

@@ -96,10 +96,6 @@ namespace m2ftg
 				{ S::SL_FILE_HANDLE_DESTROY, get_module_pattern(dll, "48 85 C9 0F 84 ? ? ? ? 57") },
 				{ S::ARCHIVE_LOCK_WLOCK,   immediate(get_module_pattern(dll, "E8 ? ? ? ? 8B 43 10 83 E8 01", 1)) }, // 180067740
 				{ S::ARCHIVE_LOCK_WUNLOCK, get_module_pattern(dll, "8B 01 89 44 24 08 8B 44 24 08 FF C8 0F B7 D0") }, // 180067380
-				// M2FTGAppModule per-frame render-system submit + live-execute_info global (same
-				// protocol as StF: module_main `CMP RCX,0x1760 / JNZ / MOV [rip],RDX`).
-				{ S::STF_FRAME_SUBMIT, get_module_pattern(dll, "48 83 EC 28 E8 ? ? ? ? 48 83 C4 28 E9 ? ? ? ?") }, // 180037e60
-				{ S::STF_RENDER_EXECINFO, immediate(get_module_pattern(dll, "48 81 F9 60 17 00 00 0F 85 ? ? ? ? 48 89 15 ? ? ? ?", 16)) }, // 180627400
 			};
 
 			// Frame step (0x180051030); the payload is the CALL to the per-frame I/O refresh

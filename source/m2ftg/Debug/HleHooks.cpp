@@ -322,13 +322,6 @@ const uint64_t* m2ftg::HleHooks::DefaultDisableMask()
 	return game != nullptr ? game->defaultDisable : NO_MASK;
 }
 
-const m2ftg::HleHooks::ConventionSite* m2ftg::HleHooks::Convention(size_t& count)
-{
-	const GameHooks* game = CurrentHooks();
-	count = game != nullptr ? game->conventionCount : 0;
-	return game != nullptr ? game->convention : nullptr;
-}
-
 const char* m2ftg::HleHooks::KindName(Kind kind)
 {
 	switch (kind)

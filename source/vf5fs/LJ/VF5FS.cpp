@@ -463,9 +463,8 @@ namespace vf5fs
 
 			// TODO(submit): on the m2ftg LJ path module_main only RECORDS — the host must also drive
 			// the engine's per-frame submit and upload-buffer recycle (SubmitModuleFrameListNow /
-			// AdvanceFrameStampNow, reached through the STF_FRAME_SUBMIT + STF_RENDER_EXECINFO
-			// symbols). Neither of m2ftg's patterns for those matches this DLL (0 hits in the
-			// 2026-07-29 scan), so VF5FS's equivalent submit entry point still has to be found; the
+			// AdvanceFrameStampNow). The m2ftg module's own submit entry point has no match in this
+			// DLL (0 hits in the 2026-07-29 scan), so VF5FS's equivalent submit entry point still has to be found; the
 			// frame will very likely stay black until it is.
 
 			cgs_tex* display_tex = gs::sm_context->handle_tex.get(execute_info.output_texid);
