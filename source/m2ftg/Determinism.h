@@ -24,6 +24,13 @@ namespace m2ftg
 		// emulator differs between machines. No-op unless the game is StF and the board has booted.
 		void UpdateDamageAssignment();
 
+		// Holds a netplay room's StF match rules (net::StfRules: rounds, time, game type) in
+		// emulated RAM, over the cabinet's own GAME ASSIGNMENTS. Same timing rules as
+		// UpdateDamageAssignment, and called right after it. No-op unless the game is StF, the
+		// board has booted and the session's room published rules. The fourth rule, secret
+		// characters, is a hook mask instead (m2ftg::HleHooks::Update).
+		void UpdateRoomRules();
+
 		// True once the emulated board has finished booting (the DLL's own phase dword
 		// +0x6B9300 reaches 2, which only happens after module_main has run for a while).
 		//

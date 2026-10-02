@@ -181,7 +181,9 @@ from nearer the plugin's date.
 Matchmaking runs over **RPCN**, the community server for PlayStation Network emulation: a TLS
 session for login and the room list, a UDP address-discovery exchange, and then **direct
 peer-to-peer game traffic that never passes through the server**. There is a lobby with a room
-browser, per-game room settings owned by the host, passworded rooms, and join-by-ID.
+browser, per-game room settings owned by the host, passworded rooms, and join-by-ID. Sonic the
+Fighters rooms also carry the PS3 port's PLAYER MATCH rules (rounds, time, game type, secret
+characters), applied on both cabinets for the session, and the browser filters by them.
 
 Two different netcodes, chosen per game by what the board actually needs:
 

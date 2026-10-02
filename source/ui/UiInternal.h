@@ -175,6 +175,17 @@ inline const char* const SRC2_MODE_NAMES[] =
 inline const char* const SRC2_MOTOR_NAMES[] = { "50%", "60%", "70%", "80%", "90%", "100%" };
 inline const char* const SRC2_RANKING_NAMES[] = { "Normal", "Campaign", "Internet" };
 
+// The words for Sonic the Fighters' room rules (net::StfRules), the PS3 PLAYER MATCH lists:
+// indexed by the published 2-bit value, so every table has exactly four entries.
+inline const char* const STF_ROUNDS_NAMES[] = { "2", "3", "4", "5" };
+inline const char* const STF_TIME_NAMES[] = { "10 s", "30 s", "60 s", "99 s" };
+inline const char* const STF_TYPE_NAMES[] = { "A", "B", "C", "D" };
+// The search filter's lists: "Any" first, then the same values shifted up by one.
+inline const char* const STF_ROUNDS_FILTER[] = { "Any", "2", "3", "4", "5" };
+inline const char* const STF_TIME_FILTER[] = { "Any", "10 s", "30 s", "60 s", "99 s" };
+inline const char* const STF_TYPE_FILTER[] = { "Any", "A", "B", "C", "D" };
+inline const char* const STF_SECRET_FILTER[] = { "Any", "Off", "On" };
+
 // VS mode is an m2ftg config byte all three of those games read at boot. The Model 3 round-start
 // reset restores a whole saved machine over the top of it, so publishing it there would claim an
 // agreement that decides nothing.

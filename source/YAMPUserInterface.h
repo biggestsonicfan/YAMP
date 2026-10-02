@@ -171,6 +171,18 @@ private:
 	// truncated on the wire, so the field says so rather than silently losing characters.
 	char m_netRoomPassword[9] = {};
 	unsigned long long m_netSelectedRoom = 0;
+	// Sonic the Fighters' room rules for the next room hosted, starting at the PS3 PLAYER
+	// MATCH defaults (3 rounds, 30 s, type A, secret off). Indices into the STF_*_NAMES lists.
+	int m_netStfRounds = 1;
+	int m_netStfTime = 1;
+	int m_netStfType = 0;
+	bool m_netStfSecret = false;
+	// The room browser's search filter: 0 is "Any", otherwise the rule's index plus one
+	// (secret: 1 off, 2 on).
+	int m_netStfFilterRounds = 0;
+	int m_netStfFilterTime = 0;
+	int m_netStfFilterType = 0;
+	int m_netStfFilterSecret = 0;
 
 	// Debug settings
 	bool m_dontApplyPatches = false;

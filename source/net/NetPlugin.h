@@ -125,6 +125,22 @@ namespace net
         unsigned char ranking = 0;       // 0..2  NORMAL / CAMPAIGN / INTERNET
     };
 
+    // Sonic the Fighters' room rules - the PS3 port's PLAYER MATCH rule menu (see the
+    // YAMPNET_ROOM_STF_* fields). Values are the menu's row indices. `present` is false for a room
+    // whose host predates the rules, or for any other game. Same three uses as Src2Assignments:
+    // browser, in-room view, host publish.
+    struct StfRules
+    {
+        bool present = false;
+        unsigned char rounds = 1;        // 0..3  2 / 3 / 4 / 5 rounds to win
+        unsigned char time = 1;          // 0..3  10 / 30 / 60 / 99 seconds
+        unsigned char type = 0;          // 0..3  Type A / B / C / D
+        bool secret = false;             // secret characters selectable
+    };
+    // The PS3 menu's own labels for those indices.
+    inline constexpr unsigned char STF_RULE_ROUNDS[4] = { 2, 3, 4, 5 };
+    inline constexpr unsigned char STF_RULE_SECONDS[4] = { 10, 30, 60, 99 };
+
     // Everything the lobby renders, snapshotted so the UI never touches the plugin ABI directly.
     struct Status
     {
@@ -162,6 +178,8 @@ namespace net
         // SRC2 only: the GAME ASSIGNMENTS the current room was created with, so the in-room view
         // can state them for both players.
         Src2Assignments src2;
+        // StF only: the rules the current room is played under.
+        StfRules stf_rules;
     };
     Status GetStatus();
 
@@ -231,9 +249,11 @@ namespace net
     // `realDamage` is this machine's DAMAGE dip switch, published as the room's. Everyone who
     // joins plays under it - see EffectiveRealDamage. `src2` is the linked-cabinet equivalent:
     // the host's live GAME ASSIGNMENTS, published so the browser can list what the race IS.
-    // Null (or present == false) publishes nothing, which is every game but SRC2.
+    // Null (or present == false) publishes nothing, which is every game but SRC2. `stfRules` is
+    // the same for Sonic the Fighters' PLAYER MATCH rules.
     bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
-                  bool pre3VsStart, const Src2Assignments* src2 = nullptr);
+                  bool pre3VsStart, const Src2Assignments* src2 = nullptr,
+                  const StfRules* stfRules = nullptr);
     bool JoinRoom(unsigned long long roomId, const char* password);
 
     // One row of the room browser, flattened so the UI never sees the plugin's types.
@@ -257,6 +277,8 @@ namespace net
         // The host's SRC2 GAME ASSIGNMENTS, shown for the same reason as every field above: they
         // are how that race plays, not a preference the joiner keeps.
         Src2Assignments src2;
+        // The host's StF room rules, shown (and searched on) for the same reason.
+        StfRules stf_rules;
     };
     // Kicks off a search (asynchronous - the list refreshes when the reply lands).
     bool RefreshRooms();
@@ -296,6 +318,10 @@ namespace net
     // logic and for a stronger reason than any of them: the two peers must restore the SAME state,
     // or the round starts from two different boards and every later frame is meaningless.
     bool EffectivePre3VsStart(bool localSetting);
+    // The StF room rules the emulator must run under this frame: true, with `out` filled, while a
+    // session is up in a room that published them. False otherwise - outside netplay, and in a
+    // room from an older build - which means "leave the cabinet's own settings alone".
+    bool EffectiveStfRules(StfRules& out);
 
     // Called by the host loop when a round ends because the other player went away. Latches the
     // reason for the dialog; harmless to call repeatedly.

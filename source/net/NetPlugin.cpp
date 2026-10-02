@@ -487,6 +487,36 @@ namespace net
         // because the user disconnected" without asking the plugin.
         bool s_uiStarted = false;
 
+        // StF's room rules in and out of the room's game_flags (YAMPNET_ROOM_STF_*). Masked on the
+        // way in for the same reason as the SRC2 fields: a stray high bit would land in another
+        // field. Every 2-bit field has exactly four values, so nothing read back is out of range.
+        uint32_t EncodeStfRules(const StfRules& r)
+        {
+            if (!r.present)
+            {
+                return 0;
+            }
+            return YAMPNET_ROOM_STF_PRESENT
+                | (uint32_t(r.rounds & YAMPNET_ROOM_STF_ROUNDS_MASK) << YAMPNET_ROOM_STF_ROUNDS_SHIFT)
+                | (uint32_t(r.time & YAMPNET_ROOM_STF_TIME_MASK) << YAMPNET_ROOM_STF_TIME_SHIFT)
+                | (uint32_t(r.type & YAMPNET_ROOM_STF_TYPE_MASK) << YAMPNET_ROOM_STF_TYPE_SHIFT)
+                | (r.secret ? YAMPNET_ROOM_STF_SECRET : 0u);
+        }
+
+        StfRules DecodeStfRules(uint32_t flags)
+        {
+            StfRules r = {};
+            r.present = (flags & YAMPNET_ROOM_STF_PRESENT) != 0;
+            if (r.present)
+            {
+                r.rounds = uint8_t((flags >> YAMPNET_ROOM_STF_ROUNDS_SHIFT) & YAMPNET_ROOM_STF_ROUNDS_MASK);
+                r.time = uint8_t((flags >> YAMPNET_ROOM_STF_TIME_SHIFT) & YAMPNET_ROOM_STF_TIME_MASK);
+                r.type = uint8_t((flags >> YAMPNET_ROOM_STF_TYPE_SHIFT) & YAMPNET_ROOM_STF_TYPE_MASK);
+                r.secret = (flags & YAMPNET_ROOM_STF_SECRET) != 0;
+            }
+            return r;
+        }
+
         void SetActionError(const char* fmt, ...)
         {
             va_list args;
@@ -617,6 +647,7 @@ namespace net
                 st.src2.ranking = uint8_t(
                     (flags >> YAMPNET_ROOM_SRC2_RANKING_SHIFT) & YAMPNET_ROOM_SRC2_RANKING_MASK);
             }
+            st.stf_rules = DecodeStfRules(flags);
         }
 
         uint32_t dFrame = 0, dLocal = 0, dRemote = 0;
@@ -843,7 +874,7 @@ namespace net
     }
 
     bool HostRoom(const char* password, bool realDamage, bool vf2Version20, bool vsMode,
-                  bool pre3VsStart, const Src2Assignments* src2)
+                  bool pre3VsStart, const Src2Assignments* src2, const StfRules* stfRules)
     {
         if (!UiMayAct())
             return false;
@@ -875,6 +906,10 @@ namespace net
                     << YAMPNET_ROOM_SRC2_MOTOR_SHIFT)
                 | (uint32_t(src2->ranking & YAMPNET_ROOM_SRC2_RANKING_MASK)
                     << YAMPNET_ROOM_SRC2_RANKING_SHIFT);
+        }
+        if (stfRules != nullptr)
+        {
+            rcfg.game_flags |= EncodeStfRules(*stfRules);
         }
 
         if (s_api->create_room(s_session, &rcfg) != YAMPNET_OK)
@@ -965,6 +1000,7 @@ namespace net
                 out[i].src2.ranking = uint8_t(
                     (flags >> YAMPNET_ROOM_SRC2_RANKING_SHIFT) & YAMPNET_ROOM_SRC2_RANKING_MASK);
             }
+            out[i].stf_rules = DecodeStfRules(flags);
         }
         return n;
     }
@@ -1006,6 +1042,19 @@ namespace net
             return localSetting;
         }
         return (s_api->get_room_flags(s_session) & YAMPNET_ROOM_FLAG_PRE3_VS_START) != 0;
+    }
+
+    bool EffectiveStfRules(StfRules& out)
+    {
+        out = {};
+        if (!SessionInProgress())
+        {
+            return false;
+        }
+        // From the plugin every time, like the flags above: a guest learns the room's flags only
+        // when the join reply lands.
+        out = DecodeStfRules(s_api->get_room_flags(s_session));
+        return out.present;
     }
 
     void LeaveRoom()

@@ -683,11 +683,22 @@ void YAMPUserInterface::DrawNetplay()
 				src2.motorPower = live.motorPower;
 				src2.ranking = live.ranking;
 			}
+			// StF's PLAYER MATCH rules, from the rows below the button. Only StF has them: any
+			// other game publishes none, and its rooms keep the cabinet's own settings.
+			net::StfRules stfRules = {};
+			if (CurrentRoomSetting() == RoomSetting::Damage)
+			{
+				stfRules.present = true;
+				stfRules.rounds = static_cast<unsigned char>(m_netStfRounds);
+				stfRules.time = static_cast<unsigned char>(m_netStfTime);
+				stfRules.type = static_cast<unsigned char>(m_netStfType);
+				stfRules.secret = m_netStfSecret;
+			}
 			net::HostRoom(m_netRoomPassword, set != nullptr && set->m_m2RealDamage,
 				set != nullptr && set->m_vf2Version20,
 				set != nullptr && set->m_m2VersusMode,
 				set != nullptr && set->m_netPre3VsStart,
-				&src2);
+				&src2, &stfRules);
 		}
 		if (ImGui::IsItemHovered())
 		{
@@ -696,6 +707,12 @@ void YAMPUserInterface::DrawNetplay()
 				ImGui::SetTooltip("The room is created with this cabinet's current GAME ASSIGNMENTS\n"
 					"(difficulty, game mode, motor power, cabinet type, ranking mode) so the room\n"
 					"list shows what the race is. Set them in the service menu before hosting.");
+			}
+			else if (CurrentRoomSetting() == RoomSetting::Damage)
+			{
+				ImGui::SetTooltip("The room is created with your current Damage setting (Game page)\n"
+					"and the match rules below, and everyone who joins plays under them.\n"
+					"They cannot be changed once the room exists.");
 			}
 			else
 			{
@@ -713,6 +730,40 @@ void YAMPUserInterface::DrawNetplay()
 
 		ImGui::PopItemWidth();
 
+		// StF's PLAYER MATCH rules, the PS3 port's room-creation screen. The room carries them and
+		// both cabinets apply them for the whole session (m2ftg::UpdateRoomRules), over whatever
+		// each one's own service menu says.
+		if (CurrentRoomSetting() == RoomSetting::Damage)
+		{
+			ImGui::PushItemWidth(80.0f);
+			ImGui::Combo("Rounds", &m_netStfRounds, STF_ROUNDS_NAMES, IM_ARRAYSIZE(STF_ROUNDS_NAMES));
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Rounds to win a match (MATCH COUNT).");
+			}
+			ImGui::SameLine();
+			ImGui::Combo("Time", &m_netStfTime, STF_TIME_NAMES, IM_ARRAYSIZE(STF_TIME_NAMES));
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Round timer.");
+			}
+			ImGui::SameLine();
+			ImGui::Combo("Game type", &m_netStfType, STF_TYPE_NAMES, IM_ARRAYSIZE(STF_TYPE_NAMES));
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("A: normal.  B: no hyper (power-up) mode.\n"
+					"C: barrier resets every round.  D: both B and C.");
+			}
+			ImGui::PopItemWidth();
+			ImGui::SameLine();
+			ImGui::Checkbox("Secret characters", &m_netStfSecret);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Lets both players pick the hidden characters (Honey, Metal Sonic,\n"
+					"Eggman) by holding Start. Off, they cannot be picked.");
+			}
+		}
+
 		// ---- Room browser --------------------------------------------------------------------
 		ImGui::NewLine();
 		if (ImGui::Button("Refresh room list"))
@@ -723,8 +774,50 @@ void YAMPUserInterface::DrawNetplay()
 		ImGui::SameLine();
 		ImGui::TextDisabled("Rooms are listed by the account hosting them.");
 
+		// StF's search filter, the PS3 CUSTOM MATCH screen's choices. Applied here to the listed
+		// rooms rather than sent to the server, which matches on no game_flags field. A room
+		// from an older build publishes no rules, so it only passes while every filter is Any.
+		const bool stfFilter = CurrentRoomSetting() == RoomSetting::Damage;
+		if (stfFilter)
+		{
+			ImGui::TextUnformatted("Search:");
+			ImGui::PushItemWidth(80.0f);
+			ImGui::SameLine();
+			ImGui::Combo("Rounds##filter", &m_netStfFilterRounds, STF_ROUNDS_FILTER,
+				IM_ARRAYSIZE(STF_ROUNDS_FILTER));
+			ImGui::SameLine();
+			ImGui::Combo("Time##filter", &m_netStfFilterTime, STF_TIME_FILTER,
+				IM_ARRAYSIZE(STF_TIME_FILTER));
+			ImGui::SameLine();
+			ImGui::Combo("Type##filter", &m_netStfFilterType, STF_TYPE_FILTER,
+				IM_ARRAYSIZE(STF_TYPE_FILTER));
+			ImGui::SameLine();
+			ImGui::Combo("Secret##filter", &m_netStfFilterSecret, STF_SECRET_FILTER,
+				IM_ARRAYSIZE(STF_SECRET_FILTER));
+			ImGui::PopItemWidth();
+		}
+		const auto passesFilter = [&](const net::RoomRow& room)
+		{
+			if (!stfFilter)
+			{
+				return true;
+			}
+			const net::StfRules& r = room.stf_rules;
+			const bool any = m_netStfFilterRounds == 0 && m_netStfFilterTime == 0
+				&& m_netStfFilterType == 0 && m_netStfFilterSecret == 0;
+			if (!r.present)
+			{
+				return any;
+			}
+			return (m_netStfFilterRounds == 0 || m_netStfFilterRounds == r.rounds + 1)
+				&& (m_netStfFilterTime == 0 || m_netStfFilterTime == r.time + 1)
+				&& (m_netStfFilterType == 0 || m_netStfFilterType == r.type + 1)
+				&& (m_netStfFilterSecret == 0 || m_netStfFilterSecret == (r.secret ? 2 : 1));
+		};
+
 		net::RoomRow rooms[16];
 		const unsigned int roomCount = net::GetRooms(rooms, static_cast<unsigned int>(std::size(rooms)));
+		unsigned int shownCount = 0;
 
 		// Only the columns this game actually has. A room publishes at most one per-game setting
 		// and not every game has one, so the table is built from CurrentRoomSetting rather than
@@ -732,8 +825,10 @@ void YAMPUserInterface::DrawNetplay()
 		// Damage column that nothing on either side reads.
 		const RoomSetting roomSetting = CurrentRoomSetting();
 		const bool showVs = RoomHasVsMode();
-		// SRC2 publishes five assignment fields where the other games publish one setting.
+		// SRC2 publishes five assignment fields, and StF its Damage plus four match rules, where
+		// the other games publish one setting.
 		const int settingColumns = roomSetting == RoomSetting::Src2Assign ? 5
+			: roomSetting == RoomSetting::Damage ? 5
 			: roomSetting != RoomSetting::None ? 1 : 0;
 		const int roomColumns = 4 + settingColumns + (showVs ? 1 : 0);
 
@@ -741,7 +836,8 @@ void YAMPUserInterface::DrawNetplay()
 		// column readable where the default sizing would squeeze them all illegible. ScrollX and
 		// stretch columns fight each other (a stretch column absorbs exactly the width the scroll
 		// exists to provide), so the Host column goes fixed on the wide table.
-		const bool wideTable = roomSetting == RoomSetting::Src2Assign;
+		const bool wideTable = roomSetting == RoomSetting::Src2Assign
+			|| roomSetting == RoomSetting::Damage;
 		if (ImGui::BeginTable("##rooms", roomColumns,
 			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
 				| (wideTable ? ImGuiTableFlags_ScrollX : 0),
@@ -760,6 +856,10 @@ void YAMPUserInterface::DrawNetplay()
 			{
 			case RoomSetting::Damage:
 				ImGui::TableSetupColumn("Damage", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				ImGui::TableSetupColumn("Rounds", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+				ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 45.0f);
+				ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+				ImGui::TableSetupColumn("Secret", ImGuiTableColumnFlags_WidthFixed, 50.0f);
 				break;
 			case RoomSetting::Vf2Version:
 				ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -787,6 +887,11 @@ void YAMPUserInterface::DrawNetplay()
 
 			for (unsigned int i = 0; i < roomCount; i++)
 			{
+				if (!passesFilter(rooms[i]))
+				{
+					continue;
+				}
+				shownCount++;
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
 				ImGui::PushID(static_cast<int>(i));
@@ -807,6 +912,28 @@ void YAMPUserInterface::DrawNetplay()
 				case RoomSetting::Damage:
 					ImGui::TableSetColumnIndex(col++);
 					ImGui::TextUnformatted(rooms[i].real_damage ? "Real" : "Normal");
+					// "?" for a room hosted by an older build, which publishes no rules: it plays
+					// under each cabinet's own settings.
+					if (rooms[i].stf_rules.present)
+					{
+						const net::StfRules& r = rooms[i].stf_rules;
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(STF_ROUNDS_NAMES[r.rounds & 3]);
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(STF_TIME_NAMES[r.time & 3]);
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(STF_TYPE_NAMES[r.type & 3]);
+						ImGui::TableSetColumnIndex(col++);
+						ImGui::TextUnformatted(r.secret ? "On" : "Off");
+					}
+					else
+					{
+						for (int field = 0; field < 4; field++)
+						{
+							ImGui::TableSetColumnIndex(col++);
+							ImGui::TextDisabled("?");
+						}
+					}
 					break;
 				case RoomSetting::Vf2Version:
 					// 2.0 and 2.1 are mechanically different games, not a tuning option.
@@ -879,6 +1006,10 @@ void YAMPUserInterface::DrawNetplay()
 		{
 			ImGui::TextDisabled("No rooms found. Press Refresh, or host one yourself.");
 		}
+		else if (shownCount == 0)
+		{
+			ImGui::TextDisabled("No room matches the search. Set a filter back to Any to see more.");
+		}
 
 		// Join by ID stays available: a room can be joined before it shows up in a search, and it
 		// is the fallback when someone simply gives you a number.
@@ -924,6 +1055,15 @@ void YAMPUserInterface::DrawNetplay()
 		{
 		case RoomSetting::Damage:
 			ImGui::Text("Damage: %s%s", status.real_damage ? "Real" : "Normal", bySetter);
+			// The match rules, applied over both cabinets' own settings for the whole session.
+			// Absent for a room hosted by an older build.
+			if (status.stf_rules.present)
+			{
+				const net::StfRules& r = status.stf_rules;
+				ImGui::Text("Rules: %s rounds, %s, type %s, secret characters %s%s",
+					STF_ROUNDS_NAMES[r.rounds & 3], STF_TIME_NAMES[r.time & 3],
+					STF_TYPE_NAMES[r.type & 3], r.secret ? "on" : "off", bySetter);
+			}
 			break;
 		case RoomSetting::Vf2Version:
 			ImGui::Text("Version: %s%s", status.vf2_version20 ? "2.0" : "2.1", bySetter);

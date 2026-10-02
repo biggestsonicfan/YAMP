@@ -636,6 +636,8 @@ namespace m2ftg
                 // instead, and a write that lands a frame earlier on one peer than the other is a
                 // divergence even when the value is identical.
                 UpdateDamageAssignment();
+                // The room's match rules, under the same once-per-emulated-frame constraint.
+                UpdateRoomRules();
 
                 // Bracket the DLL's render so the ResourceBarrier hook corrects StF's barrier
                 // StateBefore values (ping-pong RTs assume last-frame state; YAMP creates in

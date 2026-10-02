@@ -386,6 +386,36 @@ typedef struct yampnet_twitch_info
 #define YAMPNET_ROOM_SRC2_RANKING_SHIFT   14u  // 2 bits, 0..2
 #define YAMPNET_ROOM_SRC2_RANKING_MASK    0x3u
 #define YAMPNET_ROOM_SRC2_PRESENT         0x00010000u
+// Sonic the Fighters' ROOM RULES - the PS3 port's PLAYER MATCH rule menu (TaskMultiMenuRule,
+// NPUB30927), which a room is created with and a Custom Match searches on. Values are that
+// menu's own row indices, the same ones m2-hle2 uses (net/room.h match_rules_t):
+//
+//   ROUNDS  0..3  2 / 3 / 4 / 5 rounds to win   -> MATCH COUNT(VS), work RAM 0x59C341
+//   TIME    0..3  10 / 30 / 60 / 99 seconds     -> `time` 0x500090, and TIME 0x59C351 as the
+//                                                  time_vars index (0, 2, 5, 9)
+//   TYPE    0..3  Type A / B / C / D            -> flag byte 0x59C353: B = HYPER MODE OFF (0x40),
+//                                                  C = BARRIER RESET ON (0x08), D = both
+//   SECRET        secret characters selectable  -> the hidden-character HLE hooks stay installed
+//
+// These SHARE bits 4..16 with the SRC2 fields above, deliberately: a room is only ever seen by
+// the game it was made for, because every game has a lobby space of its own (its ComId), so an
+// StF peer never decodes an SRC2 room and the reverse. The PRESENT bit is StF's own all the same,
+// so a flag word that somehow carried both would still decode as one or the other, not as a mix.
+// It does the same job as SRC2's: a room from a build before the rules carries zero here, which
+// must read as "no rules published" rather than as 2 rounds / 10 seconds / Type A / no secrets.
+//
+// The PS3's other two rows are not here, on purpose. No. of players is the room's slot count
+// (yampnet_room_config::max_players) and a YAMP match is two players. Matching range (Worldwide /
+// Same Area) is a search filter on the PS3 account's country, which neither RPCN nor YAMP has -
+// every YAMP room is Worldwide, as m2-hle2's community rooms are.
+#define YAMPNET_ROOM_STF_ROUNDS_SHIFT     4u   // 2 bits, 0..3
+#define YAMPNET_ROOM_STF_ROUNDS_MASK      0x3u
+#define YAMPNET_ROOM_STF_TIME_SHIFT       6u   // 2 bits, 0..3
+#define YAMPNET_ROOM_STF_TIME_MASK        0x3u
+#define YAMPNET_ROOM_STF_TYPE_SHIFT       8u   // 2 bits, 0..3
+#define YAMPNET_ROOM_STF_TYPE_MASK        0x3u
+#define YAMPNET_ROOM_STF_SECRET           0x00000400u
+#define YAMPNET_ROOM_STF_PRESENT          0x00020000u
 // Adding a bit here needs no ABI bump and no plugin rebuild: the plugin carries game_flags
 // verbatim between the room and its peers and never interprets it. The SRC2 fields above lean on
 // exactly that property, and they stay well below the SCE-owned top nibbles.
