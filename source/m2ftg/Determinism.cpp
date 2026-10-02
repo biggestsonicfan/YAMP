@@ -295,6 +295,55 @@ void m2ftg::UpdateDamageAssignment()
 	}
 }
 
+void m2ftg::UpdateRoomRules()
+{
+	if (!gGeneral.IsSonicTheFighters())
+	{
+		return;
+	}
+	// Only while a session is up in a room that published rules. Outside one, nothing here is
+	// written and the cabinet's own service-menu values come back with its next reload.
+	net::StfRules rules;
+	if (!net::EffectiveStfRules(rules))
+	{
+		return;
+	}
+
+	uint8_t* base = ModuleBase();
+	if (base == nullptr || !BoardBooted(CurrentDw(), base))
+	{
+		return;
+	}
+
+	// The room carries list indices; these are the ROM's own values for them. TIME is an index
+	// into the ROM's time_vars {10,20,...,90,99}, of which the PS3 offers four.
+	static constexpr uint8_t TIME_INDEX[4] = { 0, 2, 5, 9 };
+	static constexpr uint8_t TYPE_BITS[4] = { 0x00, 0x40, 0x08, 0x48 };   // A, B, C, D
+	const uint32_t rounds = net::STF_RULE_ROUNDS[rules.rounds & 3];
+	const uint32_t timeIndex = TIME_INDEX[rules.time & 3];
+	const uint32_t seconds = net::STF_RULE_SECONDS[rules.time & 3];
+	const uint32_t typeBits = TYPE_BITS[rules.type & 3];
+
+	// The same contract as UpdateDamageAssignment: enforced every frame, written only when it
+	// differs, and each write touches only the bytes the rule owns.
+	const auto hold = [base](uint32_t address, uint32_t mask, uint32_t bits)
+	{
+		uint32_t value = 0;
+		if (!ReadEmulated32(base, address, value))
+		{
+			return;
+		}
+		const uint32_t wanted = (value & ~mask) | (bits & mask);
+		if (wanted != value)
+		{
+			WriteEmulated32(base, address, wanted);
+		}
+	};
+	hold(MATCH_COUNT_DWORD, MATCH_COUNT_MASK, rounds << 8);
+	hold(GAME_ASSIGN_FLAG_DWORD, TIME_INDEX_MASK | GAME_TYPE_MASK, (timeIndex << 8) | (typeBits << 24));
+	hold(ROUND_TIME_DWORD, ROUND_TIME_MASK, seconds);
+}
+
 // Writes one byte of the module's config block, but only after proving the block is where we
 // think it is.
 //

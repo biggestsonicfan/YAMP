@@ -450,6 +450,24 @@ void m2ftg::HleHooks::Update()
 	const bool netplayLocked = net::SessionInProgress();
 	const uint64_t* wanted = netplayLocked ? netplayMask : settings->m_stfHleDisableMask;
 
+	// A room with StF's "Secret character: Off" rule also drops the four hidden-character hooks.
+	// Still a value both peers agree on without a protocol: it is read from the room's own
+	// published flags, which every member has. With them restored the select screen is the
+	// ROM's own, which leaves the hidden characters' flag dormant: no Honey, Metal Sonic or Eggman.
+	uint64_t roomMask[2] = {};
+	net::StfRules rules;
+	if (netplayLocked && game == &GAME_STF && net::EffectiveStfRules(rules) && !rules.secret)
+	{
+		roomMask[0] = netplayMask[0];
+		roomMask[1] = netplayMask[1];
+		for (size_t hook : { HOOK_STF_HIDDEN_FLAG_P1, HOOK_STF_SLOT_LOOKUP_P1,
+			HOOK_STF_HIDDEN_FLAG_P2, HOOK_STF_SLOT_LOOKUP_P2 })
+		{
+			MaskSet(roomMask, hook, true);
+		}
+		wanted = roomMask;
+	}
+
 	// HANDLER-TAIL GAMES (Virtual On) rewrite the table's own handler pointers instead of the
 	// emulated ROM. Same contract - enforced every frame, so it survives the installer re-running
 	// at a board reset and needs no record of what was applied when - and the same netplay rule,

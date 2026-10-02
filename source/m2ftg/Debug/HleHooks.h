@@ -164,6 +164,14 @@ namespace m2ftg
 		inline constexpr size_t HOOK_STF_GAME_INT_TIME = 16;
 		inline constexpr size_t HOOK_STF_ATTRACT_TIMER = 17;
 
+		// StF's hidden-character select (char_add2_pass_p1/p2): the flag faked while Start is held
+		// and the substitute slot table, per player. Disabled during netplay in a room whose
+		// "Secret character" rule is Off (net::StfRules), on both peers alike.
+		inline constexpr size_t HOOK_STF_HIDDEN_FLAG_P1 = 35;
+		inline constexpr size_t HOOK_STF_SLOT_LOOKUP_P1 = 36;
+		inline constexpr size_t HOOK_STF_HIDDEN_FLAG_P2 = 37;
+		inline constexpr size_t HOOK_STF_SLOT_LOOKUP_P2 = 38;
+
 		// VIRTUAL ON SKIPS ITS WARNING SCREEN, and hook 5 is the whole of why.
 		//
 		// `Warning` (i960 0x3C40) is MainMode 0 - literally the first entry of the mainloop's mode

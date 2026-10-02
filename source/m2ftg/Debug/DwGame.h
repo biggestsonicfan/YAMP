@@ -161,6 +161,15 @@ namespace dwdbg
 	constexpr uintptr_t CONFIG_IS_VS_MODE = 0x0A;   // all three games: credited 2P versus boot
 	constexpr uint32_t GAME_ASSIGN_FLAG_DWORD = 0x59C350;   // holds 0x59C350..0x59C353
 	constexpr uint32_t DAMAGE_REAL_BIT = 0x80u << 24;       // byte +0x33, bit 0x80
+	// A netplay room's match rules (net::StfRules, m2ftg::UpdateRoomRules), through the same
+	// aligned dwords. The ROM re-reads MATCH COUNT(VS) and TIME from the block at the start of
+	// every game; `time` (seconds) is set from TIME only once at boot, so it is written as well.
+	constexpr uint32_t MATCH_COUNT_DWORD = 0x59C340;        // byte 0x59C341: rounds to win, 2..5
+	constexpr uint32_t MATCH_COUNT_MASK = 0xFFu << 8;
+	constexpr uint32_t TIME_INDEX_MASK = 0xFFu << 8;        // in GAME_ASSIGN_FLAG_DWORD: byte 0x59C351
+	constexpr uint32_t GAME_TYPE_MASK = 0x48u << 24;        // byte 0x59C353: 0x40 HYPER OFF, 0x08 BARRIER RESET
+	constexpr uint32_t ROUND_TIME_DWORD = 0x500090;         // `time`, seconds, low byte
+	constexpr uint32_t ROUND_TIME_MASK = 0xFFu;
 	// ROM symbol table: 800 records of {uint64_t addr; const char* name}, sorted ascending by
 	// addr, starting at 0x1742D0. Earlier passes misread it as {name, addr} records starting
 	// 8 bytes later at 0x1742D8, which pairs every name with the NEXT function's address and
